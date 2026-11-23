@@ -134,7 +134,8 @@ fn a_deleted_log_leaves_a_tombstone_and_answers_as_delivered_while_older_than_th
     assert_eq!((tomb["size"].as_f64(), tomb["side"].as_f64()), (Some(l0.len() as f64), Some(s0.len() as f64)));
     assert_eq!(tomb["sha256"], json!(util::sha256_hex(&l0)));
     assert_eq!((tomb["check"].as_str(), tomb["why"].as_str()), (Some("verified"), Some("owner")));
-    assert!(tomb["at"].as_f64().is_some() && tomb["end"].as_f64() == Some(at(0) + 60_000.0));
+    // (its sidecar has no end: the longest a log runs, ten minutes)
+    assert!(tomb["at"].as_f64().is_some() && tomb["end"].as_f64() == Some(at(0) + 600_000.0), "{tomb}");
     assert_eq!(t.record(KEY, &nm(0)).unwrap()["deleted"], true, "the record stays for the chain");
     // no footage at all: older than all of it, delivered
     let n0 = nm(0);
@@ -142,19 +143,35 @@ fn a_deleted_log_leaves_a_tombstone_and_answers_as_delivered_while_older_than_th
     let size = l0.len();
     assert_eq!(f[&n0], json!({ "state": "complete", "received": size, "length": size, "size": size, "check": "verified" }));
     assert_eq!(f[&side(&n0)], json!({ "state": "complete", "received": s0.len(), "length": s0.len(), "size": s0.len(), "check": "verified" }));
-    // footage kept from after it: delivered; from before it (its time still has footage): missing
-    *kept.lock().unwrap() = Kept::Since(at(5));
-    assert_eq!(ask(&logs, &[n0.clone()])[&n0]["check"], "verified");
-    *kept.lock().unwrap() = Kept::Since(at(1));
-    assert_eq!(ask(&logs, &[n0.clone()])[&n0], json!({ "state": "complete", "received": size, "length": size, "size": size, "check": "verified" }), "ended as the oldest clip starts");
-    *kept.lock().unwrap() = Kept::Since(at(0) + 30_000.0);
-    assert_eq!(ask(&logs, &[n0.clone(), side(&n0)]), json!({
-        n0.clone(): { "state": "missing", "received": 0, "length": null, "size": 0 },
-        side(&n0): { "state": "missing", "received": 0, "length": null, "size": 0 }
+    // the owner deleted it: delivered whatever footage is kept, or known
+    for k in [Kept::Since(at(5)), Kept::Since(at(0) + 30_000.0), Kept::Unknown] {
+        *kept.lock().unwrap() = k;
+        assert_eq!(ask(&logs, &[n0.clone()])[&n0], json!({ "state": "complete", "received": size, "length": size, "size": size, "check": "verified" }), "{k:?}");
+    }
+    // one an automatic rule deleted ("not linked to footage") goes by the footage kept, with
+    // rule "old"'s hour of margin: footage kept from an hour after it ended: delivered; from
+    // less than that (its time may still have footage): missing
+    *kept.lock().unwrap() = Kept::Nothing;
+    let (l2, s2) = b.log(&src, &nm(2), b"log two, not linked");
+    send(&logs, &nm(2), &l2).unwrap();
+    send(&logs, &side(&nm(2)), &s2).unwrap();
+    t.check(KEY, &nm(2));
+    logs.delete_log(&nm(2), "unlinked").unwrap();
+    let n2 = nm(2);
+    let size2 = l2.len();
+    let end2 = at(2) + 600_000.0;
+    *kept.lock().unwrap() = Kept::Since(end2 + 3_600_000.0 + 60_000.0);
+    assert_eq!(ask(&logs, &[n2.clone()])[&n2]["check"], "verified");
+    *kept.lock().unwrap() = Kept::Since(end2 + 3_600_000.0);
+    assert_eq!(ask(&logs, &[n2.clone()])[&n2], json!({ "state": "complete", "received": size2, "length": size2, "size": size2, "check": "verified" }), "ended an hour before the oldest clip starts");
+    *kept.lock().unwrap() = Kept::Since(end2 + 3_600_000.0 - 1.0);
+    assert_eq!(ask(&logs, &[n2.clone(), side(&n2)]), json!({
+        n2.clone(): { "state": "missing", "received": 0, "length": null, "size": 0 },
+        side(&n2): { "state": "missing", "received": 0, "length": null, "size": 0 }
     }));
     // the footage not known now (the share away): kept here, ask again
     *kept.lock().unwrap() = Kept::Unknown;
-    assert_eq!(ask(&logs, &[n0.clone()])[&n0], json!({ "state": "complete", "received": size, "length": size, "size": size, "check": "pending" }));
+    assert_eq!(ask(&logs, &[n2.clone()])[&n2], json!({ "state": "complete", "received": size2, "length": size2, "size": size2, "check": "pending" }));
     // a log that vanished without being deleted here (a crash, a lost disk): no tombstone
     *kept.lock().unwrap() = Kept::Nothing;
     let (l1, s1) = b.log(&src, &nm(1), b"log one, lost");
@@ -211,7 +228,10 @@ fn tombstones_are_derived_once_from_the_deleted_marks_of_trust_json() {
     // 2: gone without being deleted here (a lost disk); 3: still here
     std::fs::remove_file(dir.join(KEY).join(nm(2))).unwrap();
     std::fs::remove_file(dir.join(KEY).join(side(&nm(2)))).unwrap();
-    assert_eq!(ask(&logs, &[nm(0)])[&nm(0)]["state"], "missing", "before: missing");
+    // until the key's tombstones are worked out: not missing (the bridge would send it again
+    // and the copy would be kept), ask again
+    assert_eq!(ask(&logs, &[nm(0)])[&nm(0)], json!({ "state": "complete", "received": 5, "length": 5, "size": 5, "check": "pending" }), "before: pending");
+    assert_eq!(ask(&logs, &[nm(2)])[&nm(2)]["state"], "missing", "not marked deleted: missing");
     let here = |name: &str| logs.size_of(name).is_some();
     assert_eq!(t.derive_tombstones(KEY, &here), Some((2, 1)));
     let f = ask(&logs, &[nm(0), nm(1), nm(2), nm(3)]);
@@ -236,6 +256,8 @@ struct FootCtx {
     settings: Mutex<HashMap<String, Value>>,
     clips: Mutex<Vec<String>>,
     logs: Mutex<Vec<String>>,
+    /// no vehicles at all
+    no_cars: std::sync::atomic::AtomicBool,
 }
 impl CanCtx for FootCtx {
     fn data_dir(&self) -> PathBuf {
@@ -249,6 +271,9 @@ impl CanCtx for FootCtx {
         Ok(())
     }
     fn vehicles(&self) -> Vec<Car> {
+        if self.no_cars.load(Ordering::SeqCst) {
+            return Vec::new();
+        }
         vec![
             Car { id: "car1".into(), name: "Car".into(), timezone: String::new(), root: None, studio_root: None, car: None },
             Car { id: "car2".into(), name: "Other".into(), timezone: String::new(), root: None, studio_root: None, car: None },
@@ -278,7 +303,7 @@ fn clip(h: u32, m: u32) -> String {
 
 fn area(tag: &str, clips: &[String]) -> (Arc<Can>, Arc<FootCtx>, PathBuf) {
     let data = tmp(tag);
-    let ctx = Arc::new(FootCtx { data: data.clone(), settings: Mutex::new(HashMap::new()), clips: Mutex::new(clips.to_vec()), logs: Mutex::new(Vec::new()) });
+    let ctx = Arc::new(FootCtx { data: data.clone(), settings: Mutex::new(HashMap::new()), clips: Mutex::new(clips.to_vec()), logs: Mutex::new(Vec::new()), no_cars: Default::default() });
     ctx.settings.lock().unwrap().insert("can-vehicles".into(), json!({ KEY: "car1" }));
     (Can::new(ctx.clone()), ctx, data.join("can"))
 }
@@ -303,11 +328,12 @@ fn the_oldest_footage_kept_is_read_per_car_key() {
     // a key chosen for a car with no scan yet: not known
     ctx.settings.lock().unwrap().insert("can-vehicles".into(), json!({ KEY: "car2" }));
     assert_eq!(can.kept_footage(KEY), Kept::Unknown);
-    // a car scanned with no footage at all, and a key with no car (two cars): nothing kept
+    // a car scanned with no footage at all: nothing kept
     ctx.settings.lock().unwrap().insert("can-vehicles".into(), json!({ KEY: "car1" }));
     ctx.clips.lock().unwrap().clear();
     assert_eq!(can.kept_footage(KEY), Kept::Nothing);
-    assert_eq!(can.kept_footage("someotherkey"), Kept::Nothing);
+    // a key with no car while two cars are here: its car (once chosen) may keep footage of it
+    assert_eq!(can.kept_footage("someotherkey"), Kept::Unknown);
 }
 
 #[test]
@@ -349,31 +375,42 @@ fn a_deleted_log_sent_again_older_than_the_footage_is_checked_and_dropped_again(
     let (can, _, dir) = area("again", &[clip(14, 30)]);
     let mut b = Bridge::new(45);
     let files = uploaded(&can, &src, &mut b, 0..2);
-    can.logs.delete_log(&nm(0), "owner").unwrap();
-    can.logs.delete_log(&nm(1), "owner").unwrap();
-    // the bridge sends log 0 again (its sidecar first), and a bad copy of log 1
+    // log 2 arrived as other bytes than its sidecar signed: failed (mismatch)
+    let (_, s2) = b.log(&src, &nm(2), b"the log of minute 2");
+    send(&can.logs, &nm(2), b"the LOG of minute 2").unwrap();
+    send(&can.logs, &side(&nm(2)), &s2).unwrap();
+    assert_eq!(can.trust.check(KEY, &nm(2))["status"], "failed");
+    for i in 0..3 {
+        can.logs.delete_log(&nm(i), "owner").unwrap();
+    }
+    // the bridge sends log 0 again (its sidecar first), log 2 as it had it, and a bad copy of log 1
     assert_eq!(send(&can.logs, &side(&nm(0)), &files[0].1).unwrap()["complete"], true);
     assert_eq!(send(&can.logs, &nm(0), &files[0].0).unwrap()["complete"], true, "taken as a normal upload");
+    send(&can.logs, &nm(2), b"the LOG of minute 2").unwrap();
+    send(&can.logs, &side(&nm(2)), &s2).unwrap();
     let mut bad = files[1].0.clone();
     bad[0] ^= 0x20;
-    send(&can.logs, &nm(1), &bad).unwrap();
-    send(&can.logs, &side(&nm(1)), &files[1].1).unwrap();
+    // (not the copy its tombstone recorded: refused, see another_copy_under_a_deleted_name_is_refused_and_the_chain_stays)
+    assert_eq!(send(&can.logs, &nm(1), &bad).unwrap_err().code, "exists_different");
     // not indexed meanwhile
     assert_eq!(can.trust.usable(KEY, &nm(0)), (false, None));
     assert_eq!(can.backfill(4, Duration::ZERO), 2);
-    for i in 0..2 {
+    for i in 0..3 {
         assert!(!dir.join(KEY).join(nm(i)).exists() && !dir.join(KEY).join(side(&nm(i))).exists(), "deleted again: {i}");
     }
     let t0 = can.trust.tomb(KEY, &nm(0)).unwrap();
     assert_eq!((t0["check"].as_str(), t0["recheckedAt"].is_number()), (Some("verified"), true));
-    let f = ask(&can.logs, &[nm(0), nm(1)]);
+    let f = ask(&can.logs, &[nm(0), nm(1), nm(2)]);
     assert_eq!(f[&nm(0)]["check"], "verified");
-    assert_eq!((f[&nm(1)]["check"].as_str(), f[&nm(1)]["check_reason"].as_str()), (Some("failed"), Some("mismatch")), "{f}");
-    // the good copy of log 1 sent again: verified this time (the same rule)
+    assert_eq!(f[&nm(1)]["check"], "verified", "{f}");
+    assert_eq!((f[&nm(2)]["check"].as_str(), f[&nm(2)]["check_reason"].as_str()), (Some("failed"), Some("mismatch")), "{f}");
+    assert!(can.trust.tomb(KEY, &nm(2)).unwrap()["recheckedAt"].is_number());
+    // the good copy of log 1 sent again: taken, verified (the same rule)
     send(&can.logs, &nm(1), &files[1].0).unwrap();
     send(&can.logs, &side(&nm(1)), &files[1].1).unwrap();
     can.backfill(4, Duration::ZERO);
     assert_eq!(ask(&can.logs, &[nm(1)])[&nm(1)]["check"], "verified");
+    assert!(can.trust.tomb(KEY, &nm(1)).unwrap()["recheckedAt"].is_number());
     assert!(!dir.join(KEY).join(nm(1)).exists());
     assert_eq!(can.trust.summary(KEY)["counts"]["verified"], 0, "deleted logs are not counted");
 }
@@ -384,7 +421,8 @@ fn a_deleted_log_sent_again_inside_the_footage_kept_is_kept_as_a_new_log() {
     let (can, _, dir) = area("inside", &[clip(14, 0)]);
     let mut b = Bridge::new(46);
     let files = uploaded(&can, &src, &mut b, 0..2);
-    can.logs.delete_log(&nm(1), "owner").unwrap();
+    // (an automatic rule's delete: "not linked to footage")
+    can.logs.delete_log(&nm(1), "unlinked").unwrap();
     assert_eq!(ask(&can.logs, &[nm(1)])[&nm(1)]["state"], "missing", "its time still has footage: send it again");
     send(&can.logs, &nm(1), &files[1].0).unwrap();
     send(&can.logs, &side(&nm(1)), &files[1].1).unwrap();
@@ -478,4 +516,201 @@ fn through_the_upload_api_a_deleted_log_sent_again_answers_201_and_is_dropped_af
     }
     assert!(!dir.join(KEY).join(nm(0)).exists() && !dir.join(KEY).join(side(&nm(0))).exists(), "checked and deleted again");
     assert_eq!(ask(&can.logs, &[nm(0)])[&nm(0)]["check"], "verified");
+}
+
+// ---- round 3: a key with no car known, the owner's deletes, the margin, 404s, the start, other copies
+
+/// A log deleted by `why`, after it was uploaded and judged verified.
+fn buried_as(can: &Can, src: &Path, b: &mut Bridge, i: usize, why: &str) -> (Vec<u8>, Vec<u8>) {
+    let mut v = uploaded(can, src, b, i..i + 1);
+    assert_eq!(can.trust.record(KEY, &nm(i)).unwrap()["status"], "verified");
+    can.logs.delete_log(&nm(i), why).unwrap();
+    v.pop().unwrap()
+}
+
+#[test]
+fn a_key_whose_car_cannot_be_told_answers_pending_never_delivered() {
+    // footage of 14:00 kept: the log of 14:01 ("not linked") is inside it
+    let src = tmp("nocar-bridge");
+    let (can, ctx, _) = area("nocar", &[clip(14, 0)]);
+    let mut b = Bridge::new(50);
+    let (l, _) = buried_as(&can, &src, &mut b, 1, "unlinked");
+    let size = l.len();
+    assert_eq!(ask(&can.logs, &[nm(1)])[&nm(1)]["state"], "missing", "mapped: inside its footage");
+    let pending = json!({ "state": "complete", "received": size, "length": size, "size": size, "check": "pending" });
+    // unmapped while two cars are here, then mapped to a car since removed: not known
+    ctx.settings.lock().unwrap().insert("can-vehicles".into(), json!({}));
+    assert_eq!(can.kept_footage(KEY), Kept::Unknown);
+    assert_eq!(ask(&can.logs, &[nm(1)])[&nm(1)], pending, "unmapped, two cars");
+    ctx.settings.lock().unwrap().insert("can-vehicles".into(), json!({ KEY: "a-removed-car" }));
+    assert_eq!(can.kept_footage(KEY), Kept::Unknown);
+    assert_eq!(ask(&can.logs, &[nm(1)])[&nm(1)], pending, "mapped to a removed car");
+    // no car at all: no footage anywhere, delivered
+    ctx.no_cars.store(true, Ordering::SeqCst);
+    assert_eq!(can.kept_footage(KEY), Kept::Nothing);
+    assert_eq!(ask(&can.logs, &[nm(1)])[&nm(1)]["check"], "verified");
+}
+
+#[test]
+fn the_owners_own_deletes_are_never_asked_for_again_whatever_the_footage() {
+    // footage of 14:00 kept: every log here is inside it
+    let src = tmp("owner-bridge");
+    let (can, _, dir) = area("owner", &[clip(14, 0)]);
+    let mut b = Bridge::new(51);
+    let f1 = buried_as(&can, &src, &mut b, 1, "owner");
+    let f2 = buried_as(&can, &src, &mut b, 2, "with-footage");
+    let _ = buried_as(&can, &src, &mut b, 3, "unlinked");
+    let f = ask(&can.logs, &[nm(1), side(&nm(1)), nm(2), nm(3)]);
+    assert_eq!(f[&nm(1)], json!({ "state": "complete", "received": f1.0.len(), "length": f1.0.len(), "size": f1.0.len(), "check": "verified" }), "{f}");
+    assert_eq!(f[&side(&nm(1))]["size"], json!(f1.1.len()));
+    assert_eq!(f[&nm(2)]["check"], "verified", "{f}");
+    assert_eq!(f[&nm(3)]["state"], "missing", "an automatic rule's: inside the footage, may come again");
+    // sent again anyway: checked, recorded, deleted again; never kept as a new log
+    for (i, files) in [(1, &f1), (2, &f2)] {
+        send(&can.logs, &nm(i), &files.0).unwrap();
+        send(&can.logs, &side(&nm(i)), &files.1).unwrap();
+    }
+    can.backfill(4, Duration::ZERO);
+    for i in [1, 2] {
+        assert!(!dir.join(KEY).join(nm(i)).exists() && !dir.join(KEY).join(side(&nm(i))).exists(), "deleted again: {i}");
+        let t = can.trust.tomb(KEY, &nm(i)).expect("its tombstone stays");
+        assert!(t["recheckedAt"].is_number(), "{t}");
+        assert_eq!(can.trust.usable(KEY, &nm(i)), (false, None));
+    }
+    assert_eq!(ask(&can.logs, &[nm(1), nm(2)])[&nm(2)]["check"], "verified");
+}
+
+#[test]
+fn older_than_the_footage_needs_rule_olds_margin_and_the_longest_log() {
+    // with the margin: a log that ended half an hour before the oldest clip is not older
+    let t = at(30) + 3_600_000.0;
+    assert_eq!(CanLogs::older_than_footage(Kept::Since(t), t - 1_800_000.0), Some(false));
+    assert_eq!(CanLogs::older_than_footage(Kept::Since(t), t - 3_600_000.0), Some(true));
+    // a log with no end in its sidecar: ten minutes (the longest a log runs), not one
+    let src = tmp("margin-bridge");
+    let (can, _, _) = area("margin", &[]);
+    let mut b = Bridge::new(52);
+    buried_as(&can, &src, &mut b, 0, "unlinked");
+    assert_eq!(can.trust.tomb(KEY, &nm(0)).unwrap()["end"].as_f64(), Some(at(0) + 600_000.0));
+    // and the tombstones worked out from an older server's records
+    let dir = tmp("margin-derive");
+    let (logs, tr, _) = checked(&dir);
+    let (l, sd) = b.log(&src, &nm(5), b"log five");
+    send(&logs, &nm(5), &l).unwrap();
+    send(&logs, &side(&nm(5)), &sd).unwrap();
+    tr.check(KEY, &nm(5));
+    logs.remove(&nm(5)).unwrap();
+    tr.deleted(KEY, &nm(5));
+    assert_eq!(tr.derive_tombstones(KEY, &|n: &str| logs.size_of(n).is_some()), Some((1, 0)));
+    assert_eq!(tr.tomb(KEY, &nm(5)).unwrap()["end"].as_f64(), Some(at(5) + 600_000.0));
+}
+
+/// Sets a folder's modification time back (so a catalogue read before still counts as fresh).
+fn set_mtime(dir: &Path, t: std::time::SystemTime) {
+    std::fs::File::open(dir).unwrap().set_modified(t).unwrap();
+}
+
+#[test]
+fn a_rule_that_finds_its_log_already_gone_leaves_no_tombstone() {
+    // footage from 16:00: the logs of 14:00-14:01 are more than an hour older (rule "old")
+    let src = tmp("gone-bridge");
+    let (can, _, dir) = area("gone", &[clip(16, 0)]);
+    let mut b = Bridge::new(53);
+    uploaded(&can, &src, &mut b, 0..2);
+    // log 0 vanishes (a lost disk) while the catalogue still lists it
+    assert_eq!(can.logs.rows_of(KEY).len(), 2);
+    let kdir = dir.join(KEY);
+    let m = std::fs::metadata(&kdir).unwrap().modified().unwrap();
+    std::fs::remove_file(kdir.join(nm(0))).unwrap();
+    std::fs::remove_file(kdir.join(side(&nm(0)))).unwrap();
+    set_mtime(&kdir, m);
+    assert_eq!(can.logs.rows_of(KEY).len(), 2, "still listed");
+    let out = can.prune.check("car1").unwrap();
+    assert_eq!(out["old"], 2, "{out}");
+    assert!(can.trust.tomb(KEY, &nm(0)).is_none() && can.trust.tomb(KEY, &nm(1)).is_some());
+    // its record stays for the chain, hidden, and marked lost: never tombstoned later either
+    let r = can.trust.record(KEY, &nm(0)).unwrap();
+    assert_eq!((r["deleted"].as_bool(), r["lost"].as_bool()), (Some(true), Some(true)), "{r}");
+    assert_eq!(can.derive_tombstones(), (0, 1));
+    assert!(can.trust.tomb(KEY, &nm(0)).is_none());
+    let f = ask(&can.logs, &[nm(0), nm(1)]);
+    assert_eq!(f[&nm(0)]["state"], "missing", "nothing shows it was deleted on purpose: {f}");
+    assert_eq!(f[&nm(1)]["check"], "verified");
+}
+
+#[test]
+fn until_its_key_is_worked_out_a_deleted_record_is_never_missing() {
+    let src = tmp("race-bridge");
+    let dir = tmp("race");
+    let (logs, t, _) = checked(&dir);
+    let mut b = Bridge::new(54);
+    let (l, s) = b.log(&src, &nm(0), b"deleted by an older server");
+    send(&logs, &nm(0), &l).unwrap();
+    send(&logs, &side(&nm(0)), &s).unwrap();
+    t.check(KEY, &nm(0));
+    logs.remove(&nm(0)).unwrap();
+    t.deleted(KEY, &nm(0));
+    // just after the start, before derive_tombstones ran for this key: ask again, both halves
+    let f = ask(&logs, &[nm(0), side(&nm(0))]);
+    assert_eq!(f[&nm(0)], json!({ "state": "complete", "received": l.len(), "length": l.len(), "size": l.len(), "check": "pending" }), "{f}");
+    assert_eq!((f[&side(&nm(0))]["state"].as_str(), f[&side(&nm(0))]["check"].as_str()), (Some("complete"), Some("pending")), "{f}");
+    assert_eq!(t.derive_tombstones(KEY, &|n: &str| logs.size_of(n).is_some()), Some((1, 0)));
+    assert_eq!(ask(&logs, &[nm(0)])[&nm(0)]["check"], "verified");
+}
+
+#[test]
+fn another_copy_under_a_deleted_name_is_refused_and_the_chain_stays() {
+    // logs 0-2 from one bridge; log 1 deleted by the owner
+    let src = tmp("other-bridge");
+    let (can, _, dir) = area("other", &[clip(14, 0)]);
+    let mut b = Bridge::new(55);
+    let files = uploaded(&can, &src, &mut b, 0..3);
+    can.logs.delete_log(&nm(1), "owner").unwrap();
+    let tomb = can.trust.tomb(KEY, &nm(1)).unwrap();
+    let rec = can.trust.record(KEY, &nm(1)).unwrap();
+    // other bytes under log 1's name, signed properly by the same key, index and previous log
+    let src2 = tmp("other-bridge2");
+    let mut b2 = Bridge::new(55);
+    b2.log(&src2, &nm(0), "the log of minute 0".as_bytes());
+    let (other, other_side) = b2.log(&src2, &nm(1), b"other bytes under log one's name");
+    assert_ne!(other_side, files[1].1);
+    // its decision waits for the body (as for a stored file), then 409, nothing written
+    let sha = util::sha256_hex(&other);
+    assert_eq!(can.logs.precheck(&nm(1), Some(other.len() as u64), 0.0, other.len() as f64, &sha).unwrap(), None);
+    assert_eq!(send(&can.logs, &nm(1), &other).unwrap_err().code, "exists_different");
+    assert_eq!(send(&can.logs, &side(&nm(1)), &other_side).unwrap_err().code, "exists_different", "the sidecar half too");
+    assert!(!dir.join(KEY).join(nm(1)).exists() && !dir.join(KEY).join(side(&nm(1))).exists());
+    assert!(std::fs::read_dir(dir.join(KEY)).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".part")), "no copy left");
+    can.backfill(4, Duration::ZERO);
+    assert_eq!(can.trust.tomb(KEY, &nm(1)).unwrap(), tomb, "its tombstone as it was");
+    assert_eq!(can.trust.record(KEY, &nm(1)).unwrap()["sha256"], rec["sha256"], "its record as it was");
+    let f = ask(&can.logs, &[nm(1), nm(2)]);
+    assert_eq!((f[&nm(1)]["size"].as_u64(), f[&nm(1)]["check"].as_str()), (Some(files[1].0.len() as u64), Some("verified")), "{f}");
+    assert_eq!(f[&nm(2)]["check"], "verified", "the next log's chain link still fits: {f}");
+    // the same copy is still taken (checked and dropped again)
+    assert_eq!(send(&can.logs, &nm(1), &files[1].0).unwrap()["complete"], true);
+    assert_eq!(send(&can.logs, &side(&nm(1)), &files[1].1).unwrap()["complete"], true);
+}
+
+#[test]
+fn a_derived_tombstones_sidecar_stays_missing_without_a_recorded_size() {
+    // what an older server kept of a log has no sidecar size or hash (and chain.json is the
+    // bridge's): its sidecar is not guessed
+    let src = tmp("derside-bridge");
+    let dir = tmp("derside");
+    let (logs, t, _) = checked(&dir);
+    let mut b = Bridge::new(56);
+    let (l, s) = b.log(&src, &nm(0), b"an older server's delete");
+    send(&logs, &nm(0), &l).unwrap();
+    send(&logs, &side(&nm(0)), &s).unwrap();
+    let r = t.check(KEY, &nm(0));
+    assert!(r.as_object().unwrap().keys().all(|k| !k.to_lowercase().contains("side")), "{r}");
+    logs.remove(&nm(0)).unwrap();
+    t.deleted(KEY, &nm(0));
+    t.derive_tombstones(KEY, &|n: &str| logs.size_of(n).is_some());
+    let tomb = t.tomb(KEY, &nm(0)).unwrap();
+    assert!(tomb["side"].is_null(), "{tomb}");
+    let f = ask(&logs, &[nm(0), side(&nm(0))]);
+    assert_eq!(f[&nm(0)]["check"], "verified");
+    assert_eq!(f[&side(&nm(0))], json!({ "state": "missing", "received": 0, "length": null, "size": 0 }));
 }

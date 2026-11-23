@@ -381,13 +381,16 @@ impl Can {
     }
 
     /// The oldest footage the car of a CAN key keeps (its car as the routes find it: the one it
-    /// is chosen for, or the only car): `Kept::Nothing` without a car or without any footage,
-    /// `Kept::Unknown` while that cannot be told (the key-to-car map unreadable, the share
-    /// away, a scan running or failed).
+    /// is chosen for, or the only car): `Kept::Nothing` with no car at all or when its car has
+    /// no footage, `Kept::Unknown` while that cannot be told (the key-to-car map unreadable,
+    /// the share away, a scan running or failed), and when cars exist but none is this key's
+    /// (unmapped with two or more cars, or mapped to a car since removed): its car, once
+    /// chosen, may keep footage of the log's time.
     pub fn kept_footage(&self, key: &str) -> Kept {
         let Ok(map) = self.can_map() else { return Kept::Unknown };
         match self.car_in(&map, key) {
-            None => Kept::Nothing,
+            None if self.ctx.vehicles().is_empty() => Kept::Nothing,
+            None => Kept::Unknown,
             Some(v) => self.prune.oldest_kept(&v),
         }
     }
@@ -400,7 +403,7 @@ impl Can {
             self.ctx.log("warn", &format!("Car data in the Viewer: not worked out at start: {e}"));
         }
         // the tombstones of logs deleted before they were kept (once), at once: a status
-        // meanwhile would answer those logs missing
+        // meanwhile answers those logs pending (CanTrust::buried), never missing
         let me = self.clone();
         std::thread::spawn(move || {
             me.derive_tombstones();
@@ -600,19 +603,21 @@ impl Can {
         }
         rec
     }
-    /// A copy of a log deleted here on purpose, sent again (either half here). Older than
-    /// all the footage its car keeps: judged as any log (SHA-256, signature, chain), the result
-    /// kept on its tombstone, and the copy deleted again (never indexed: CanTrust::usable).
-    /// Inside the footage kept: kept as a new log (its tombstone goes; None: judged as usual).
-    /// While the footage is not known: judged, kept unindexed, and decided by a later pass.
+    /// A copy of a log deleted here on purpose, sent again (either half here). Deleted by the
+    /// owner (by name, or with its footage), or older than all the footage its car keeps (see
+    /// CanLogs::buried_older): judged as any log (SHA-256, signature, chain), the result kept
+    /// on its tombstone, and the copy deleted again (never indexed: CanTrust::usable). Deleted
+    /// by an automatic rule and inside the footage kept: kept as a new log (its tombstone goes;
+    /// None: judged as usual). While the footage is not known: judged, kept unindexed, and
+    /// decided by a later pass. (Another copy than the tombstone's never gets here: the upload
+    /// answers it 409 exists_different, see CanLogs::plan.)
     fn judge_buried(self: &Arc<Self>, key: &str, name: &str, tomb: &Value) -> Option<Value> {
         let here = self.logs.size_of(name);
         let side = self.logs.size_of(&format!("{}.json", name));
         if here.is_none() && side.is_none() {
             return Some(self.trust.record(key, name).unwrap_or(json!({})));
         }
-        let end = tomb.get("end").and_then(|x| x.as_f64()).unwrap_or(f64::INFINITY);
-        match CanLogs::older_than_footage(self.logs.kept(key), end) {
+        match CanLogs::buried_older(tomb, self.logs.kept(key)) {
             Some(false) => {
                 self.trust.unbury(key, name);
                 self.ctx.log("info", &format!("CAN Bridge {}: {} was deleted here and sent again; its car keeps footage of its time, so it is kept as a new log", key, name));
@@ -628,12 +633,12 @@ impl Can {
                 let Some(size) = here else {
                     // its sidecar alone (the log may follow): noted, dropped later if it does not
                     if let Some(sd) = side {
-                        self.trust.note_side(key, name, sd);
+                        self.trust.note_side(key, name, sd, self.side_sha(key, name));
                     }
                     return Some(self.trust.record(key, name).unwrap_or(json!({})));
                 };
                 let rec = self.trust.check(key, name);
-                if let Some((check, reason)) = self.trust.rebury(key, name, size, side) {
+                if let Some((check, reason)) = self.trust.rebury(key, name, size, side.map(|sd| (sd, self.side_sha(key, name)))) {
                     self.logs.discard(name);
                     self.drop_log(key, name);
                     self.ctx.log("info", &format!("CAN Bridge {}: {} (deleted here, older than the car's footage) was sent again: checked ({}{}) and deleted again", key, name, check, reason.map(|r| format!(": {r}")).unwrap_or_default()));
@@ -642,6 +647,10 @@ impl Can {
                 Some(rec)
             }
         }
+    }
+    /// The SHA-256 of a log's sidecar here, if it can be read.
+    fn side_sha(&self, key: &str, name: &str) -> Option<String> {
+        util::hash_file(&self.logs.dir.join(key).join(format!("{}.json", name))).ok().map(|h| h.0)
     }
 
     /// The background checks: every log here not judged yet (from before the checks, or one
@@ -666,11 +675,10 @@ impl Can {
                 let old = std::fs::metadata(self.logs.dir.join(&key).join(&side)).is_ok_and(|m| util::now_ms() - util::mtime_ms(&m) > LONE_SIDE_MS);
                 if old && !self.logs.arriving(&name) {
                     if let Some(tomb) = self.trust.tomb(&key, &name) {
-                        let end = tomb.get("end").and_then(|x| x.as_f64()).unwrap_or(f64::INFINITY);
-                        match CanLogs::older_than_footage(self.logs.kept(&key), end) {
+                        match CanLogs::buried_older(&tomb, self.logs.kept(&key)) {
                             Some(true) => {
                                 if let Some(sd) = self.logs.size_of(&side) {
-                                    self.trust.note_side(&key, &name, sd);
+                                    self.trust.note_side(&key, &name, sd, self.side_sha(&key, &name));
                                 }
                                 self.logs.discard(&name);
                             }

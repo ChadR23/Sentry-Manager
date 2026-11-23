@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 pub const CLIP_MS: f64 = 62_000.0;
 const LOG_MIN_MS: f64 = 60_000.0;
-const LOG_MAX_MS: f64 = 10.0 * 60_000.0;
+pub const LOG_MAX_MS: f64 = 10.0 * 60_000.0;
 pub const MARGIN_MS: f64 = 3_600_000.0;
 pub const BATCH: usize = 500;
 pub const UNLINKED_DAYS: f64 = 7.0;
@@ -101,11 +101,14 @@ pub struct CanPrune {
     running: Mutex<HashMap<String, bool>>,
     timers: Mutex<HashMap<String, f64>>,
     covers: Mutex<HashMap<String, (String, Arc<Vec<f64>>)>>,
+    /// the start of each car's oldest clip on the share (see `oldest_kept`), with the scan's
+    /// generation and time zone it was worked out for
+    oldest: Mutex<HashMap<String, ((u64, String), Option<f64>)>>,
 }
 
 impl CanPrune {
     pub fn new(ctx: Arc<dyn CanCtx>, logs: Arc<CanLogs>, trust: Arc<CanTrust>, drop: Box<dyn Fn(&str, &str) + Send + Sync>, on_change: Box<dyn Fn(&str) + Send + Sync>) -> CanPrune {
-        CanPrune { ctx, logs, trust, drop, on_change, now: Box::new(super::util::now_ms), batch: BATCH, fresh_ms: FRESH_MS, soon_ms: 30_000.0, running: Mutex::new(HashMap::new()), timers: Mutex::new(HashMap::new()), covers: Mutex::new(HashMap::new()) }
+        CanPrune { ctx, logs, trust, drop, on_change, now: Box::new(super::util::now_ms), batch: BATCH, fresh_ms: FRESH_MS, soon_ms: 30_000.0, running: Mutex::new(HashMap::new()), timers: Mutex::new(HashMap::new()), covers: Mutex::new(HashMap::new()), oldest: Mutex::new(HashMap::new()) }
     }
 
     // (a setting that cannot be read is an error here: nothing is deleted, nor written over, on a guess)
@@ -207,7 +210,7 @@ impl CanPrune {
         if !self.ctx.share_healthy(&v.id) {
             return Some("the share is not reachable".into());
         }
-        let Some(s) = self.ctx.scan_of(&v.id).filter(|s| s.scanned) else { return Some("the footage has not been scanned yet".into()) };
+        let Some(s) = self.ctx.scan_head(&v.id).filter(|s| s.scanned) else { return Some("the footage has not been scanned yet".into()) };
         if s.scanning {
             return Some("a scan is running".into());
         }
@@ -236,27 +239,30 @@ impl CanPrune {
     /// footage moved there is deleted for the owner, and "Also delete its CAN data" deletes its
     /// logs with it (counting the bin would ask the bridge for them again at once). Unknown
     /// while its footage cannot be trusted (the rules that delete logs wait then too) or read.
+    /// The share's part is worked out once per scan result (its generation, new whenever the
+    /// file list is) and time zone, so a status call never copies the file list; the
+    /// protected clips are read each time (a protect or unprotect changes no scan).
     pub fn oldest_kept(&self, v: &Car) -> super::logs::Kept {
         use super::logs::Kept;
         if self.untrusted(v).is_some() {
             return Kept::Unknown;
         }
         let Ok(protected) = self.ctx.protected_rels(&v.id) else { return Kept::Unknown };
-        let mut oldest: Option<f64> = None;
-        let mut add = |rel: &str| {
-            if let Some(t) = clip_start(v, rel) {
-                oldest = Some(oldest.map_or(t, |o| o.min(t)));
+        let Some(generation) = self.ctx.scan_generation(&v.id) else { return Kept::Unknown };
+        let sig = (generation, v.timezone.clone());
+        let cached = self.oldest.lock().unwrap().get(&v.id).filter(|c| c.0 == sig).map(|c| c.1);
+        let share = match cached {
+            Some(o) => o,
+            None => {
+                let Some(s) = self.ctx.scan_of(&v.id) else { return Kept::Unknown };
+                let o = s.files.iter().filter(|f| f.kind == "clip").filter_map(|f| clip_start(v, &f.rel)).fold(None, |o: Option<f64>, t| Some(o.map_or(t, |o| o.min(t))));
+                // (keyed by the generation of the scan read, not the one asked before it)
+                self.oldest.lock().unwrap().insert(v.id.clone(), ((s.generation, v.timezone.clone()), o));
+                o
             }
         };
-        if let Some(s) = self.ctx.scan_of(&v.id) {
-            for f in s.files.iter().filter(|f| f.kind == "clip") {
-                add(&f.rel);
-            }
-        }
-        for rel in protected.iter().filter(|r| is_mp4(r)) {
-            add(rel);
-        }
-        oldest.map_or(Kept::Nothing, Kept::Since)
+        let own = protected.iter().filter(|r| is_mp4(r)).filter_map(|rel| clip_start(v, rel)).fold(share, |o, t| Some(o.map_or(t, |o| o.min(t))));
+        own.map_or(Kept::Nothing, Kept::Since)
     }
 
     /// pairing(key): name -> 'paired' | 'none' for one key's logs, or None (not mapped, or its car
@@ -366,7 +372,8 @@ impl CanPrune {
                             self.ctx.log("warn", &format!("CAN log {}: not deleted: {}", s.row.name, e.message));
                             continue;
                         }
-                        self.trust.deleted(key, &s.row.name);
+                        // (already gone: not deleted on purpose here, see CanTrust::lost)
+                        self.trust.lost(key, &s.row.name);
                     }
                     (self.drop)(key, &s.row.name);
                     removed += 1;
@@ -596,7 +603,8 @@ impl CanPrune {
                     self.ctx.log("warn", &format!("CAN log {}: not deleted: {}", t.1, e.message));
                     continue;
                 }
-                self.trust.deleted(&t.0, &t.1);
+                // (already gone: not deleted on purpose here, see CanTrust::lost)
+                self.trust.lost(&t.0, &t.1);
             }
             (self.drop)(&t.0, &t.1);
             removed += 1;

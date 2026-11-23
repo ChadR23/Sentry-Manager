@@ -78,6 +78,11 @@ impl CanCtx for CoreCan {
             generation: st.generation,
         })
     }
+    fn scan_head(&self, vid: &str) -> Option<Scan> {
+        let s = self.srv()?;
+        let st = s.app().state_of(vid)?;
+        Some(Scan { scanned: st.scanned, scanned_at: st.scanned_at, scanning: st.scanning, last_error: st.last_error.clone(), error_count: st.error_count, files: Vec::new(), recordings: Vec::new(), generation: st.generation })
+    }
     fn scan_generation(&self, vid: &str) -> Option<u64> {
         Some(self.srv()?.app().state_of(vid)?.generation)
     }

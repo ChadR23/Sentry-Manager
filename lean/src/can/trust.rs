@@ -50,6 +50,18 @@ const ZERO: &str = "000000000000000000000000000000000000000000000000000000000000
 /// The version of the tombstones worked out from what an older server kept (`tombstonesV`).
 pub const TOMBSTONES_V: i64 = 1;
 
+/// What `CanTrust::buried` knows of a log that is not here.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Buried {
+    /// nothing: it was never deleted here on purpose (missing)
+    No,
+    /// deleted here on purpose: its tombstone
+    Tomb(Value),
+    /// its record says an older server deleted it, and this car key's tombstones of such
+    /// deletes are not worked out yet (just after a start): not known yet (its record's length)
+    NotDerived(Option<f64>),
+}
+
 /// SHA-256 of a public key's DER, hex in pairs with colons.
 pub fn fingerprint_of(der: &[u8]) -> String {
     let h = util::hex(&Sha256::digest(der)).to_uppercase();
@@ -348,6 +360,7 @@ impl CanTrust {
         rec.remove("replaced");
         // a copy here is judged as itself: a deleted copy's mark does not hide it
         rec.remove("deleted");
+        rec.remove("lost");
         set(&mut rec, "checkedAt", n(now));
         let first_seen = had.get("firstSeen").filter(|v| json::truthy(Some(v))).cloned().unwrap_or(n(now));
         set(&mut rec, "firstSeen", first_seen.clone());
@@ -572,6 +585,7 @@ impl CanTrust {
         r.insert("reason".into(), json!(REPLACED));
         r.remove("override");
         r.remove("deleted");
+        r.remove("lost");
         self.save(key, &t);
         Ok(true)
     }
@@ -831,6 +845,20 @@ impl CanTrust {
         }
     }
 
+    /// lost(key, name): a rule went to delete a log whose file was already gone (404: lost on a
+    /// disk, removed by hand). Its record stays for the chain and is hidden as a deleted one's,
+    /// but marked `lost` too: nothing shows it was deleted on purpose, so it never gets a
+    /// tombstone (it stays missing and may be sent again).
+    pub fn lost(&self, key: &str, name: &str) {
+        let tf = self.load(key);
+        let mut t = tf.lock().unwrap();
+        if let Some(r) = t.logs.get_mut(name).and_then(|r| r.as_object_mut()) {
+            r.insert("deleted".into(), json!(true));
+            r.insert("lost".into(), json!(true));
+            self.save(key, &t);
+        }
+    }
+
     /// bury(key, name, tombstone): a log deleted here on purpose (its files gone already, see
     /// CanLogs::delete_log): its tombstone kept, and its record marked deleted (kept for the chain).
     pub fn bury(&self, key: &str, name: &str, tomb: Value) {
@@ -860,6 +888,27 @@ impl CanTrust {
         names.iter().map(|n| t.tombstones.get(n).cloned()).collect()
     }
 
+    /// What is known of these logs not here (one lock): their tombstones, and, until this car
+    /// key's tombstones of an older server's deletes are worked out (derive_tombstones), the
+    /// records that may still get one (marked deleted, not `lost`): `status` must not answer
+    /// those missing meanwhile (the bridge would send them again, and the copy would be kept).
+    pub fn buried(&self, key: &str, names: &[String]) -> Vec<Buried> {
+        let tf = self.load(key);
+        let t = tf.lock().unwrap();
+        let derived = t.tombstones_v.as_f64().is_some_and(|v| v >= TOMBSTONES_V as f64);
+        names
+            .iter()
+            .map(|n| match t.tombstones.get(n) {
+                Some(tomb) => Buried::Tomb(tomb.clone()),
+                None if derived => Buried::No,
+                None => match t.logs.get(n) {
+                    Some(r) if json::truthy(r.get("deleted")) && !json::truthy(r.get("lost")) => Buried::NotDerived(r.get("length").and_then(json::finite)),
+                    _ => Buried::No,
+                },
+            })
+            .collect()
+    }
+
     /// unbury(key, name): a deleted log sent again while its car still keeps footage of its
     /// time: kept as a new log from here on (its tombstone goes; it is judged as usual).
     pub fn unbury(&self, key: &str, name: &str) -> bool {
@@ -877,7 +926,7 @@ impl CanTrust {
     /// record now says (worked out as `status` does, with both halves here) goes into its
     /// tombstone, and the record is marked deleted again (the copy is deleted next). None while
     /// the record waits (for its sidecar, or to be read): nothing changes then.
-    pub fn rebury(&self, key: &str, name: &str, size: f64, side: Option<f64>) -> Option<(&'static str, Option<&'static str>)> {
+    pub fn rebury(&self, key: &str, name: &str, size: f64, side: Option<(f64, Option<String>)>) -> Option<(&'static str, Option<&'static str>)> {
         let tf = self.load(key);
         let mut t = tf.lock().unwrap();
         let r = t.logs.get(name)?.clone();
@@ -889,8 +938,11 @@ impl CanTrust {
         let mut tomb = t.tombstones.get(name).and_then(|x| x.as_object()).cloned().unwrap_or_default();
         tomb.insert("size".into(), n(size));
         tomb.insert("sha256".into(), r.get("sha256").cloned().unwrap_or(Value::Null));
-        if let Some(sd) = side {
+        if let Some((sd, sha)) = side {
             tomb.insert("side".into(), n(sd));
+            if let Some(sha) = sha {
+                tomb.insert("sideSha256".into(), json!(sha));
+            }
         }
         tomb.insert("check".into(), json!(check));
         tomb.insert("checkReason".into(), reason.map(|x| json!(x)).unwrap_or(Value::Null));
@@ -903,24 +955,31 @@ impl CanTrust {
         Some((check, reason))
     }
 
-    /// A deleted log's sidecar sent again on its own (its log not here): its size noted on the
-    /// tombstone.
-    pub fn note_side(&self, key: &str, name: &str, side: f64) {
+    /// A deleted log's sidecar sent again on its own (its log not here): its size (and
+    /// SHA-256) noted on the tombstone.
+    pub fn note_side(&self, key: &str, name: &str, side: f64, sha: Option<String>) {
         let tf = self.load(key);
         let mut t = tf.lock().unwrap();
         let Some(tomb) = t.tombstones.get_mut(name).and_then(|x| x.as_object_mut()) else { return };
         tomb.insert("side".into(), n(side));
+        if let Some(sha) = sha {
+            tomb.insert("sideSha256".into(), json!(sha));
+        }
         self.save(key, &t);
     }
 
     /// derive_tombstones(key, here): once per car key (`tombstonesV`), the tombstones of logs
     /// deleted here before tombstones were kept, from what trust.json still holds: a record
-    /// marked deleted (only the owner's delete, "Keeping logs" and "Also delete its CAN data"
-    /// marked records so, after deleting the files) of a log that was received complete and
-    /// judged (its SHA-256 and length), whose log is not here (`here`: its log or an upload of
-    /// it is here). Every other record whose log is gone (no deleted mark: lost on a disk, or
-    /// deleted by hand; or never judged) gets none: that log stays missing and may be sent
-    /// again. (tombstoned, left missing); None when this key was done before.
+    /// marked deleted of a log that was received complete and judged (its SHA-256 and length),
+    /// whose log is not here (`here`: its log or an upload of it is here). An older server
+    /// marked records deleted in the owner's delete, "Keeping logs" and "Also delete its CAN
+    /// data": after deleting the files, and also when its rule found the file already gone
+    /// (404; those cannot be told apart in its records, and a rule had decided to delete each
+    /// such log anyway). Since this version a 404 marks the record `lost` as well, and a `lost`
+    /// record gets none. Every other record whose log is gone (no deleted mark: lost on a
+    /// disk, or deleted by hand; or never judged) gets none: that log stays missing and may be
+    /// sent again. Without a sidecar size in the record (it never held one), the tombstone's
+    /// sidecar answers missing. (tombstoned, left missing); None when this key was done before.
     pub fn derive_tombstones(&self, key: &str, here: &dyn Fn(&str) -> bool) -> Option<(usize, usize)> {
         let tf = self.load(key);
         let mut t = tf.lock().unwrap();
@@ -939,14 +998,15 @@ impl CanTrust {
             let st = r.get("status").and_then(|s| s.as_str()).unwrap_or("");
             let sha = r.get("sha256").and_then(|s| s.as_str()).filter(|s| s.len() == 64);
             let size = r.get("length").and_then(json::finite).filter(|l| *l > 0.0);
-            let (Some(sha), Some(size), true, true) = (sha, size, json::truthy(r.get("deleted")), matches!(st, "verified" | "failed" | "unsigned")) else {
+            let purposeful = json::truthy(r.get("deleted")) && !json::truthy(r.get("lost"));
+            let (Some(sha), Some(size), true, true) = (sha, size, purposeful, matches!(st, "verified" | "failed" | "unsigned")) else {
                 missing += 1;
                 continue;
             };
             let (check, reason) = Self::answer_of(&t, &name, &r, size, &|_| true);
             let tomb = json!({
                 "size": n(size), "sha256": sha, "side": null, "check": check, "checkReason": reason, "at": null, "why": "before-tombstones",
-                "end": n(nm.started_at as f64 + 60_000.0), "derivedAt": n(now)
+                "end": n(nm.started_at as f64 + super::prune::LOG_MAX_MS), "derivedAt": n(now)
             });
             t.tombstones.insert(name, tomb);
             buried += 1;
