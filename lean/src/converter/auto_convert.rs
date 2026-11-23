@@ -412,6 +412,8 @@ struct Inner {
     round_open: bool,
     /// When the scheduled or asked-for check now under way began
     round_at: Option<i64>,
+    /// Catch-up failures: [next retry at, the wait after the last failure].
+    catch_up_retry: std::collections::HashMap<String, [i64; 2]>,
 }
 
 pub struct Auto {
@@ -440,7 +442,7 @@ impl Auto {
             "activeSource": null, "round": [], "sources": {}, "pending": {}, "active": {},
             "heldManual": [], "handledManual": []
         });
-        Arc::new(Auto { o, st: Mutex::new(Inner { settings: default_settings(), saved: vec![], status, indexes: Default::default(), timer: None, calendar: [Value::Null, Value::Null], round_open: false, round_at: None }), ticking: Mutex::new(()), sweep_abort: Mutex::new(None) })
+        Arc::new(Auto { o, st: Mutex::new(Inner { settings: default_settings(), saved: vec![], status, indexes: Default::default(), timer: None, calendar: [Value::Null, Value::Null], round_open: false, round_at: None, catch_up_retry: Default::default() }), ticking: Mutex::new(()), sweep_abort: Mutex::new(None) })
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -695,8 +697,13 @@ impl Auto {
         }
     }
 
+    fn in_catch_up(s: &Inner, root: &str) -> bool {
+        s.status.get("catchUp").and_then(|m| m.get(root)).is_some()
+    }
+
     /// Ends `root`'s catch-up run; true when it had one.
     fn end_catch_up(s: &mut Inner, root: &str) -> bool {
+        s.catch_up_retry.remove(root);
         let Some(m) = s.status.get_mut("catchUp").and_then(Value::as_object_mut) else { return false };
         let had = m.shift_remove(root).is_some();
         if m.is_empty() {
@@ -739,11 +746,20 @@ impl Auto {
                     s.status["active"].as_object_mut().unwrap().shift_remove(&root);
                     let more = job.as_ref().is_some_and(|j| j["state"] == "completed" && super::jobstore::normalize::truthy(&j["moreAfter"]));
                     // A catch-up run ends once its job is done with nothing left after it, or
-                    // the user cancelled it. A failed job's run goes on at the next check.
+                    // the user cancelled it. A failed job's run is retried (`retry_stranded`).
+                    // A job started before the vehicle's settings made more footage eligible
+                    // proves nothing about that footage: the vehicle is checked again instead.
                     let state = job.as_ref().map(|j| j["state"].clone()).unwrap_or(Value::Null);
-                    if (state == "completed" && !more) || state == "cancelled" {
-                        Self::end_catch_up(&mut s, &root);
+                    let stale = Self::in_catch_up(&s, &root) && job.as_ref().zip(Self::config_for(&s, &root)).is_some_and(|(j, c)| more_eligible(Some(&j["config"]), &c));
+                    if state == "completed" {
+                        s.catch_up_retry.remove(&root);
                     }
+                    if (state == "completed" && !more && !stale) || state == "cancelled" {
+                        Self::end_catch_up(&mut s, &root);
+                    } else if state != "completed" {
+                        self.defer_catch_up(&mut s, &root);
+                    }
+                    let more = more || (state == "completed" && stale);
                     if more && s.settings["enabled"] == true && !s.status["round"].as_array().unwrap().iter().any(|r| r == root.as_str()) {
                         s.status["round"].as_array_mut().unwrap().push(json!(root));
                         // (a restart before the next part starts checks again, not at the next scheduled time)
@@ -961,6 +977,9 @@ impl Auto {
                 s.status["error"] = json!(e);
             }
             Self::note_source(&mut s, &root, json!({ "lastCheckAt": now, "lastNewFiles": new_files, "error": error }));
+            if error.is_some() {
+                self.defer_catch_up(&mut s, &root);
+            }
             if new_files.unwrap_or(0) > 0 {
                 s.status["pending"][&root] = json!(new_files);
             } else {
@@ -1000,6 +1019,7 @@ impl Auto {
                     s.status["error"] = json!(code);
                     Self::note_source(&mut s, root, json!({ "error": code }));
                     s.status["pending"].as_object_mut().unwrap().shift_remove(root);
+                    self.defer_catch_up(&mut s, root);
                 }
                 self.changed();
                 false
@@ -1056,7 +1076,10 @@ impl Auto {
             let id = entry["jobId"].as_str().unwrap_or("").to_string();
             let lanes = plan.get(root).cloned().unwrap_or_default();
             if lanes.is_empty() {
-                if entry["pausedForDevices"] != true {
+                // (a catch-up job the user paused stays theirs: a device hold would resume it
+                // once the device came back, and its run would carry on unasked)
+                let user_paused = || entry["pausedForWindow"] != true && Self::in_catch_up(&self.lock(), root) && self.o.service.get(&id).is_ok_and(|j| j["state"] == "paused");
+                if entry["pausedForDevices"] != true && !user_paused() {
                     if self.o.service.pause(&id).is_ok() {
                         self.set_entry(root, "pausedForDevices", true);
                     }
@@ -1108,6 +1131,7 @@ impl Auto {
         if self.lock().settings["enabled"] != true {
             return Ok(());
         }
+        self.retry_stranded(time);
         if !inside {
             return self.catch_up_outside();
         }
@@ -1172,6 +1196,34 @@ impl Auto {
         let allocated = self.allocate(None);
         self.note_round_done();
         allocated
+    }
+
+    /// Back off from the time a check, job or start fails, not from its dispatch: a long job
+    /// may fail after the previous retry deadline. A completed batch or the run's end resets it.
+    fn defer_catch_up(&self, s: &mut Inner, root: &str) {
+        const FIRST: i64 = 15 * 60_000;
+        const MOST: i64 = 6 * 60 * 60_000;
+        if !Self::in_catch_up(s, root) {
+            return;
+        }
+        let wait = s.catch_up_retry.get(root).map_or(FIRST, |[_, wait]| (*wait * 2).min(MOST));
+        s.catch_up_retry.insert(root.to_string(), [(self.o.now)() + wait, wait]);
+    }
+
+    /// Retry failed catch-up work independently of the window or schedule. Active jobs
+    /// (including user pauses), queued checks and pending starts already have work to follow.
+    fn retry_stranded(&self, now: i64) {
+        let mut s = self.lock();
+        let catching = Self::catching(&s);
+        s.catch_up_retry.retain(|r, _| catching.contains(r));
+        for root in catching {
+            let stranded = s.status["active"].get(&root).is_none()
+                && !s.status["round"].as_array().unwrap().iter().any(|r| r == root.as_str())
+                && s.status["pending"][&root].as_f64().unwrap_or(0.0) <= 0.0;
+            if stranded && s.catch_up_retry.get(&root).is_some_and(|[at, _]| now >= *at) {
+                s.status["round"].as_array_mut().unwrap().push(json!(root));
+            }
+        }
     }
 
     /// Outside the window only the vehicles in their catch-up run are checked and given jobs;

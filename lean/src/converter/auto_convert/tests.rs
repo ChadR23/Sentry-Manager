@@ -14,10 +14,16 @@ struct FakeService {
     resumed: Mutex<Vec<String>>,
     lanes: Mutex<Vec<(String, Value)>>,
     fixed_id: Option<String>,
+    start_error: Mutex<Option<String>>,
+    start_attempts: std::sync::atomic::AtomicUsize,
 }
 
 impl AutoService for FakeService {
     fn start(&self, c: &Value) -> SResult<String> {
+        self.start_attempts.fetch_add(1, Ordering::SeqCst);
+        if let Some(code) = self.start_error.lock().unwrap().as_deref() {
+            return Err(Fail::code(code));
+        }
         let mut st = self.started.lock().unwrap();
         let id = self.fixed_id.clone().unwrap_or_else(|| format!("job-{}", st.len() + 1));
         st.push(json!({ "id": id, "sourceRoot": c["sourceRoot"], "codec": c["codec"], "auto": c["autoConvert"], "lanes": c.get("lanes") }));
@@ -1132,4 +1138,276 @@ fn a_setup_saved_without_the_switch_keeps_nodes_behaviour() {
     assert!(t.settings().get("catchUp").is_none());
     assert!(t.s.started().is_empty(), "waits for the window, as Node does");
     assert!(t.status("catchUp").is_null());
+}
+
+// ---- catch-up fix round 1
+
+#[test]
+fn a_shorter_keep_while_a_job_runs_rechecks_after_it() {
+    let t = sched_with(tempdir().unwrap(), utc_ms(2026, 11, 21, 10), dated_clips);
+    let keep = |days: i64| {
+        let mut c = car("/cars/a", "h265");
+        c["keepRecent"] = json!({ "days": days, "zone": "UTC" });
+        c
+    };
+    save_nightly(&t, keep(30));
+    finish(&t, "job-1", false);
+    t.auto.tick();
+    assert!(!in_catch_up(&t, "/cars/a"));
+    // the 02:00 check starts an ordinary job, kept at 30 days
+    t.at(utc_ms(2026, 11, 22, 2));
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 2);
+    save_nightly(&t, keep(7));
+    assert!(in_catch_up(&t, "/cars/a"));
+    assert_eq!(t.s.started().len(), 2, "the running job carries on");
+    // it ends with nothing left under 30 days: that says nothing about 7
+    finish(&t, "job-2", false);
+    t.auto.tick();
+    assert!(in_catch_up(&t, "/cars/a"), "the run goes on under the new keep window");
+    assert_eq!(t.s.started().len(), 3, "checked again at once");
+    assert_eq!(t.s.get("job-3").unwrap()["config"]["keepRecent"]["days"], 7);
+    finish(&t, "job-3", false);
+    t.auto.tick();
+    assert!(!in_catch_up(&t, "/cars/a"));
+}
+
+const LANE_GPU: &str = "pci:0000:03:00.0";
+
+#[test]
+fn a_group_or_profile_changed_during_catch_up_is_checked_before_it_ends() {
+    for (key, next) in [("includedGroups", json!(["RecentClips", "SentryClips"])), ("profileId", json!("aggressive"))] {
+        let (t, _) = sched_off_peak(utc_ms(2026, 11, 21, 10), false);
+        let mut c = car("/cars/a", "h265");
+        c["includedGroups"] = json!(["RecentClips"]);
+        let save = |config: &Value| {
+            t.auto.configure(&shared(json!({ "enabled": true, "window": { "follow": "off-peak" }, "schedule": nightly(), "catchUp": true, "config": config }))).unwrap();
+        };
+        save(&c);
+        c[key] = next.clone();
+        save(&c);
+        assert_eq!(t.s.started().len(), 1, "the old job is still running");
+        finish(&t, "job-1", false);
+        t.auto.tick();
+        assert_eq!(t.s.started().len(), 2, "{key}: the new config is checked outside the window");
+        assert_eq!(t.s.get("job-2").unwrap()["config"][key], next);
+        assert!(in_catch_up(&t, "/cars/a"));
+        finish(&t, "job-2", false);
+        t.auto.tick();
+        assert!(!in_catch_up(&t, "/cars/a"));
+    }
+}
+
+#[test]
+fn a_user_pause_outlives_a_device_going_and_coming_back() {
+    let devices = Arc::new(Mutex::new(vec![json!({ "id": LANE_GPU, "kind": "dri" })]));
+    let d = devices.clone();
+    let t = sched_with(tempdir().unwrap(), utc_ms(2026, 11, 21, 10), move |o| {
+        o.devices = Some(Arc::new(move || Ok(d.lock().unwrap().clone())));
+        o.is_cheap_now = Some(Arc::new(|_| Some(false)));
+    });
+    let mut c = car("/cars/a", "h265");
+    c["lanes"] = json!([{ "device": LANE_GPU, "concurrency": 1 }]);
+    t.auto.configure(&shared(json!({ "enabled": true, "window": { "follow": "off-peak" }, "schedule": nightly(), "catchUp": true, "config": c }))).unwrap();
+    assert_eq!(t.s.started().len(), 1);
+    t.s.set("job-1", |j| j["state"] = json!("paused"));
+    devices.lock().unwrap().clear();
+    t.auto.tick();
+    devices.lock().unwrap().push(json!({ "id": LANE_GPU, "kind": "dri" }));
+    t.auto.tick();
+    assert!(t.s.paused.lock().unwrap().is_empty(), "no device hold over the user's pause");
+    assert!(t.s.resumed.lock().unwrap().is_empty(), "only Resume resumes it");
+    assert_eq!(t.status("active")["/cars/a"]["pausedForDevices"], false);
+    // Once the user resumes, a real device hold still resumes automatically on recovery.
+    t.s.set("job-1", |j| j["state"] = json!("encoding"));
+    devices.lock().unwrap().clear();
+    t.auto.tick();
+    assert_eq!(t.status("active")["/cars/a"]["pausedForDevices"], true);
+    t.s.set("job-1", |j| j["state"] = json!("paused"));
+    devices.lock().unwrap().push(json!({ "id": LANE_GPU, "kind": "dri" }));
+    t.auto.tick();
+    assert_eq!(*t.s.resumed.lock().unwrap(), vec!["job-1".to_string()]);
+}
+
+/// A store with an off-peak window outside its cheap period, whose share is down while `down` holds.
+fn flaky_share(now: i64) -> (Sched, Arc<AtomicBool>) {
+    let down = Arc::new(AtomicBool::new(true));
+    let dn = down.clone();
+    let t = sched_with(tempdir().unwrap(), now, move |o| {
+        o.is_cheap_now = Some(Arc::new(|_t| Some(false)));
+        o.scanner = Arc::new(move |_c: &Value, _a: &AtomicBool, out: &mut dyn FnMut(Value) -> bool| {
+            if dn.load(Ordering::SeqCst) {
+                return Err("SOURCE_UNAVAILABLE".into());
+            }
+            for i in 0..2 {
+                out(json!({ "relativePath": format!("RecentClips/{i}.mp4"), "sourceBytes": 100, "mtimeMs": 1 }));
+            }
+            Ok(())
+        });
+    });
+    t.auto.configure(&shared(json!({ "enabled": true, "window": { "follow": "off-peak" }, "schedule": nightly(), "catchUp": true, "config": car("/cars/a", "h265") }))).unwrap();
+    wait_ticks(&t.auto);
+    (t, down)
+}
+
+const MIN: i64 = 60_000;
+
+#[test]
+fn a_stranded_catch_up_retries_with_backoff_outside_the_window() {
+    let t0 = utc_ms(2026, 11, 21, 10);
+    let (t, down) = flaky_share(t0);
+    assert_eq!(t.status("sources")["/cars/a"]["error"], "SOURCE_UNAVAILABLE");
+    assert!(in_catch_up(&t, "/cars/a"));
+    let checks = |t: &Sched| t.status("sources")["/cars/a"]["lastCheckAt"].clone();
+    // Retried 15 minutes after failure, then 30, 60 ... up to 6 hours.
+    let mut at = t0;
+    for gap in [15, 30, 60, 120, 240, 360, 360] {
+        t.at(at + gap * MIN - 1);
+        t.auto.tick();
+        assert_ne!(checks(&t), json!(at + gap * MIN - 1), "not before {gap} minutes");
+        at += gap * MIN;
+        t.at(at);
+        t.auto.tick();
+        assert_eq!(checks(&t), json!(at), "retried after {gap} minutes");
+    }
+    // the share is back: the next retry starts the job, outside the window
+    down.store(false, Ordering::SeqCst);
+    at += 360 * MIN;
+    t.at(at);
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 1);
+    // its job fails: the run waits for the next retry, not for the schedule
+    t.s.set("job-1", |j| j["state"] = json!("failed"));
+    t.auto.tick();
+    t.at(at + 359 * MIN);
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 1);
+    t.at(at + 360 * MIN + 30_000);
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 2, "retried with the backoff kept");
+    // a completed job resets it
+    finish(&t, "job-2", false);
+    t.auto.tick();
+    assert!(!in_catch_up(&t, "/cars/a"));
+}
+
+#[test]
+fn a_catch_up_start_error_retries_without_a_scheduled_check() {
+    let t0 = utc_ms(2026, 11, 21, 10);
+    let (t, _) = sched_off_peak(t0, false);
+    *t.s.start_error.lock().unwrap() = Some("SOURCE_UNAVAILABLE".into());
+    t.auto.configure(&shared(json!({ "enabled": true, "window": { "follow": "off-peak" }, "schedule": nightly(), "catchUp": true, "config": car("/cars/a", "h265") }))).unwrap();
+    assert_eq!(t.s.start_attempts.load(Ordering::SeqCst), 1);
+    assert!(in_catch_up(&t, "/cars/a"));
+    assert_eq!(t.status("sources")["/cars/a"]["error"], "SOURCE_UNAVAILABLE");
+    t.at(t0 + 15 * MIN - 1);
+    t.auto.tick();
+    assert_eq!(t.s.start_attempts.load(Ordering::SeqCst), 1);
+    *t.s.start_error.lock().unwrap() = None;
+    t.at(t0 + 15 * MIN);
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 1, "a refused start doesn't strand the run");
+    assert_eq!(t.s.start_attempts.load(Ordering::SeqCst), 2);
+    assert!(t.s.paused.lock().unwrap().is_empty());
+}
+
+#[test]
+fn catch_up_job_retries_wait_from_failure_and_reset_after_a_completed_batch() {
+    let t0 = utc_ms(2026, 11, 21, 10);
+    let (t, _) = sched_off_peak(t0, false);
+    t.auto.configure(&shared(json!({ "enabled": true, "window": { "follow": "off-peak" }, "schedule": nightly(), "catchUp": true, "config": car("/cars/a", "h265") }))).unwrap();
+    t.s.set("job-1", |j| j["state"] = json!("failed"));
+    t.auto.tick();
+    t.at(t0 + 15 * MIN - 1);
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 1);
+    t.at(t0 + 15 * MIN);
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 2);
+    // A long-running retry fails after its old timer has expired. Wait from this failure.
+    let failed_at = t0 + 120 * MIN;
+    t.at(failed_at);
+    t.s.set("job-2", |j| j["state"] = json!("failed"));
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 2, "no immediate retry after a late failure");
+    t.at(failed_at + 30 * MIN - 1);
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 2);
+    t.at(failed_at + 30 * MIN);
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 3);
+    finish(&t, "job-3", true);
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 4, "the next batch starts immediately after success");
+    assert!(in_catch_up(&t, "/cars/a"));
+    t.s.set("job-4", |j| j["state"] = json!("failed"));
+    t.auto.tick();
+    t.at(failed_at + 45 * MIN - 1);
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 4);
+    t.at(failed_at + 45 * MIN);
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 5, "success resets the next wait to 15 minutes");
+}
+
+#[test]
+fn a_cancelled_or_user_paused_catch_up_is_not_retried() {
+    let t0 = utc_ms(2026, 11, 21, 10);
+    let (t, down) = flaky_share(t0);
+    down.store(false, Ordering::SeqCst);
+    t.at(t0 + 16 * MIN);
+    t.auto.tick();
+    t.at(t0 + 32 * MIN);
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 1);
+    t.s.set("job-1", |j| j["state"] = json!("paused"));
+    for h in 1..=12 {
+        t.at(t0 + h * 60 * MIN);
+        t.auto.tick();
+    }
+    assert_eq!(t.s.started().len(), 1, "a paused job holds its vehicle");
+    assert!(t.s.resumed.lock().unwrap().is_empty());
+    t.s.set("job-1", |j| j["state"] = json!("cancelled"));
+    t.auto.tick();
+    assert!(!in_catch_up(&t, "/cars/a"));
+    for h in 13..=24 {
+        t.at(t0 + h * 60 * MIN);
+        t.auto.tick();
+    }
+    assert_eq!(t.s.started().len(), 1, "a cancelled run isn't retried");
+}
+
+/// A stored nightly, off-peak setup with /cars/a catching up and its job-1 paused when the server stopped.
+fn restart_with_paused_job(paused_for_window: bool) -> Sched {
+    let now = utc_ms(2026, 11, 21, 10);
+    let d = tempdir().unwrap();
+    let settings = json!({ "enabled": true, "intervalMinutes": 1440, "window": { "follow": "off-peak" }, "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": true });
+    std::fs::write(d.path().join("settings.json"), settings.to_string()).unwrap();
+    let ids = if paused_for_window { json!(["job-1"]) } else { json!([]) };
+    std::fs::write(d.path().join("state.json"), json!({ "pausedForWindowJobIds": ids, "catchUp": { "/cars/a": { "since": now - 86_400_000 } } }).to_string()).unwrap();
+    let t = sched_with(d, now, |o| o.is_cheap_now = Some(Arc::new(|_t| Some(false))));
+    let mut c = car("/cars/a", "h265");
+    c["autoConvert"] = json!(true);
+    t.s.jobs.lock().unwrap().insert("job-1".into(), json!({ "id": "job-1", "state": "paused", "config": c, "items": [] }));
+    t.auto.start();
+    t.auto.tick();
+    t
+}
+
+#[test]
+fn after_a_restart_a_window_paused_catch_up_job_resumes() {
+    let t = restart_with_paused_job(true);
+    assert_eq!(*t.s.resumed.lock().unwrap(), vec!["job-1".to_string()], "its run ignores the window");
+    assert_eq!(t.status("active")["/cars/a"]["pausedForWindow"], false);
+    assert!(t.s.started().is_empty());
+    t.auto.stop();
+}
+
+#[test]
+fn after_a_restart_a_user_paused_catch_up_job_stays_paused() {
+    let t = restart_with_paused_job(false);
+    assert!(t.s.resumed.lock().unwrap().is_empty());
+    assert!(t.s.started().is_empty(), "its vehicle has a job: no other starts");
+    assert!(in_catch_up(&t, "/cars/a"));
+    t.auto.stop();
 }
