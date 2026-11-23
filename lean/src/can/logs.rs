@@ -34,6 +34,14 @@ pub const MAX_PARTIAL: usize = 16;
 pub const MAX_PARALLEL: usize = 8;
 const RESCAN_MS: f64 = 10.0 * 60_000.0;
 
+/// What `plan` found a chunk's checks leave to do.
+enum Plan {
+    /// the same file is all here: this answer
+    Already(Value),
+    /// write the chunk (`replacing`: a new copy of a finished file whose check failed)
+    Write { replacing: bool },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Name {
     pub vehicle_key: String,
@@ -314,6 +322,38 @@ impl CanLogs {
 
     /// One chunk of a file (receive): { received, length, complete[, already] }.
     pub fn receive(&self, name: &str, body: &[u8], offset: f64, length: f64, sha256: &str) -> Result<Value, CanError> {
+        let (nm, file) = self.head(name, offset, length, sha256)?;
+        {
+            let mut b = self.busy.lock().unwrap();
+            if b.contains(&file) {
+                drop(b);
+                return Err(self.busy_error(name));
+            }
+            b.insert(file.clone());
+        }
+        let r = self.receive_locked(&nm, name, &file, body, offset, length, sha256);
+        self.busy.lock().unwrap().remove(&file);
+        r
+    }
+
+    /// What a chunk's headers decide before its body is read (an upload sent with `Expect:
+    /// 100-continue`): Err, the answer `receive` would give whatever the body; Ok(Some), the
+    /// same file is all here (`201` `already`); Ok(None), send the body. `body_len`: the body's
+    /// Content-Length, when it has one. Nothing is written.
+    pub fn precheck(&self, name: &str, body_len: Option<u64>, offset: f64, length: f64, sha256: &str) -> Result<Option<Value>, CanError> {
+        let (nm, file) = self.head(name, offset, length, sha256)?;
+        if self.busy.lock().unwrap().contains(&file) {
+            return Err(self.busy_error(name));
+        }
+        match self.plan(&nm, name, &file, body_len, offset, length, sha256)? {
+            Plan::Already(v) => Ok(Some(v)),
+            Plan::Write { .. } => Ok(None),
+        }
+    }
+
+    /// The checks of a chunk's own headers: its name, offset, length and hash, and the whole
+    /// file's size limit.
+    fn head(&self, name: &str, offset: f64, length: f64, sha256: &str) -> Result<(Name, PathBuf), CanError> {
         let nm = parse_name(name).ok_or_else(|| can_error(400, "bad_name", "That is not a CAN Bridge log name."))?;
         let safe = |x: f64| x.is_finite() && x.fract() == 0.0 && x.abs() <= 9_007_199_254_740_991.0;
         if !safe(offset) || offset < 0.0 {
@@ -330,22 +370,29 @@ impl CanLogs {
             return Err(can_error(413, "too_large", format!("A {} can be at most {} bytes.", if nm.sidecar { "sidecar" } else { "log" }, limit)));
         }
         let file = self.file_of(name)?;
-        {
-            let mut b = self.busy.lock().unwrap();
-            if b.contains(&file) {
-                drop(b);
-                let r = self.state_of(name).map(|s| s.1).unwrap_or(0.0);
-                return Err(with_received(can_error(409, "busy", "This file is being uploaded by another request."), r));
-            }
-            b.insert(file.clone());
-        }
-        let r = self.receive_locked(&nm, name, &file, body, offset, length, sha256);
-        self.busy.lock().unwrap().remove(&file);
-        r
+        Ok((nm, file))
     }
 
+    /// 409 busy: another request is on this file.
+    fn busy_error(&self, name: &str) -> CanError {
+        let r = self.state_of(name).map(|s| s.1).unwrap_or(0.0);
+        with_received(can_error(409, "busy", "This file is being uploaded by another request."), r)
+    }
+
+    /// A different copy of a finished file that may not take its place: `409 busy` (send it
+    /// again later, from offset 0) while the stored record waits to be judged again after its
+    /// new copy could not be read, else `409 exists_different`.
+    fn not_replaceable(&self, key: &str, log_name: &str) -> CanError {
+        if self.trust.get().is_some_and(|t| t.rereading(key, log_name)) {
+            return with_received(can_error(409, "busy", "This log is being checked again; send it again in a minute."), 0.0);
+        }
+        can_error(409, "exists_different", "A different file with this name is already here.")
+    }
+
+    /// Every check of a chunk that its headers and the files here decide (`body_len`: its
+    /// size, when known; the size checks wait for it otherwise), in `receive`'s order.
     #[allow(clippy::too_many_arguments)]
-    fn receive_locked(&self, nm: &Name, name: &str, file: &Path, body: &[u8], offset: f64, length: f64, sha256: &str) -> Result<Value, CanError> {
+    fn plan(&self, nm: &Name, name: &str, file: &Path, body_len: Option<u64>, offset: f64, length: f64, sha256: &str) -> Result<Plan, CanError> {
         let log_name = if nm.sidecar { &name[..name.len() - 5] } else { name };
         let half = if nm.sidecar { Half::Sidecar } else { Half::Log };
         // a new copy may take the stored one's place only while its stored record says so (see
@@ -359,10 +406,10 @@ impl CanLogs {
         let replacing = stat(file).is_some();
         if had.0 == "complete" {
             if had.2 == Some(length) && util::hash_file(file).map(|h| h.0).ok().as_deref() == Some(sha256) {
-                return Ok(json!({ "received": n(length), "length": n(length), "complete": true, "already": true }));
+                return Ok(Plan::Already(json!({ "received": n(length), "length": n(length), "complete": true, "already": true })));
             }
             if !replaceable() {
-                return Err(can_error(409, "exists_different", "A different file with this name is already here."));
+                return Err(self.not_replaceable(&nm.vehicle_key, log_name));
             }
             had = ("missing".into(), 0.0, None);
         }
@@ -372,11 +419,13 @@ impl CanLogs {
         if offset != had.1 {
             return Err(with_received(can_error(409, "offset_mismatch", format!("Expected Upload-Offset {}.", json::num_str(had.1))), had.1));
         }
-        if offset + body.len() as f64 > length {
-            return Err(with_received(can_error(400, "past_end", "The chunk goes past Upload-Length."), had.1));
-        }
-        if body.len() as u64 > MAX_CHUNK {
-            return Err(with_received(can_error(413, "chunk_too_large", format!("A chunk can be at most {} bytes.", MAX_CHUNK)), had.1));
+        if let Some(len) = body_len {
+            if offset + len as f64 > length {
+                return Err(with_received(can_error(400, "past_end", "The chunk goes past Upload-Length."), had.1));
+            }
+            if len > MAX_CHUNK {
+                return Err(with_received(can_error(413, "chunk_too_large", format!("A chunk can be at most {} bytes.", MAX_CHUNK)), had.1));
+            }
         }
         if offset == 0.0 && (self.free_bytes)() < length * 2.0 + self.min_free {
             return Err(can_error(507, "no_space", "There is not enough free space for this file."));
@@ -391,6 +440,17 @@ impl CanLogs {
                 return Err(with_received(can_error(429, "too_many_partial", "Too many unfinished uploads for this car; finish or wait for them."), 0.0));
             }
         }
+        Ok(Plan::Write { replacing })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn receive_locked(&self, nm: &Name, name: &str, file: &Path, body: &[u8], offset: f64, length: f64, sha256: &str) -> Result<Value, CanError> {
+        let log_name = if nm.sidecar { &name[..name.len() - 5] } else { name };
+        let half = if nm.sidecar { Half::Sidecar } else { Half::Log };
+        let replacing = match self.plan(nm, name, file, Some(body.len() as u64), offset, length, sha256)? {
+            Plan::Already(v) => return Ok(v),
+            Plan::Write { replacing } => replacing,
+        };
         let io = |e: std::io::Error| can_error(500, "server_error", e.to_string());
         fs::create_dir_all(file.parent().unwrap()).map_err(io)?;
         let part = PathBuf::from(format!("{}.part", file.display()));
@@ -439,7 +499,7 @@ impl CanLogs {
                 // the new copy is dropped, as when the first look refused it
                 let _ = fs::remove_file(&part);
                 let _ = fs::remove_file(&part_json);
-                return Err(can_error(409, "exists_different", "A different file with this name is already here."));
+                return Err(self.not_replaceable(&nm.vehicle_key, log_name));
             }
         } else {
             fs::rename(&part, file).map_err(io)?;

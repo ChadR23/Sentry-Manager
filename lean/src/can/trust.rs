@@ -501,6 +501,15 @@ impl CanTrust {
         }
     }
 
+    /// Whether this log's record waits to be judged again because its new copy could not be
+    /// read: no half is taken until then, but nothing says the bridge's copy is wrong, so the
+    /// upload API answers a retryable `409 busy` rather than `exists_different`.
+    pub fn rereading(&self, key: &str, name: &str) -> bool {
+        let tf = self.load(key);
+        let t = tf.lock().unwrap();
+        t.logs.get(name).is_some_and(|r| r.get("status").and_then(|s| s.as_str()) == Some("waiting") && r.get("reason").and_then(|x| x.as_str()) == Some(UNREAD))
+    }
+
     /// replaceable_now(key, name, size, half): see `replaceable` (a first look, before a copy arrives).
     pub fn replaceable_now(&self, key: &str, name: &str, size: f64, half: Half) -> bool {
         let side_here = self.sidecar_here(key, name);
@@ -649,7 +658,11 @@ impl CanTrust {
                     issues.push(json!({ "kind": "failed", "index": i, "name": cur.1, "text": format!("log {} ({}) failed its check: {}", i, cur.1, js_str(cur.2.get("reason"))) }));
                 }
                 if let Some(prev) = get(i - 1) {
-                    if s(prev.2, "status").as_deref() != Some("failed") && (s(cur.2, "prevName").as_deref() != Some(prev.1.as_str()) || cur.2.get("prevSha256") != prev.2.get("sha256")) {
+                    let names = |n: &str, r: &Value| s(cur.2, "prevName").as_deref() == Some(n) && cur.2.get("prevSha256") == r.get("sha256");
+                    // (it may name another copy of that index: a chain continued from an older
+                    // sidecar repeats indexes, each a duplicate above, and goes on from its own)
+                    let follows = names(&prev.1, prev.2) || part.iter().any(|e| idx(e.1) == i - 1 && names(&e.0, e.1));
+                    if s(prev.2, "status").as_deref() != Some("failed") && !follows {
                         issues.push(json!({ "kind": "mismatch", "index": i, "name": cur.1, "text": format!("log {} ({}) does not follow the stored log {} ({}): swapped or changed{}", i, cur.1, i - 1, prev.1, note_of(cur.2)) }));
                     }
                     let (a, b) = (at(&prev.1), at(&cur.1));

@@ -2090,22 +2090,41 @@ impl Can {
     }
 
     pub fn upload(self: &Arc<Self>, req: &Req, raw_path: &str) -> Res {
+        match self.upload_gate(req, raw_path) {
+            Ok(g) => self.upload_gated(req, raw_path, g),
+            Err(r) => r,
+        }
+    }
+
+    /// 429 slow_down, with Retry-After: the seconds until the window that refused it ends.
+    fn slow_down(error: &str, until: f64, now: f64) -> Res {
+        let mut r = Self::fail(429, "slow_down", error, None);
+        let secs = ((until - now) / 1000.0).ceil().max(1.0) as u64;
+        if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+            r.headers_mut().insert(header::RETRY_AFTER, v);
+        }
+        r
+    }
+
+    /// The upload API's first checks, once per request (uploads on, HTTPS, the token, the
+    /// token's pace): the token, or the answer.
+    fn upload_gate(&self, req: &Req, raw_path: &str) -> Result<UploadGate, Res> {
         let (enabled, _, tokens) = match self.can_cfg() {
             Ok(c) => c,
-            Err(e) => return self.upload_failed(&e),
+            Err(e) => return Err(self.upload_failed(&e)),
         };
         if !enabled || tokens.is_empty() {
-            return Self::fail(404, "off", "Not found", None);
+            return Err(Self::fail(404, "off", "Not found", None));
         }
         if !self.secure(req) {
-            return Self::fail(403, "https_only", "CAN logs are only taken over HTTPS.", None);
+            return Err(Self::fail(403, "https_only", "CAN logs are only taken over HTTPS.", None));
         }
         let ip = if req.local_port == self.ctx.can_port() { if req.remote.is_empty() { "?".into() } else { req.remote.clone() } } else { self.ctx.client_key(&req.remote) };
         let now = util::now_ms();
         let Some(tok) = self.token_of(req, &tokens) else {
             let mut b = self.bad_tries.lock().unwrap();
-            if b.get(&ip).is_some_and(|x| x.1 > now && x.0 >= 20) {
-                return Self::fail(429, "slow_down", "Too many wrong tokens from this address; try again later.", None);
+            if let Some(x) = b.get(&ip).filter(|x| x.1 > now && x.0 >= 20) {
+                return Err(Self::slow_down("Too many wrong tokens from this address; try again later.", x.1, now));
             }
             let fresh = b.get(&ip).is_none_or(|x| x.1 < now);
             let v = if fresh { (1, now + 600_000.0) } else { let x = b[&ip]; (x.0 + 1, x.1) };
@@ -2115,10 +2134,14 @@ impl Can {
             }
             let mut r = Self::fail(401, "bad_token", "A valid CAN Bridge token is needed.", None);
             r.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-            return r;
+            return Err(r);
         };
         let tok_id = tok.get("id").map(|i| json::js_str(Some(i))).unwrap_or_default();
-        {
+        // uploads count toward the pace; `ping` and `status` (the bridge asks them every pass,
+        // 500 names at a time) do not
+        let sub = &raw_path["/api/can/logs".len().min(raw_path.len())..];
+        let asks = (req.method == Method::GET && sub == "/ping") || (req.method == Method::POST && sub == "/status");
+        if !asks {
             let mut p = self.pace.lock().unwrap();
             let e = p.entry(tok_id.clone()).or_insert((0, 0.0));
             if e.1 < now {
@@ -2126,10 +2149,61 @@ impl Can {
             } else {
                 e.0 += 1;
                 if e.0 > 1200 {
-                    return Self::fail(429, "slow_down", "Too many requests with this token; try again later.", None);
+                    return Err(Self::slow_down("Too many requests with this token; try again later.", e.1, now));
                 }
             }
         }
+        Ok(UploadGate { tok, tok_id })
+    }
+
+    /// An upload API request sent with `Expect: 100-continue`, before its body is read
+    /// (`body_len`: its Content-Length): every check its headers decide, so a refusal reaches
+    /// the bridge before it sends the piece. Err: the answer (a refusal, or `201` `already`
+    /// for the same file); Ok: read the body, then `upload_gated` with this.
+    pub fn upload_head(self: &Arc<Self>, req: &Req, raw_path: &str, body_len: Option<u64>) -> Result<UploadGate, Res> {
+        let g = self.upload_gate(req, raw_path)?;
+        let sub = &raw_path["/api/can/logs".len().min(raw_path.len())..];
+        if req.method == Method::GET && sub == "/ping" {
+            return Ok(g);
+        }
+        if req.method == Method::POST && sub == "/status" {
+            if body_len.is_some_and(|l| l > 1024 * 1024) {
+                return Err(Self::fail(413, "error", "That file is too large.", None));
+            }
+            return Ok(g);
+        }
+        let Some(rest) = sub.strip_prefix('/') else { return Err(Self::fail(404, "not_found", "Not found", None)) };
+        let Some(name) = crate::api::decode(rest, false) else { return Err(Self::fail(400, "bad_name", "That is not a CAN Bridge log name.", None)) };
+        let Some(nm) = parse_name(&name).filter(|_| req.method == Method::POST) else { return Err(Self::fail(404, "not_found", "Not found", None)) };
+        let key = match self.claim(&g.tok_id, &nm.vehicle_key, false) {
+            Ok(k) => k,
+            Err(e) => return Err(self.upload_failed(&e)),
+        };
+        if key.as_deref() != Some(nm.vehicle_key.as_str()) {
+            return Err(Self::fail(403, "wrong_car", &format!("This token is for car key {}, not {}.", key.unwrap_or_else(|| "null".into()), nm.vehicle_key), None));
+        }
+        if body_len.is_some_and(|l| l > logs::MAX_CHUNK) {
+            return Err(Self::fail(413, "error", "That file is too large.", None));
+        }
+        let sha = req.headers.get("upload-sha256").and_then(|v| v.to_str().ok()).unwrap_or("").to_lowercase();
+        match self.logs.precheck(&name, body_len, Self::num_header(req, "upload-offset"), Self::num_header(req, "upload-length"), &sha) {
+            Ok(None) => Ok(g),
+            Ok(Some(out)) => Err(self.uploaded(&g.tok_id, &nm, &name, out)),
+            Err(e) => Err(Self::fail_err(e)),
+        }
+    }
+
+    /// A number header of an upload (NaN when missing or empty).
+    fn num_header(req: &Req, h: &str) -> f64 {
+        match req.headers.get(h).and_then(|v| v.to_str().ok()) {
+            None | Some("") => f64::NAN,
+            Some(v) => json::str_number(v),
+        }
+    }
+
+    /// The upload API's answer to a request that passed `upload_gate` (or `upload_head`).
+    pub fn upload_gated(self: &Arc<Self>, req: &Req, raw_path: &str, g: UploadGate) -> Res {
+        let UploadGate { tok, tok_id } = g;
         let sub = &raw_path["/api/can/logs".len()..];
         if req.method == Method::GET && sub == "/ping" {
             return ok(json!({ "ok": true, "api": 1, "vehicleKey": tok.get("key").filter(|k| json::truthy(Some(k))), "maxChunk": logs::MAX_CHUNK, "maxParallel": logs::MAX_PARALLEL, "maxFile": logs::MAX_FILE, "maxSidecar": logs::MAX_SIDECAR, "formats": reader::FORMATS }));
@@ -2154,9 +2228,8 @@ impl Can {
                             }
                         }
                     }
-                    if keys.len() > 1 {
-                        return Self::fail(400, "mixed_cars", "A token is for one car: ask about one car key's files.", None);
-                    }
+                    // a token not tied to a car yet is tied by a batch of one car's names; with
+                    // two cars' names it stays untied and every name answers `forbidden`
                     if keys.len() == 1 {
                         key = match self.claim(&tok_id, &keys[0], false) {
                             Ok(k) => k,
@@ -2187,49 +2260,53 @@ impl Can {
             if key.as_deref() != Some(nm.vehicle_key.as_str()) {
                 return Self::fail(403, "wrong_car", &format!("This token is for car key {}, not {}.", key.unwrap_or_else(|| "null".into()), nm.vehicle_key), None);
             }
-            let num = |h: &str| -> f64 {
-                match req.headers.get(h).and_then(|v| v.to_str().ok()) {
-                    None | Some("") => f64::NAN,
-                    Some(v) => json::str_number(v),
-                }
-            };
             if req.body.len() as u64 > logs::MAX_CHUNK {
                 return Self::fail(413, "error", "That file is too large.", None);
             }
             let sha = req.headers.get("upload-sha256").and_then(|v| v.to_str().ok()).unwrap_or("").to_lowercase();
-            return match self.logs.receive(&name, &req.body, num("upload-offset"), num("upload-length"), &sha) {
-                Ok(out) => {
-                    // (the part was taken: only the token's last use was not noted)
-                    if let Err(e) = self.claim(&tok_id, &nm.vehicle_key, true) {
-                        self.ctx.log("warn", &format!("CAN Bridge token's last use was not kept: {e}"));
-                    }
-                    let complete = out.get("complete") == Some(&Value::Bool(true));
-                    if complete && !json::truthy(out.get("already")) {
-                        self.ctx.log("info", &format!("CAN Bridge: received {} ({} bytes)", name, json::num_str(out["length"].as_f64().unwrap_or(0.0))));
-                        self.ctx.announce("can");
-                        let me = self.clone();
-                        let (k, l) = (nm.vehicle_key.clone(), name.trim_end_matches(".json").to_string());
-                        let l = if name.ends_with(".json") { name[..name.len() - 5].to_string() } else { l };
-                        let replaced = json::truthy(out.get("replaced"));
-                        std::thread::spawn(move || {
-                            if replaced {
-                                // the failed copy's data (indexed only if used anyway) goes first
-                                me.drop_log(&k, &l);
-                            }
-                            me.judge(&k, &l);
-                        });
-                    }
-                    json_res(if complete { 201 } else { 200 }, &out)
-                }
+            return match self.logs.receive(&name, &req.body, Self::num_header(req, "upload-offset"), Self::num_header(req, "upload-length"), &sha) {
+                Ok(out) => self.uploaded(&tok_id, &nm, &name, out),
                 Err(e) => Self::fail_err(e),
             };
         }
         Self::fail(404, "not_found", "Not found", None)
     }
 
+    /// The answer to a chunk taken (or found all here already): its last use noted on the
+    /// token, and a file just completed announced and checked.
+    fn uploaded(self: &Arc<Self>, tok_id: &str, nm: &logs::Name, name: &str, out: Value) -> Res {
+        // (the part was taken: only the token's last use was not noted)
+        if let Err(e) = self.claim(tok_id, &nm.vehicle_key, true) {
+            self.ctx.log("warn", &format!("CAN Bridge token's last use was not kept: {e}"));
+        }
+        let complete = out.get("complete") == Some(&Value::Bool(true));
+        if complete && !json::truthy(out.get("already")) {
+            self.ctx.log("info", &format!("CAN Bridge: received {} ({} bytes)", name, json::num_str(out["length"].as_f64().unwrap_or(0.0))));
+            self.ctx.announce("can");
+            let me = self.clone();
+            let k = nm.vehicle_key.clone();
+            let l = if name.ends_with(".json") { name[..name.len() - 5].to_string() } else { name.to_string() };
+            let replaced = json::truthy(out.get("replaced"));
+            std::thread::spawn(move || {
+                if replaced {
+                    // the failed copy's data (indexed only if used anyway) goes first
+                    me.drop_log(&k, &l);
+                }
+                me.judge(&k, &l);
+            });
+        }
+        json_res(if complete { 201 } else { 200 }, &out)
+    }
+
     fn fail_err(e: CanError) -> Res {
         Self::fail(e.status, if e.code.is_empty() { "error" } else { &e.code }, &e.message, e.received)
     }
+}
+
+/// An upload API request past its first checks (see `Can::upload_head`): its token.
+pub struct UploadGate {
+    tok: Value,
+    tok_id: String,
 }
 
 /// A file opened when the zip comes to it.
