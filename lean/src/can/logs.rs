@@ -55,12 +55,13 @@ enum Plan {
 /// here: see `CanLogs::set_footage`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Kept {
-    /// no footage at all: no car at all, or the key's car has none (every deleted log is older)
+    /// no footage at all: the key's car has none (every deleted log is older)
     Nothing,
     /// the start of its oldest clip (UTC ms)
     Since(f64),
     /// not known now (the share unreachable, a scan running or failed, a setting unreadable,
-    /// or cars exist but none is the key's: unmapped with two or more, or mapped to a removed one)
+    /// or no car is the key's: unmapped with two or more, mapped to a removed one, or no car
+    /// visible at all)
     Unknown,
 }
 
@@ -857,8 +858,10 @@ impl CanLogs {
             None => util::hash_file(&kdir.join(name)).ok().map(|h| h.0),
         };
         let (check, reason) = trust.checks(&key, &[(name.to_string(), size)]).into_iter().next().unwrap_or(("pending", None));
-        // (without its sidecar's end: the longest a log runs, so it is never older too soon)
-        let end = util::read_json(&side_path).as_ref().map(log_end).unwrap_or(None).unwrap_or(nm.started_at as f64 + super::prune::LOG_MAX_MS);
+        // (never before the longest a log runs from its name's time, as the rules go by the name:
+        // a sidecar's wall clock may have been set back, so it is never older too soon)
+        let longest = nm.started_at as f64 + super::prune::LOG_MAX_MS;
+        let end = util::read_json(&side_path).as_ref().and_then(log_end).map_or(longest, |e| e.max(longest));
         self.remove(name)?;
         trust.bury(&key, name, json!({ "size": n(size), "sha256": sha, "side": side_size.map(n), "sideSha256": side_sha, "check": check, "checkReason": reason, "at": n((self.now)()), "why": why, "end": n(end) }));
         Ok(())

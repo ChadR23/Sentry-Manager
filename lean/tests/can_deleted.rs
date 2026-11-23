@@ -45,6 +45,8 @@ struct Bridge {
     der: Vec<u8>,
     index: u64,
     prev: (String, String),
+    /// the sidecar's end_wall_ms for the next log (None: not written)
+    end: Option<f64>,
 }
 
 impl Bridge {
@@ -54,7 +56,7 @@ impl Bridge {
         let sk = SigningKey::from_bytes(&bytes.into()).unwrap();
         let mut der = vec![0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00];
         der.extend_from_slice(sk.verifying_key().to_encoded_point(false).as_bytes());
-        Bridge { sk, der, index: 0, prev: ("-".into(), ZERO.into()) }
+        Bridge { sk, der, index: 0, prev: ("-".into(), ZERO.into()), end: None }
     }
     /// The log and its signed sidecar, as the bridge writes them (into `dir`/KEY).
     fn log(&mut self, dir: &Path, name: &str, body: &[u8]) -> (Vec<u8>, Vec<u8>) {
@@ -67,7 +69,11 @@ impl Bridge {
             "vehicle_key": KEY, "sha256": sha, "length": body.len(), "index": self.index, "prev_name": self.prev.0, "prev_sha256": self.prev.1,
             "signature": base64(sig.to_der().as_bytes())
         });
-        let side_bytes = stringify(&json!({ "format": "canbridge-candump-xz/1", "frames": 10, "integrity": integrity })).into_bytes();
+        let mut sidecar = json!({ "format": "canbridge-candump-xz/1", "frames": 10, "integrity": integrity });
+        if let Some(e) = self.end.take() {
+            sidecar["end_wall_ms"] = json!(e);
+        }
+        let side_bytes = stringify(&sidecar).into_bytes();
         std::fs::write(dir.join(KEY).join(name), body).unwrap();
         std::fs::write(dir.join(KEY).join(side(name)), &side_bytes).unwrap();
         self.prev = (name.to_string(), sha);
@@ -545,10 +551,15 @@ fn a_key_whose_car_cannot_be_told_answers_pending_never_delivered() {
     ctx.settings.lock().unwrap().insert("can-vehicles".into(), json!({ KEY: "a-removed-car" }));
     assert_eq!(can.kept_footage(KEY), Kept::Unknown);
     assert_eq!(ask(&can.logs, &[nm(1)])[&nm(1)], pending, "mapped to a removed car");
-    // no car at all: no footage anywhere, delivered
+    // no car visible at all (manager.db unreadable, or the car removed to be added again):
+    // a rule deleted the log, so a car existed; its footage may still be kept, not known
     ctx.no_cars.store(true, Ordering::SeqCst);
-    assert_eq!(can.kept_footage(KEY), Kept::Nothing);
-    assert_eq!(ask(&can.logs, &[nm(1)])[&nm(1)]["check"], "verified");
+    assert_eq!(can.kept_footage(KEY), Kept::Unknown);
+    assert_eq!(ask(&can.logs, &[nm(1)])[&nm(1)], pending, "no car visible");
+    // the car back: inside its footage again, missing
+    ctx.no_cars.store(false, Ordering::SeqCst);
+    ctx.settings.lock().unwrap().insert("can-vehicles".into(), json!({ KEY: "car1" }));
+    assert_eq!(ask(&can.logs, &[nm(1)])[&nm(1)]["state"], "missing", "the car back: inside its footage");
 }
 
 #[test]
@@ -592,6 +603,14 @@ fn older_than_the_footage_needs_rule_olds_margin_and_the_longest_log() {
     let mut b = Bridge::new(52);
     buried_as(&can, &src, &mut b, 0, "unlinked");
     assert_eq!(can.trust.tomb(KEY, &nm(0)).unwrap()["end"].as_f64(), Some(at(0) + 600_000.0));
+    // a sidecar whose wall clock was set back (its end before the name's time): still ten minutes
+    b.end = Some(at(1) - 7_200_000.0);
+    buried_as(&can, &src, &mut b, 1, "unlinked");
+    assert_eq!(can.trust.tomb(KEY, &nm(1)).unwrap()["end"].as_f64(), Some(at(1) + 600_000.0));
+    // an end later than that is kept
+    b.end = Some(at(2) + 900_000.0);
+    buried_as(&can, &src, &mut b, 2, "unlinked");
+    assert_eq!(can.trust.tomb(KEY, &nm(2)).unwrap()["end"].as_f64(), Some(at(2) + 900_000.0));
     // and the tombstones worked out from an older server's records
     let dir = tmp("margin-derive");
     let (logs, tr, _) = checked(&dir);

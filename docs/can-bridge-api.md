@@ -421,7 +421,7 @@ For a name with a tombstone and no file here, `status` answers:
   - the log ended **at least an hour before** the start of that oldest clip
     (the margin of the rule "older than the car's oldest footage": clip
     names are read in the car's time zone, which may be wrong or missing),
-    or there is no footage to keep (no car at all, or its car has none):
+    or its car has no footage at all:
     `complete`, as above;
   - otherwise, **inside** the footage kept (footage of its time may still
     be here): `missing`, so the bridge may send it again. It is then stored
@@ -430,8 +430,9 @@ For a name with a tombstone and no file here, `status` answers:
     what is kept, is such a log: a bridge that still has it sends it again,
     and the same rule deletes it again later);
   - while that cannot be told (the share away, a scan running or failed,
-    the settings unreadable, or cars here but none is the key's: not chosen
-    with two or more cars, or chosen for a car since removed): `complete`
+    the settings unreadable, or no car is the key's: not chosen with two or
+    more cars, chosen for a car since removed, or no car to be seen at all,
+    for example while the only car is removed to be added again): `complete`
     with `check: pending`; ask again.
 
 **A deleted log sent again** that counts as delivered (above) is taken as

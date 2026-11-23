@@ -381,15 +381,15 @@ impl Can {
     }
 
     /// The oldest footage the car of a CAN key keeps (its car as the routes find it: the one it
-    /// is chosen for, or the only car): `Kept::Nothing` with no car at all or when its car has
-    /// no footage, `Kept::Unknown` while that cannot be told (the key-to-car map unreadable,
-    /// the share away, a scan running or failed), and when cars exist but none is this key's
-    /// (unmapped with two or more cars, or mapped to a car since removed): its car, once
-    /// chosen, may keep footage of the log's time.
+    /// is chosen for, or the only car): `Kept::Nothing` when its car has no footage,
+    /// `Kept::Unknown` while that cannot be told (the key-to-car map unreadable, the share away,
+    /// a scan running or failed), and whenever no car is this key's: unmapped with two or more
+    /// cars, mapped to a car since removed, or no car visible at all (manager.db unreadable, or
+    /// the only car removed to be added again; a rule deleted the log, so a car existed and its
+    /// footage may still be on the share). Its car, once known, may keep footage of the log's time.
     pub fn kept_footage(&self, key: &str) -> Kept {
         let Ok(map) = self.can_map() else { return Kept::Unknown };
         match self.car_in(&map, key) {
-            None if self.ctx.vehicles().is_empty() => Kept::Nothing,
             None => Kept::Unknown,
             Some(v) => self.prune.oldest_kept(&v),
         }
@@ -641,7 +641,7 @@ impl Can {
                 if let Some((check, reason)) = self.trust.rebury(key, name, size, side.map(|sd| (sd, self.side_sha(key, name)))) {
                     self.logs.discard(name);
                     self.drop_log(key, name);
-                    self.ctx.log("info", &format!("CAN Bridge {}: {} (deleted here, older than the car's footage) was sent again: checked ({}{}) and deleted again", key, name, check, reason.map(|r| format!(": {r}")).unwrap_or_default()));
+                    self.ctx.log("info", &format!("CAN Bridge {}: {} ({}) was sent again: checked ({}{}) and deleted again", key, name, if self.trust.tombs(key, &[name.to_string()]).into_iter().next().flatten().as_ref().and_then(|t| t.get("why")).and_then(|w| w.as_str()).is_some_and(|w| super::logs::OWNER_WHYS.contains(&w)) { "deleted here by the owner" } else { "deleted here, older than the car's footage" }, check, reason.map(|r| format!(": {r}")).unwrap_or_default()));
                     self.ctx.announce("can");
                 }
                 Some(rec)
