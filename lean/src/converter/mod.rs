@@ -35,6 +35,7 @@ pub mod process;
 pub mod recovery;
 pub mod runtime;
 pub mod scanner;
+pub mod schedule;
 pub mod service;
 pub mod snapshot;
 pub mod staging;
