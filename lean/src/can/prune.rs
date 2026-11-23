@@ -231,6 +231,34 @@ impl CanPrune {
         Ok(found)
     }
 
+    /// The oldest footage this car keeps, for the logs deleted here (see CanLogs::kept): its
+    /// clips on the share (the footage index) and its protected clips. Not the Recycle Bin:
+    /// footage moved there is deleted for the owner, and "Also delete its CAN data" deletes its
+    /// logs with it (counting the bin would ask the bridge for them again at once). Unknown
+    /// while its footage cannot be trusted (the rules that delete logs wait then too) or read.
+    pub fn oldest_kept(&self, v: &Car) -> super::logs::Kept {
+        use super::logs::Kept;
+        if self.untrusted(v).is_some() {
+            return Kept::Unknown;
+        }
+        let Ok(protected) = self.ctx.protected_rels(&v.id) else { return Kept::Unknown };
+        let mut oldest: Option<f64> = None;
+        let mut add = |rel: &str| {
+            if let Some(t) = clip_start(v, rel) {
+                oldest = Some(oldest.map_or(t, |o| o.min(t)));
+            }
+        };
+        if let Some(s) = self.ctx.scan_of(&v.id) {
+            for f in s.files.iter().filter(|f| f.kind == "clip") {
+                add(&f.rel);
+            }
+        }
+        for rel in protected.iter().filter(|r| is_mp4(r)) {
+            add(rel);
+        }
+        oldest.map_or(Kept::Nothing, Kept::Since)
+    }
+
     /// pairing(key): name -> 'paired' | 'none' for one key's logs, or None (not mapped, or its car
     /// not scanned yet); an error when what it needs cannot be read (GET /api/can/files answers it).
     pub fn pairing(&self, key: &str) -> Result<Option<HashMap<String, &'static str>>, String> {
@@ -332,14 +360,15 @@ impl CanPrune {
                         pending += 1;
                         continue;
                     }
-                    if let Err(e) = self.logs.remove(&s.row.name) {
+                    // (with its tombstone: see CanLogs::delete_log)
+                    if let Err(e) = self.logs.delete_log(&s.row.name, "with-footage") {
                         if e.status != 404 {
                             self.ctx.log("warn", &format!("CAN log {}: not deleted: {}", s.row.name, e.message));
                             continue;
                         }
+                        self.trust.deleted(key, &s.row.name);
                     }
                     (self.drop)(key, &s.row.name);
-                    self.trust.deleted(key, &s.row.name);
                     removed += 1;
                     names.push(s.row.name.clone());
                 }
@@ -561,14 +590,15 @@ impl CanPrune {
             if !self.settings().is_ok_and(|c| Self::any_on(&c)) {
                 break;
             }
-            if let Err(e) = self.logs.remove(&t.1) {
+            // (with its tombstone: see CanLogs::delete_log)
+            if let Err(e) = self.logs.delete_log(&t.1, t.4) {
                 if e.status != 404 {
                     self.ctx.log("warn", &format!("CAN log {}: not deleted: {}", t.1, e.message));
                     continue;
                 }
+                self.trust.deleted(&t.0, &t.1);
             }
             (self.drop)(&t.0, &t.1);
-            self.trust.deleted(&t.0, &t.1);
             removed += 1;
             names.push(t.1.clone());
             *by_why.entry(t.4).or_default() += 1;

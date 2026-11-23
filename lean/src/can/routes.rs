@@ -8,7 +8,7 @@ use super::calc;
 use super::ctx::{CanCtx, Car, Rec, Who};
 use super::index::{self, CanIndex};
 use super::json::{self, n};
-use super::logs::{self, parse_name, CanError, CanLogs};
+use super::logs::{self, parse_name, CanError, CanLogs, Kept};
 use super::models;
 use super::prune::{self, CanPrune};
 use super::reader;
@@ -254,7 +254,16 @@ pub struct Can {
     progress_due: AtomicBool,
     /// GET /api/can/now's answers, a few seconds each: "<keys>|<units>" -> (when, answer)
     now_cache: Mutex<indexmap::IndexMap<String, (f64, Option<Value>)>>,
+    /// the background checks of logs not judged yet are running
+    backfilling: AtomicBool,
 }
+
+/// Logs judged at a time by the background checks (then a pause, so uploads and the
+/// index are not held up by a server with many logs from before the checks).
+pub const BACKFILL_BATCH: usize = 4;
+const BACKFILL_PAUSE: Duration = Duration::from_millis(250);
+/// A deleted log's sidecar sent again without its log is dropped after this long.
+const LONE_SIDE_MS: f64 = 10.0 * 60_000.0;
 
 fn can_index_dir(ctx: &dyn CanCtx) -> PathBuf {
     ctx.data_dir().join("can-index")
@@ -357,8 +366,30 @@ impl Can {
                 on_port: Mutex::new(None),
                 progress_due: AtomicBool::new(false),
                 now_cache: Mutex::new(indexmap::IndexMap::new()),
+                backfilling: AtomicBool::new(false),
             }
         })
+        .with_footage_hook()
+    }
+
+    /// The upload API's status (and the checks of deleted logs sent again) learn the oldest
+    /// footage of each car key's car from here.
+    fn with_footage_hook(self: Arc<Self>) -> Arc<Self> {
+        let w = Arc::downgrade(&self);
+        self.logs.set_footage(Box::new(move |key| w.upgrade().map_or(Kept::Unknown, |c| c.kept_footage(key))));
+        self
+    }
+
+    /// The oldest footage the car of a CAN key keeps (its car as the routes find it: the one it
+    /// is chosen for, or the only car): `Kept::Nothing` without a car or without any footage,
+    /// `Kept::Unknown` while that cannot be told (the key-to-car map unreadable, the share
+    /// away, a scan running or failed).
+    pub fn kept_footage(&self, key: &str) -> Kept {
+        let Ok(map) = self.can_map() else { return Kept::Unknown };
+        match self.car_in(&map, key) {
+            None => Kept::Nothing,
+            Some(v) => self.prune.oldest_kept(&v),
+        }
     }
 
     /// The background work the Node server starts: the index after 20 s, the checks after 15 s
@@ -368,6 +399,12 @@ impl Can {
         if let Err(e) = self.viewer_car_data() {
             self.ctx.log("warn", &format!("Car data in the Viewer: not worked out at start: {e}"));
         }
+        // the tombstones of logs deleted before they were kept (once), at once: a status
+        // meanwhile would answer those logs missing
+        let me = self.clone();
+        std::thread::spawn(move || {
+            me.derive_tombstones();
+        });
         let me = self.clone();
         std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
@@ -547,6 +584,11 @@ impl Can {
 
     // ---- trust and the index
     fn judge(self: &Arc<Self>, key: &str, name: &str) -> Value {
+        if let Some(tomb) = self.trust.tomb(key, name) {
+            if let Some(rec) = self.judge_buried(key, name, &tomb) {
+                return rec;
+            }
+        }
         let before = self.trust.record(key, name);
         let rec = self.trust.check(key, name);
         let st = rec.get("status").and_then(|s| s.as_str());
@@ -558,10 +600,129 @@ impl Can {
         }
         rec
     }
-    fn judge_pending(self: &Arc<Self>) {
-        for (key, name) in self.trust.pending() {
-            self.judge(&key, &name);
+    /// A copy of a log deleted here on purpose, sent again (either half here). Older than
+    /// all the footage its car keeps: judged as any log (SHA-256, signature, chain), the result
+    /// kept on its tombstone, and the copy deleted again (never indexed: CanTrust::usable).
+    /// Inside the footage kept: kept as a new log (its tombstone goes; None: judged as usual).
+    /// While the footage is not known: judged, kept unindexed, and decided by a later pass.
+    fn judge_buried(self: &Arc<Self>, key: &str, name: &str, tomb: &Value) -> Option<Value> {
+        let here = self.logs.size_of(name);
+        let side = self.logs.size_of(&format!("{}.json", name));
+        if here.is_none() && side.is_none() {
+            return Some(self.trust.record(key, name).unwrap_or(json!({})));
         }
+        let end = tomb.get("end").and_then(|x| x.as_f64()).unwrap_or(f64::INFINITY);
+        match CanLogs::older_than_footage(self.logs.kept(key), end) {
+            Some(false) => {
+                self.trust.unbury(key, name);
+                self.ctx.log("info", &format!("CAN Bridge {}: {} was deleted here and sent again; its car keeps footage of its time, so it is kept as a new log", key, name));
+                None
+            }
+            None => {
+                // (judged once for this copy; the pass after the footage is known decides)
+                let rec = self.trust.record(key, name);
+                let judged = rec.as_ref().is_some_and(|r| r.get("length").and_then(|l| l.as_f64()) == here && r.get("status").and_then(|s| s.as_str()).is_some_and(|s| s != "waiting") && !json::truthy(r.get("deleted")));
+                Some(if here.is_some() && !judged { self.trust.check(key, name) } else { rec.unwrap_or(json!({})) })
+            }
+            Some(true) => {
+                let Some(size) = here else {
+                    // its sidecar alone (the log may follow): noted, dropped later if it does not
+                    if let Some(sd) = side {
+                        self.trust.note_side(key, name, sd);
+                    }
+                    return Some(self.trust.record(key, name).unwrap_or(json!({})));
+                };
+                let rec = self.trust.check(key, name);
+                if let Some((check, reason)) = self.trust.rebury(key, name, size, side) {
+                    self.logs.discard(name);
+                    self.drop_log(key, name);
+                    self.ctx.log("info", &format!("CAN Bridge {}: {} (deleted here, older than the car's footage) was sent again: checked ({}{}) and deleted again", key, name, check, reason.map(|r| format!(": {r}")).unwrap_or_default()));
+                    self.ctx.announce("can");
+                }
+                Some(rec)
+            }
+        }
+    }
+
+    /// The background checks: every log here not judged yet (from before the checks, or one
+    /// whose judging was cut off), waiting, or a deleted log sent again, `batch` at a time with
+    /// `pause` between; and a deleted log's sidecar sent again alone, dropped after 10 minutes.
+    /// The logs judged.
+    pub fn backfill(self: &Arc<Self>, batch: usize, pause: Duration) -> usize {
+        let list = self.trust.pending();
+        let mut judged = 0;
+        for (i, chunk) in list.chunks(batch.max(1)).enumerate() {
+            if i > 0 && !pause.is_zero() {
+                std::thread::sleep(pause);
+            }
+            for (key, name) in chunk {
+                self.judge(key, name);
+                judged += 1;
+            }
+        }
+        for key in self.logs.car_keys() {
+            for name in self.trust.lone_sides(&key) {
+                let side = format!("{}.json", name);
+                let old = std::fs::metadata(self.logs.dir.join(&key).join(&side)).is_ok_and(|m| util::now_ms() - util::mtime_ms(&m) > LONE_SIDE_MS);
+                if old && !self.logs.arriving(&name) {
+                    if let Some(tomb) = self.trust.tomb(&key, &name) {
+                        let end = tomb.get("end").and_then(|x| x.as_f64()).unwrap_or(f64::INFINITY);
+                        match CanLogs::older_than_footage(self.logs.kept(&key), end) {
+                            Some(true) => {
+                                if let Some(sd) = self.logs.size_of(&side) {
+                                    self.trust.note_side(&key, &name, sd);
+                                }
+                                self.logs.discard(&name);
+                            }
+                            Some(false) => {
+                                self.trust.unbury(&key, &name);
+                            }
+                            None => {}
+                        }
+                    }
+                }
+            }
+        }
+        judged
+    }
+
+    /// The background checks, in a thread of their own (one at a time): start is never held up.
+    fn judge_pending(self: &Arc<Self>) {
+        if self.backfilling.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let me = self.clone();
+        std::thread::spawn(move || {
+            let n_ = me.backfill(BACKFILL_BATCH, BACKFILL_PAUSE);
+            if n_ > 0 {
+                me.ctx.log("info", &format!("CAN logs: {} checked in the background", n_));
+            }
+            me.backfilling.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// The tombstones of logs deleted before this server kept them (CanTrust::derive_tombstones),
+    /// for every car key not done yet: (tombstoned, left missing).
+    pub fn derive_tombstones(&self) -> (usize, usize) {
+        let (mut buried, mut missing, mut any) = (0, 0, false);
+        for key in self.logs.car_keys() {
+            if !logs::valid_key(&key) {
+                continue;
+            }
+            let here = |name: &str| self.logs.size_of(name).is_some() || self.logs.arriving(name);
+            if let Some((b, m)) = self.trust.derive_tombstones(&key, &here) {
+                any = true;
+                buried += b;
+                missing += m;
+            }
+        }
+        if any && buried + missing > 0 {
+            self.ctx.log(
+                "info",
+                &format!("CAN logs deleted before this update: {} tombstoned (the bridge is told they were delivered while they are older than their car's footage), {} left missing (nothing here shows they were deleted on purpose: they may be sent again)", buried, missing),
+            );
+        }
+        (buried, missing)
     }
     /// dropCanLog: a log's data taken out of the index, and the sync told.
     fn drop_log(&self, key: &str, name: &str) {
@@ -1388,10 +1549,10 @@ impl Can {
 
     fn delete_file(self: &Arc<Self>, req: &Req, name: &str) -> R {
         confirmed(req)?;
-        self.logs.remove(name).map_err(|e| he(e.status, e.message))?;
+        // (its tombstone kept: the bridge is not asked to send it again, see CanLogs::delete_log)
+        self.logs.delete_log(name, "owner").map_err(|e| he(e.status, e.message))?;
         if let Some(nm) = parse_name(name) {
             self.drop_log(&nm.vehicle_key, name);
-            self.trust.deleted(&nm.vehicle_key, name);
         }
         self.ctx.audit("info", &format!("CAN log deleted: {}: {}", name, req.who.by));
         self.ctx.announce("can");

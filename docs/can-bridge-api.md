@@ -214,10 +214,12 @@ too_many_partial` has none: finish or resume the unfinished uploads.
 An upload may be sent with `Expect: 100-continue` (the CAN Bridge sends every
 upload that way, holding the body back until `100 Continue` or 3 s). The
 server then decides everything the request's headers allow **before it reads
-the body**:
+the body**, without reading or hashing any stored file (so a slow disk never
+holds up the `100 Continue` past the bridge's 3 s wait):
 
-- A request it serves gets `HTTP/1.1 100 Continue` at once; the bridge sends
-  the body and gets the usual answer.
+- A request it serves gets `HTTP/1.1 100 Continue` as soon as those checks
+  pass (they read only the request's headers, the upload's state and the
+  folder's counts); the bridge sends the body and gets the usual answer.
 - A request it refuses without needing the body gets its answer straight
   away, **without** a `100 Continue`, with `Connection: close`: the bridge never
   sends the piece, and opens a new connection for its next request. These are:
@@ -225,15 +227,17 @@ the body**:
   https_only`, `401 bad_token`, `429 slow_down`, `403 wrong_car`; `400
   bad_name`, `bad_offset`, `bad_length`, `bad_sha256`, `past_end` (from
   `Content-Length`); `413` for a chunk over `maxChunk` or a body over 17 MiB
-  (from `Content-Length`), `413 too_large`; `409 busy`, `exists_different`,
-  `length_changed`, `offset_mismatch`; `507 no_space`, `car_full`; `429
-  too_many_partial`.
-- The same file all here already (same `Upload-Length` and `Upload-SHA256`)
-  answers `201` `"already": true` the same way, without its body: a *Resend
-  all* of a log the server holds intact costs no transfer.
+  (from `Content-Length`), `413 too_large`; `409 busy`, `length_changed`,
+  `offset_mismatch`; `507 no_space`, `car_full`; `429 too_many_partial`.
+- A request for a name whose file is **all here already** gets `100
+  Continue` and its body is read: whether it is the same file (`201`
+  `"already": true`), another copy (`409 exists_different`) or a new copy of
+  a failed log (see "Replacing a failed log") needs the stored file's
+  SHA-256, which is never worked out before the body.
 
-Only `422 sha256_mismatch`, `422 bad_sidecar` and a swap refused at the last
-moment (see "Replacing a failed log") need the body, so they come after it.
+`422 sha256_mismatch`, `422 bad_sidecar`, a swap refused at the last moment
+(see "Replacing a failed log") and the answers for a file all here need the
+body, so they come after it.
 Every check is made again once the body is here, so nothing changes between
 the two. Without `Expect` the body is read first, as before (a refused client
 is then not reset while it is still sending).
@@ -383,6 +387,60 @@ is `verified`, `pending` for any other reason, or `failed` only by a
 `chain_break` worked out from the previous log (above) is never replaced: a
 different copy gets `409 exists_different`. Sending the same bytes again
 answers `201` with `"already": true`, as before, for any check.
+
+**Logs deleted here.** A log the server deleted on purpose (the owner's
+delete in the Nerd settings, *Keeping logs*: with its footage deleted for
+good, older than the car's oldest footage, not linked to footage after N
+days, and "Also delete its CAN data" with footage moved to the Recycle Bin)
+leaves a **tombstone** in its car's `trust.json`: its name, size, SHA-256,
+its sidecar's size, the `check` it had (a log not checked yet is checked
+before it is deleted), when and why it was deleted, and when it ended (the
+sidecar's `end_wall_ms`, else a minute after its start). A log that vanished
+without the server deleting it (a crash, a lost or replaced disk, a file
+removed by hand) has none: it is `missing`, and the bridge may send it again.
+For a name with a tombstone and no file here, `status` answers by the car's
+**oldest footage kept** (its clips on the share in the footage index, and its
+protected clips; not the Recycle Bin, which counts as deleted here; the car
+is the one the key is chosen for, or the only car):
+
+- the log ended **at or before** the start of that oldest clip (its footage
+  was deleted), or the car has no footage at all (or the key no car):
+  `complete`, with the size it had (`received`, `length` and `size`) and its
+  `check`: `verified` counts as delivered (the bridge may delete its copy);
+  `failed` with its `check_reason` (the bridge resends it, see below). A
+  check that was never made answers `missing`. Its sidecar answers the same,
+  with the sidecar's size (`missing` when its size is not known);
+- the log is **inside** the footage kept (footage of its time is still
+  here): `missing`, so the bridge may send it again. It is then stored and
+  checked as a new log, and its tombstone goes (a log deleted as not linked to footage, or with
+  footage deleted for good in the middle of what is kept, is such a log: a
+  bridge that still has it sends it again, and the same rule deletes it
+  again later);
+- while the footage cannot be told (the share away, a scan running or
+  failed, the settings unreadable): `complete` with `check: pending`; ask
+  again.
+
+**A deleted log sent again** while it is older than the footage kept is
+taken as any upload (`201`, offsets and limits as usual), checked as any log
+(its SHA-256, signature and chain link, once both halves are here), the
+result kept on its tombstone (`verified`, or `failed` with its reason), and
+deleted again: it is never indexed, listed or counted. A copy that fails
+answers `failed` again, and a resend is checked again the same way. A
+sidecar sent without its log is kept at least 10 minutes for the log, then
+dropped by the next background pass (below; its size noted).
+
+**Logs from before tombstones and checks.** On the first start after this
+update the server works out, once per car key (`tombstonesV` in
+`trust.json`), tombstones for logs it deleted before: only from records
+`trust.json` marked deleted (which only the purposeful deletes above did,
+after deleting the files) of logs received complete and checked (their
+SHA-256 and length), whose file is not here. Every other record of a log
+that is gone gets none, so that log stays `missing` and may be sent again.
+The log says how many were tombstoned and how many were left missing. Logs
+here without a check (from before the checks, or still waiting), and copies
+here whose record still says deleted, are checked in the background from 15
+s after start (4 at a time, with a pause between), never holding up the
+start or the uploads; `status` answers them `pending` until then.
 
 **Failed for good until the owner acts.** A *Resend all* changes nothing for
 a log whose stored copy is the bridge's own (the same bytes answer `201`
@@ -546,7 +604,8 @@ For the paired key's signed logs the Nerd settings report:
   (reordered);
 - a log of the chain that failed its check.
 
-Logs received here and deleted later still count (their record is kept), and
+Logs received here and deleted later still count (their record is kept, and
+their tombstone, see "Logs deleted here"), and
 the bridge deleting its own copies after upload is not a break. A new key
 starts again at 0 (and is offered for trust, above).
 
@@ -611,7 +670,7 @@ check failed, which a resent copy replaces (see "Which files are already here").
 them (start, car key, check, size, format and why it was closed, frames and
 dropped from the sidecar, in a
 box of its own height with a filter by car key, check and text), follows new
-uploads, checks and the index live, and can delete one (with the password).
+uploads, checks and the index live, and can delete one (with the password; it leaves a tombstone, see "Logs deleted here").
 
 **How long logs are kept: with their footage.** A log is *paired* with the
 footage of its car (the car its key is chosen for in the Nerd settings) that
@@ -638,7 +697,8 @@ logs with their footage" (Nerd settings, *Keeping logs*; on by default):
   acted on once it is back.
 - At most 500 logs a run (the rest a minute later), each deleted as a delete in
   the Nerd settings is (the file and sidecar, its minutes in the index, the
-  sync, its trust record kept as deleted for the chain), with one audit line a
+  sync, its trust record kept as deleted for the chain, and a tombstone so
+  the bridge is not asked for it again: see "Logs deleted here"), with one audit line a
   run ("CAN logs deleted (car …): N (… with their footage deleted, … older
   than the car's oldest footage, … not linked to footage after 7 days)").
 
@@ -658,7 +718,8 @@ Ticked, `POST /api/vehicles/:id/trash` and `/trash-days` get `withCan: true`
 and, once the footage has moved, the logs of the moved recordings' minutes are
 deleted at once (with Delete through this date, `through: true`, every log of
 the car ending before the end of that day in the car's time zone as well).
-These do not come back on a restore. Minutes that footage still on the share
+These do not come back on a restore, and leave tombstones (see "Logs deleted
+here"). Minutes that footage still on the share
 or protected footage covers keep their logs; pending logs stay; nothing
 happens for an unmapped key or while the car's footage cannot be trusted.
 The count comes from `POST /api/vehicles/:id/trash-preview` `{ ids }` and the
