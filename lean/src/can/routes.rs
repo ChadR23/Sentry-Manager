@@ -268,6 +268,7 @@ impl Can {
         let logs = CanLogs::new(can_dir.clone(), Box::new(move || util::free_bytes(&fb_dir).unwrap_or(f64::INFINITY)), Box::new(util::now_ms));
         let c1 = ctx.clone();
         let trust = CanTrust::with_log(can_dir.clone(), Box::new(util::now_ms), Box::new(move |lvl, line| c1.log(lvl, line)));
+        logs.set_trust(trust.clone());
         Arc::new_cyclic(|me: &std::sync::Weak<Can>| {
             let mut idx = CanIndex::new(can_dir.clone(), can_index_dir(&*ctx));
             let c2 = ctx.clone();
@@ -2003,7 +2004,21 @@ impl Can {
     }
 
     fn token_of(&self, req: &Req, tokens: &[Value]) -> Option<Value> {
-        let auth = req.headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok()).unwrap_or("");
+        Self::token_in(&req.headers, tokens)
+    }
+
+    /// Whether a request carries a CAN Bridge token that the upload API would take (uploads
+    /// on, the token one of the current ones): the device port lets such a request use a
+    /// connection past the first 6 from its address.
+    pub fn token_valid(&self, headers: &HeaderMap) -> bool {
+        match self.can_cfg() {
+            Ok((enabled, _, tokens)) => enabled && Self::token_in(headers, &tokens).is_some(),
+            Err(_) => false,
+        }
+    }
+
+    fn token_in(headers: &HeaderMap, tokens: &[Value]) -> Option<Value> {
+        let auth = headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok()).unwrap_or("");
         let given = {
             let b = auth.as_bytes();
             if b.len() >= 6 && auth[..6].eq_ignore_ascii_case("bearer") && b.get(6).is_some_and(|c| c.is_ascii_whitespace()) {
@@ -2117,7 +2132,7 @@ impl Can {
         }
         let sub = &raw_path["/api/can/logs".len()..];
         if req.method == Method::GET && sub == "/ping" {
-            return ok(json!({ "ok": true, "api": 1, "vehicleKey": tok.get("key").filter(|k| json::truthy(Some(k))), "maxChunk": logs::MAX_CHUNK, "maxFile": logs::MAX_FILE, "maxSidecar": logs::MAX_SIDECAR, "formats": reader::FORMATS }));
+            return ok(json!({ "ok": true, "api": 1, "vehicleKey": tok.get("key").filter(|k| json::truthy(Some(k))), "maxChunk": logs::MAX_CHUNK, "maxParallel": logs::MAX_PARALLEL, "maxFile": logs::MAX_FILE, "maxSidecar": logs::MAX_SIDECAR, "formats": reader::FORMATS }));
         }
         if req.method == Method::POST && sub == "/status" {
             if req.body.len() > 1024 * 1024 {
@@ -2195,7 +2210,12 @@ impl Can {
                         let me = self.clone();
                         let (k, l) = (nm.vehicle_key.clone(), name.trim_end_matches(".json").to_string());
                         let l = if name.ends_with(".json") { name[..name.len() - 5].to_string() } else { l };
+                        let replaced = json::truthy(out.get("replaced"));
                         std::thread::spawn(move || {
+                            if replaced {
+                                // the failed copy's data (indexed only if used anyway) goes first
+                                me.drop_log(&k, &l);
+                            }
                             me.judge(&k, &l);
                         });
                     }
@@ -2280,4 +2300,25 @@ fn detected_in(index: &CanIndex, keys: &[String]) -> Option<Value> {
         }
     }
     best
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    #[test]
+    fn a_token_is_found_as_the_upload_api_finds_it() {
+        let tokens = vec![json!({ "id": "a", "hash": util::sha256_hex(b"right") }), json!({ "id": "b", "hash": "short" })];
+        let with = |auth: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::AUTHORIZATION, HeaderValue::from_str(auth).unwrap());
+            Can::token_in(&h, &tokens).and_then(|t| t["id"].as_str().map(String::from))
+        };
+        assert_eq!(with("Bearer right").as_deref(), Some("a"));
+        assert_eq!(with("bearer   right").as_deref(), Some("a"));
+        assert_eq!(with("right").as_deref(), Some("a"));
+        assert_eq!(with("Bearer wrong"), None);
+        assert_eq!(with("Bearer "), None);
+        assert_eq!(Can::token_in(&HeaderMap::new(), &tokens), None);
+    }
 }

@@ -10,7 +10,6 @@ use crate::can::ctx::{CanCtx, Car, FootFile, Rec, Scan, Who};
 use crate::can::routes::{Can, PortState, Req};
 use crate::core::http::RawReq;
 use crate::core::{Ctx as CoreCtx, HttpError, Reply};
-use http_body_util::BodyExt;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -245,8 +244,15 @@ pub async fn upload(srv: Arc<Server>, q: RawReq) -> crate::core::http::Res {
     let (parts, body) = q.req.into_parts();
     let path = parts.uri.path().to_string();
     let limit = (crate::can::logs::MAX_CHUNK + 1024 * 1024) as usize;
-    let body = match http_body_util::Limited::new(body, limit).collect().await {
-        Ok(b) => b.to_bytes(),
+    // (a bridge that lost Wi-Fi or power mid-upload sends nothing more: 408 after 2 minutes,
+    // and its connection closes, instead of holding the connection for ever)
+    let body = match crate::core::body::collect(body, limit).await {
+        Ok(b) => b,
+        Err(crate::core::body::BodyError::TimedOut) => {
+            let mut r = crate::can::routes::json_res(408, &serde_json::json!({ "error": crate::core::body::TIMED_OUT_TEXT, "code": "timed_out" }));
+            crate::core::body::close_after(&mut r);
+            return r;
+        }
         Err(_) => return crate::can::routes::json_res(413, &serde_json::json!({ "error": "That file is too large.", "code": "error" })),
     };
     let device = q.conn.device;
@@ -271,5 +277,5 @@ pub async fn upload(srv: Arc<Server>, q: RawReq) -> crate::core::http::Res {
         confirmed: false,
         closed: Arc::new(AtomicBool::new(false)),
     };
-    tokio::task::spawn_blocking(move || super::as_who(who, || can.upload(&req, &path))).await.unwrap_or_else(|_| crate::core::http::error_json(500, "Internal error", None, ""))
+    tokio::task::spawn_blocking(move || super::as_who(who, || can.upload(&req, &path))).await.unwrap_or_else(|_| crate::can::routes::json_res(500, &serde_json::json!({ "error": "Internal error", "code": "server_error" })))
 }

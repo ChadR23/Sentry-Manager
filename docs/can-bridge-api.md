@@ -134,6 +134,86 @@ is `404`. It is open only while CAN uploads are on: turning them off closes
 it. In Docker it is published like the web port (`"10000:10000"`). The same
 requests also work on the web port (9000), but the app should use 10000.
 
+## Limits
+
+What port 10000 allows, and what it answers past each limit. A bridge can
+rely on these numbers.
+
+**Connections.** Every request carries the token, so a bridge may hold **up
+to 32 connections at once from one address** (for example 16 uploads at once
+over LTE). Without a valid token an address gets 6.
+
+| Connections from one address | Served when |
+|---|---|
+| 1st to 6th open at once | every request, as usual (a wrong token gets `401 bad_token`) |
+| 7th to 32nd | only a request with a valid token; one without (or with a wrong one) gets the 503 below |
+| 33rd and more | every request gets the 503 below |
+
+Which of an address's connections a connection is counts when it opens: one
+opened as the 7th needs the token on every request, even after earlier ones
+closed. A connection's place is given back when it closes, however it ends.
+At most 256 connections are open on port 10000 in all; past that every
+request gets the same 503.
+
+The 503 is an answer, never a silent close: the TLS handshake completes, the
+request's body is read and dropped (up to 17 MiB, for at most a minute), and
+then:
+
+```
+HTTP/1.1 503 Service Unavailable
+Retry-After: 5
+Connection: close
+Content-Type: application/json
+
+{ "error": "Too many connections from this address; try again in a few seconds.", "code": "too_many_connections" }
+```
+
+(Past the 256: `"Too many connections to this server; try again in a few
+seconds."`.) Wait `Retry-After` seconds, then send the request again, on a new
+connection. The server names the address in its log at most once a minute.
+Only if 64 such refused connections are already waiting for their 503 is a
+further one closed without an answer (also logged once a minute).
+
+**Time limits.** These close the connection without an answer (the client
+stopped sending, so there is nothing to answer):
+
+| Limit | Value |
+|---|---|
+| First byte of a new connection | 15 s |
+| TLS handshake | 15 s (TLS 1.3 and 1.2; older versions are refused) |
+| A request's headers | 20 s |
+| Idle between requests on a kept-alive connection | 20 s |
+
+The body does get an answer: one that sends nothing for **2 minutes**, or is
+not all there within **10 minutes**, gets `408 { "code": "timed_out" }` and
+its connection is closed.
+
+**Sizes and counts.**
+
+| Limit | Value | Answer past it |
+|---|---|---|
+| A chunk (`maxChunk`, from `ping`) | 16 MiB | `413`, `code: "error"` (`"That file is too large."`) |
+| A request body read at all | 17 MiB | `413`, `code: "error"` |
+| A whole log (`maxFile`) / sidecar (`maxSidecar`) | 1 GiB / 1 MiB | `413 too_large` |
+| A `status` body / names in it | 1 MiB / 2000 | `413`, `code: "error"` / `400 bad_request` |
+| Requests on one file at once | 1 | `409 busy` (with `received`) |
+| Unfinished uploads per car | 16 (sidecars count; checked when an upload starts at offset 0; dropped after 2 days) | `429 too_many_partial` |
+| Logs per car | 200,000 | `507 car_full` |
+| Free disk space to start a file (offset 0) | twice its `Upload-Length` plus 2 GiB | `507 no_space` |
+| Requests with one token | 1,200 in 10 minutes (every request counts, `ping` too; the window starts at the first) | `429 slow_down` |
+| Wrong tokens from one address | 20 in 10 minutes (from the first wrong one); a right token is never refused because of them | `429 slow_down` (before that: `401 bad_token`) |
+
+Only the 503 carries `Retry-After`. For `429`, wait (minutes) before trying
+again.
+
+**On the web port (9000).** The same requests work there, under the web
+port's own limits: no limit per address (browsers share addresses), 1024
+connections in all, and past that the same `503 too_many_connections` with
+`Retry-After: 5` (64 waiting at most, as above). There the first byte and
+the TLS handshake have 15 s each, and headers and idle time 120 s over
+HTTP/1.1; the body limits and every answer above are the same. The bridge
+should use port 10000.
+
 ## Rules for every request
 
 - **HTTPS only.** Over plain HTTP the answer is `403 https_only`. The
@@ -149,13 +229,31 @@ requests also work on the web port (9000), but the app should use 10000.
 
 `GET /api/can/logs/ping`
 
-`200 { "ok": true, "api": 1, "vehicleKey": "MY-car", "maxChunk": 16777216, "maxFile": 1073741824, "maxSidecar": 1048576, "formats": ["canbridge-candump-xz/1", "canbridge-columns-xz/2"] }`
+`200 { "ok": true, "api": 1, "vehicleKey": "MY-car", "maxChunk": 16777216, "maxParallel": 8, "maxFile": 1073741824, "maxSidecar": 1048576, "formats": ["canbridge-candump-xz/1", "canbridge-columns-xz/2"] }`
 
 Use it to test the address, token and pinned certificate, and read the limits.
 `formats` lists the log formats this server reads (see Log formats). The
 bridge writes `canbridge-columns-xz/2` only while it is listed, and goes back
 to candump text if a later `ping` stops listing it (an older server, which
 answers no `formats`, gets candump text).
+
+`maxParallel` (8) is how many uploads the bridge should send at once. It is
+half of the 16 unfinished uploads a car may have (`429 too_many_partial`), so
+even 8 uploads cut off earlier and not resumed yet leave room for 8 new ones,
+and 8 uploads with a `status` or `ping` beside them stay far under the 32
+connections one address may hold with a token (see Connection limits). An
+older server answers no `maxParallel`.
+
+### Connection limits
+
+A recap of Limits above, for the bridge:
+
+- **6** connections at once from one address without a valid token, **32**
+  with one (every bridge request carries it), **256** on port 10000 in all
+  (1024 on the web port, with no limit per address).
+- Past a limit the request is answered, never dropped:
+  `503 { "code": "too_many_connections" }` with `Retry-After: 5` and
+  `Connection: close`. Wait 5 seconds, then send again on a new connection.
 
 ## 2. Which files are already here
 
@@ -165,19 +263,83 @@ answers no `formats`, gets candump text).
 { "names": ["MY-car_20261108T143000Z_1.log.xz", "MY-car_20261108T143000Z_1.log.xz.json"] }
 ```
 
-Up to 2000 names per request. Answer `200`:
+Up to 2000 names per request (the app asks about up to 500). Answer `200`:
 
 ```json
 { "files": {
-  "MY-car_20261108T143000Z_1.log.xz":      { "state": "partial",  "received": 4194304, "length": 17825792 },
-  "MY-car_20261108T143000Z_1.log.xz.json": { "state": "missing",  "received": 0,       "length": null }
+  "MY-car_20261108T143000Z_1.log.xz":      { "state": "complete", "received": 1834221, "length": 1834221, "size": 1834221, "check": "verified" },
+  "MY-car_20261108T143000Z_1.log.xz.json": { "state": "complete", "received": 2310,    "length": 2310,    "size": 2310,    "check": "verified" },
+  "MY-car_20261108T143100Z_2.log.xz":      { "state": "complete", "received": 1790112, "length": 1790112, "size": 1790112, "check": "failed", "check_reason": "mismatch" },
+  "MY-car_20261108T143200Z_3.log.xz":      { "state": "partial",  "received": 4194304, "length": 17825792, "size": 17825792 },
+  "MY-car_20261108T143200Z_3.log.xz.json": { "state": "missing",  "received": 0,       "length": null,     "size": 0 }
 } }
 ```
 
-- `complete`: here and checked; do not send again.
-- `partial`: an upload was started; resume at `received`.
+- `complete`: all here, its SHA-256 matched; do not send again (but see
+  `check`).
+- `partial`: an upload was started; resume at `received`. A new copy of a
+  failed log that is still arriving is `partial` too (see below).
 - `missing`: send it from offset 0.
 - `invalid`: the name is not a CAN Bridge log name (see Names).
+- `forbidden`: another car key's file (a token is for one car).
+
+Every entry has `size`: the whole file's size in bytes once it is known (the
+same as `length`: a `complete` file, or a `partial` one whose upload said its
+`Upload-Length`), the bytes received so far for a `partial` upload whose
+length is not known (`length` null), and `0` for a `missing`, `invalid` or
+`forbidden` one.
+
+**`check`** (only on `complete` files) says whether the log was received
+intact and verified (see Signatures and pairing). A sidecar answers its log's
+check.
+
+| `check` | Meaning | `check_reason` |
+|---|---|---|
+| `verified` | the stored log's whole-file SHA-256 and length are the sidecar's, the ECDSA P-256 signature is valid for the car's paired key, and its chain link fits: `prev_name` `-` only at index 0 with `prev_sha256` 64 zeros, otherwise the log it names, when that is here, has that SHA-256 and the index before, by the same key | none |
+| `failed` | any of those failed | `mismatch`: the stored log's SHA-256 or length is not what was signed; `bad_signature`: a bad signature, signed by a key this car is not paired with or for another car key, or unknown version, algorithm or key; `chain_break`: the chain link does not fit (or the chain fields are bad); `unsigned`: not signed (its sidecar is here and says `"signed": false`, or has no `integrity`), also from a car that is not paired yet |
+| `pending` | not checked yet: its sidecar has not arrived (however long ago the log came: the server itself treats a log with no sidecar after 10 minutes as not signed, but tells the bridge `pending` until the sidecar is here), the check is still running (it starts as the log or its sidecar is complete), a new copy waits to be checked, or the log it names as its previous is here but not checked yet (or its sidecar has not arrived: unsigned logs are not part of the chain, so its link is checked once that sidecar is here). Ask again on the next round | none |
+
+The check is made once, when the log or its sidecar is complete (and again
+when the car's key is trusted, or a failed log is replaced), and kept in the
+car's `trust.json`; `status` reads it, so asking about 500 names never hashes
+a file. A previous log that is not here (not sent yet, or lost on the bridge)
+or that failed its own check does not make the next one fail: the Nerd
+settings report gaps, duplicates and reorders in the chain.
+
+**A chain break from the previous log.** `chain_break` is also answered for
+a log whose own copy is good (its SHA-256, length and signature check out)
+when the log it names as its previous is here with another SHA-256 or index:
+the fault may be the previous log's. That log is never replaced (resending it
+answers `201` `"already": true` for the same bytes, `409 exists_different`
+for others: the good copy is kept). Its `chain_break` clears once the
+previous log here is replaced by the copy it names (or that previous log's
+own check fails, which never makes the next one fail).
+
+**Replacing a failed log.** A log whose check is `failed` stays on the car,
+and the app's *Resend all* sends it (and its sidecar) again under the same
+name. While the stored log's own check is failed (`mismatch`,
+`bad_signature`, a `chain_break` from its own bad chain fields, or
+`unsigned` with its sidecar here), a different copy of the log or of its
+sidecar is taken in its place: it is uploaded as usual (offset 0, then
+resumed; `status` answers `partial` meanwhile), the old copy stays until the
+new one is all here and its SHA-256 matched, then the new one replaces it
+(`201` with `"replaced": true`), its check is `pending` and it is checked
+again. Until that check is made, only the other half of the pair (the
+sidecar after its log, or the log after its sidecar, sent right after or at
+the same time) is still taken in place of the old one, once, so send both
+halves; the half already replaced answers `201` `"already": true` for the
+same bytes and `409 exists_different` for any other copy. If the new copy
+cannot be read when it is checked, its check stays `pending` and neither
+half is taken until it is checked again; once checked, the same rules apply
+again. Whether the old copy may be replaced is decided again, at the moment
+of the swap, from the stored check: if it was verified meanwhile (the owner
+trusted the car's new key), the new copy is dropped and the answer is `409 exists_different`. The
+log's data is taken out of the index first (it was only indexed if the owner
+used it anyway; that choice is dropped with the old copy). A log whose check
+is `verified`, `pending` for any other reason, or `failed` only by a
+`chain_break` worked out from the previous log (above) is never replaced: a
+different copy gets `409 exists_different`. Sending the same bytes again
+answers `201` with `"already": true`, as before, for any check.
 
 ## 3. Upload a file (in chunks, resumable)
 
@@ -365,23 +527,27 @@ mismatch at that log. It never changes a log's check.
 | 403 | `wrong_car` | This token is for another car key. |
 | 400 | `mixed_cars` | A token not tied to a car yet asked about two cars' files at once. |
 | 429 | `slow_down` | Too many wrong tokens from this address (20 in 10 minutes), or more than 1,200 requests in 10 minutes with one token: wait. A right token is never refused because of wrong ones. |
-| 429 | `too_many_partial` | 16 unfinished uploads for this car already: finish or wait (unfinished uploads are dropped after two days). |
+| 429 | `too_many_partial` | 16 unfinished uploads for this car already (sidecars count; checked when an upload starts at offset 0): finish or wait (unfinished uploads are dropped after two days). |
+| 408 | `timed_out` | The body sent nothing for 2 minutes, or was not all there within 10 minutes; the connection is closed. Resume (ask `status`). |
+| 503 | `too_many_connections` | Too many connections from this address (6 without a valid token, 32 with one) or to the server (256). Comes with `Retry-After: 5` and `Connection: close`: wait that long, then send again on a new connection. |
 | 404 | `off` / `not_found` | Uploads are turned off, or an unknown address. Try again later (hours). |
 | 409 | `offset_mismatch` | `Upload-Offset` is not what the server has: resume at `received`. |
 | 409 | `length_changed` | A different `Upload-Length` than the upload already started. |
-| 409 | `exists_different` | A different file with this name is complete here: rename (next `seq`) and report it. |
+| 409 | `exists_different` | A different file with this name is complete here and its stored check did not fail (a failed log is replaced instead; see "Which files are already here"; a `chain_break` from the previous log is not this log's failure): rename (next `seq`) and report it. |
 | 409 | `busy` | Another request is uploading the same file: wait and resume. |
-| 413 | `too_large`, `chunk_too_large` | Over `maxFile`/`maxSidecar`, or a chunk over `maxChunk`. |
+| 413 | `too_large` | Over `maxFile`/`maxSidecar`. |
+| 413 | `error` | A chunk over `maxChunk` (16 MiB), a body over 17 MiB, or a `status` body over 1 MiB. Send smaller chunks. |
 | 422 | `sha256_mismatch` | The finished file did not match its hash; it was discarded. Upload it again from offset 0. |
 | 422 | `bad_sidecar` | The sidecar is not JSON; it was discarded. |
-| 507 | `no_space` | The server is short of disk space (it keeps 2 GB free for everything else): try again later. |
+| 507 | `no_space` | The server is short of disk space: starting a file (offset 0) needs twice its `Upload-Length` plus 2 GiB free. Try again later. |
 | 507 | `car_full` | This car has 200,000 CAN logs here already (finished logs are counted, not sidecars): a safety net only (see "How long logs are kept"); the owner deletes old ones in the Nerd settings. |
-| 500 | `server_error` | Try again later, with backoff. |
+| 500 | `server_error`, `error` | Try again later, with backoff (`error` when the server's database failed). |
 
 ## What happens to the files
 
 Kept under `<data>/can/<vehicleKey>/`, exactly as received; a finished file
-cannot be replaced (`409 exists_different`), only added. The Nerd panel lists
+cannot be replaced (`409 exists_different`), only added, but for a log whose
+check failed, which a resent copy replaces (see "Which files are already here"). The Nerd panel lists
 them (start, car key, check, size, format and why it was closed, frames and
 dropped from the sidecar, in a
 box of its own height with a filter by car key, check and text), follows new
@@ -571,10 +737,10 @@ with a `# Sentry Six Manager: cut here: …` line (download it alone for all of 
 are kept in `<data>/can/<vehicleKey>/trust.json`.
 
 **TLS.** Port 10000 takes TLS 1.3 (the bridge uses only 1.3) and 1.2; older
-versions are refused. A client that sends its headers slower than 20 s, or
-one request longer than 10 minutes, is cut off. One address may hold at most
-6 connections at once (256 in all), and a connection that sends no request
-within 15 s is closed.
+versions are refused. Its connection and time limits are under
+[Limits](#limits): up to 32 connections from one address with a valid token
+(6 without), and past that `503 too_many_connections` with `Retry-After: 5`,
+never a silent close.
 
 Port 10000 can be opened to the internet on its own (for a bridge that
 uploads over LTE; the web port, 9000, only as described in

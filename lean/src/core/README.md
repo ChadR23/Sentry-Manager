@@ -16,6 +16,7 @@ specification.
 | `client_addr.rs` | clientAddress.js | the client address (TRUST_PROXY, TRUSTED_PROXIES), ban keys, home matcher |
 | `tls.rs` | tls.js | the app's CA and server certificate in DATA/tls (same openssl commands and files), own certificate, status, `export_for_app`, `TlsSource::{Local, Supervised}`, the rustls configuration |
 | `acme.rs` | acme.js | Let's Encrypt: JWS, CSR, the order, files, state, backoff, renewal |
+| `body.rs` | index.js `setTimeout(120_000)`, `requestTimeout` | reading a request body: `collect` (a limit, 408 after 2 minutes without a byte or 10 minutes in all), `idle_bounded` for a body read as it comes |
 | `log.rs` | log.js | `Logger` and `Scope`: the same line format and file, rotation at 5 MB, archive, search, redaction |
 | `events.rs` | index.js `announce` | the `/api/events` hub: `hello`, `changed { topics }` batched for 400 ms, `: ping` every 20 s, at most 200 streams |
 | `activity.rs` | activity.js | `Jobs`, `Notifications` (with `sync_share`) |
@@ -109,6 +110,7 @@ A logger scope of your own: `c.state.logger.scope("vehicles")`.
 | Hook | Set by | Used for |
 | --- | --- | --- |
 | `vehicle_exists` | footage | `POST /api/jobs/clear` (vehicleOr404) |
+| `can_token_valid` | can | the device port: a connection past an address's first 6 is served only with a valid CAN Bridge token |
 | `conversions_active`, `settle_conversions` | converter | Clear jobs keeps conversions still going |
 | `reports_configured`, `reports_setup` | ops | `/api/auth/me` on the first-run page; the setup opt-in |
 | `note_start_call` | ui | web/prefetch.js learning |

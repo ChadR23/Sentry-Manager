@@ -11,6 +11,7 @@ pub mod accounts;
 pub mod acme;
 pub mod activity;
 pub mod auth;
+pub mod body;
 pub mod client_addr;
 pub mod config;
 pub mod db;
