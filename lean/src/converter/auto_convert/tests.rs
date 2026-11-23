@@ -547,6 +547,11 @@ impl Sched {
 
 /// A store in `d` whose clock reads `now`; each vehicle folder holds 2 new clips, and every scan is counted.
 fn sched_in(d: crate::converter::testutil::TempDir, now: i64) -> Sched {
+    sched_with(d, now, |_| {})
+}
+
+/// sched_in, with the options changed by `tweak` before the store is made.
+fn sched_with(d: crate::converter::testutil::TempDir, now: i64, tweak: impl FnOnce(&mut AutoOptions)) -> Sched {
     let s = Arc::new(FakeService::default());
     let scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = scans.clone();
@@ -562,6 +567,7 @@ fn sched_in(d: crate::converter::testutil::TempDir, now: i64) -> Sched {
     let c = clock.clone();
     o.now = Arc::new(move || c.load(std::sync::atomic::Ordering::SeqCst));
     o.hour_of = Arc::new(|ms| (ms / 3_600_000).rem_euclid(24));
+    tweak(&mut o);
     let auto = Auto::new(o);
     Sched { d, auto, s, now: clock, scans }
 }
@@ -871,4 +877,259 @@ fn a_round_owed_after_a_restart_stays_due_when_the_schedule_changes() {
     assert_eq!(again.scans(), 1);
     assert_eq!(again.status("nextCheckAt"), json!(utc_ms(2026, 11, 25, 2)));
     again.auto.stop();
+}
+
+// ---- the catch-up run
+
+fn in_catch_up(t: &Sched, root: &str) -> bool {
+    t.status("catchUp").get(root).is_some()
+}
+
+/// A store whose off-peak plan reads `cheap` (true: the cheapest rate is in force now).
+fn sched_off_peak(now: i64, cheap: bool) -> (Sched, Arc<AtomicBool>) {
+    let flag = Arc::new(AtomicBool::new(cheap));
+    let f = flag.clone();
+    let t = sched_with(tempdir().unwrap(), now, move |o| o.is_cheap_now = Some(Arc::new(move |_t| Some(f.load(Ordering::SeqCst)))));
+    (t, flag)
+}
+
+/// Each folder holds 2 clips recorded long ago, so a keep window never holds them back.
+fn dated_clips(o: &mut AutoOptions) {
+    o.scanner = Arc::new(|_c: &Value, _a: &AtomicBool, out: &mut dyn FnMut(Value) -> bool| {
+        for i in 0..2 {
+            out(json!({ "relativePath": format!("RecentClips/2026-01-01_10-0{i}-00-front.mp4"), "sourceBytes": 100, "mtimeMs": 1, "timestampKey": format!("2026-01-01_10-0{i}-00"), "camera": "front" }));
+        }
+        Ok(())
+    });
+}
+
+fn finish(t: &Sched, id: &str, more: bool) {
+    t.s.set(id, |j| {
+        j["state"] = json!("completed");
+        if more {
+            j["moreAfter"] = json!("RecentClips/1.mp4");
+        }
+    });
+}
+
+/// A guided save of one vehicle: nightly at 02:00 with the catch-up switch on.
+fn save_nightly(t: &Sched, config: Value) {
+    t.auto.configure(&shared(json!({ "enabled": true, "schedule": nightly(), "catchUp": true, "config": config }))).unwrap();
+    wait_ticks(&t.auto);
+}
+
+#[test]
+fn new_vehicle_starts_catch_up_now() {
+    let now = utc_ms(2026, 11, 21, 10);
+    let t = sched(now);
+    t.auto.configure(&shared(json!({ "enabled": true, "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": true }))).unwrap();
+    wait_ticks(&t.auto);
+    assert_eq!(t.s.started().len(), 1, "the new vehicle's job starts on the save, not at 02:00");
+    assert_eq!(t.status("catchUp")["/cars/a"], json!({ "since": now }));
+    assert_eq!(t.status("nextCheckAt"), json!(utc_ms(2026, 11, 22, 2)), "the schedule itself stays");
+    assert_eq!(saved_state(&t)["catchUp"]["/cars/a"]["since"], json!(now));
+}
+
+#[test]
+fn catch_up_ignores_off_peak() {
+    let now = utc_ms(2026, 11, 21, 10);
+    let off_peak = json!({ "follow": "off-peak" });
+    let (t, _) = sched_off_peak(now, false);
+    t.auto.configure(&shared(json!({ "enabled": true, "window": off_peak, "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": true }))).unwrap();
+    wait_ticks(&t.auto);
+    assert_eq!(t.s.started().len(), 1, "starts outside the cheap period");
+    t.auto.tick();
+    assert!(t.s.paused.lock().unwrap().is_empty(), "not paused for the window");
+    assert_eq!(t.status("pausedForWindow"), false);
+    // a job outside a catch-up run still pauses when the cheap period ends
+    let (u, cheap) = sched_off_peak(now, true);
+    u.auto.configure(&shared(json!({ "enabled": true, "window": off_peak, "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": false }))).unwrap();
+    wait_ticks(&u.auto);
+    u.auto.check_now();
+    assert_eq!(u.s.started().len(), 1);
+    cheap.store(false, Ordering::SeqCst);
+    u.auto.tick();
+    assert_eq!(*u.s.paused.lock().unwrap(), vec!["job-1".to_string()]);
+}
+
+#[test]
+fn catch_up_ends_when_nothing_left() {
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    t.auto.configure(&shared(json!({ "enabled": true, "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": true }))).unwrap();
+    wait_ticks(&t.auto);
+    finish(&t, "job-1", true);
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 2, "the next part goes at once, not at 02:00");
+    assert!(in_catch_up(&t, "/cars/a"));
+    finish(&t, "job-2", false);
+    t.auto.tick();
+    assert!(!in_catch_up(&t, "/cars/a"));
+    assert!(t.status("catchUp").is_null(), "no key once no vehicle is catching up");
+    assert!(saved_state(&t).get("catchUp").is_none());
+    assert_eq!(t.s.started().len(), 2);
+}
+
+#[test]
+fn a_check_that_finds_nothing_ends_catch_up() {
+    let t = cars();
+    t.auto.configure(&shared(json!({ "enabled": true, "catchUp": true, "config": car("/cars/b", "h265") }))).unwrap();
+    wait_ticks(&t.auto);
+    assert_eq!(t.auto.get_state()["status"]["sources"]["/cars/b"]["lastNewFiles"], 0);
+    assert!(t.auto.get_state()["status"].get("catchUp").is_none());
+}
+
+#[test]
+fn user_pause_holds() {
+    let (t, cheap) = sched_off_peak(utc_ms(2026, 11, 21, 10), true);
+    t.auto.configure(&shared(json!({ "enabled": true, "window": { "follow": "off-peak" }, "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": true }))).unwrap();
+    wait_ticks(&t.auto);
+    assert_eq!(t.s.started().len(), 1);
+    t.s.set("job-1", |j| j["state"] = json!("paused"));
+    t.auto.tick();
+    cheap.store(false, Ordering::SeqCst);
+    t.auto.tick();
+    cheap.store(true, Ordering::SeqCst);
+    t.auto.tick();
+    // nor at the next scheduled check
+    t.at(utc_ms(2026, 11, 22, 2));
+    t.auto.tick();
+    assert!(t.s.resumed.lock().unwrap().is_empty(), "only Resume resumes it");
+    assert!(t.s.paused.lock().unwrap().is_empty());
+    assert!(in_catch_up(&t, "/cars/a"));
+}
+
+#[test]
+fn shorter_keep_restarts_catch_up() {
+    let t = sched_with(tempdir().unwrap(), utc_ms(2026, 11, 21, 10), dated_clips);
+    let keep = |days: i64| {
+        let mut c = car("/cars/a", "h265");
+        c["keepRecent"] = json!({ "days": days, "zone": "UTC" });
+        c
+    };
+    save_nightly(&t, keep(30));
+    assert_eq!(t.s.started().len(), 1);
+    finish(&t, "job-1", false);
+    t.auto.tick();
+    assert!(!in_catch_up(&t, "/cars/a"));
+    save_nightly(&t, keep(7));
+    assert!(in_catch_up(&t, "/cars/a"), "a shorter keep window makes more footage eligible");
+    assert_eq!(t.s.started().len(), 2, "and its job starts now");
+    finish(&t, "job-2", false);
+    t.auto.tick();
+    save_nightly(&t, keep(30));
+    assert!(!in_catch_up(&t, "/cars/a"), "a longer one doesn't");
+    assert_eq!(t.s.started().len(), 2);
+}
+
+#[test]
+fn a_group_switched_on_or_a_new_level_restarts_catch_up_and_other_changes_do_not() {
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    let done = |id: &str| {
+        finish(&t, id, false);
+        t.auto.tick();
+        assert!(!in_catch_up(&t, "/cars/a"));
+    };
+    let base = car("/cars/a", "h265");
+    save_nightly(&t, base.clone());
+    done("job-1");
+    let mut codec = base.clone();
+    codec["codec"] = json!("av1");
+    save_nightly(&t, codec.clone());
+    assert!(!in_catch_up(&t, "/cars/a"), "a codec change alone doesn't");
+    let mut fewer = codec.clone();
+    fewer["includedGroups"] = json!([]);
+    save_nightly(&t, fewer.clone());
+    assert!(!in_catch_up(&t, "/cars/a"), "nor a group switched off");
+    let mut groups = codec.clone();
+    groups["includedGroups"] = json!(["RecentClips", "SentryClips"]);
+    save_nightly(&t, groups.clone());
+    assert!(in_catch_up(&t, "/cars/a"), "a group switched on");
+    assert_eq!(t.s.started().len(), 2);
+    done("job-2");
+    let mut level = groups.clone();
+    level["profileId"] = json!("aggressive");
+    save_nightly(&t, level);
+    assert!(in_catch_up(&t, "/cars/a"), "a new space level");
+    assert_eq!(t.s.started().len(), 3);
+}
+
+#[test]
+fn removing_a_vehicle_drops_its_catch_up_and_adding_it_back_starts_another() {
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    save_nightly(&t, car("/cars/a", "h265"));
+    assert!(in_catch_up(&t, "/cars/a"));
+    t.auto.configure(&shared(json!({ "enabled": false, "removeSource": "/cars/a" }))).unwrap();
+    wait_ticks(&t.auto);
+    assert!(!in_catch_up(&t, "/cars/a"));
+    assert!(saved_state(&t).get("catchUp").is_none());
+    finish(&t, "job-1", false);
+    t.auto.tick();
+    save_nightly(&t, car("/cars/a", "h265"));
+    assert!(in_catch_up(&t, "/cars/a"));
+    assert_eq!(t.s.started().len(), 2);
+}
+
+#[test]
+fn a_catch_up_run_carries_on_after_a_restart() {
+    let now = utc_ms(2026, 11, 21, 10);
+    let t = sched(now);
+    t.auto.configure(&shared(json!({ "enabled": true, "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": true }))).unwrap();
+    wait_ticks(&t.auto);
+    assert_eq!(t.s.started().len(), 1);
+    let again = sched_in(t.d, utc_ms(2026, 11, 21, 11));
+    again.auto.start();
+    assert_eq!(again.s.started().len(), 1, "the run goes on at once, not at 02:00");
+    assert_eq!(again.status("catchUp")["/cars/a"], json!({ "since": now }));
+    again.auto.stop();
+}
+
+#[test]
+fn turning_the_switch_off_ends_the_runs() {
+    let off_peak = json!({ "follow": "off-peak" });
+    let (t, _) = sched_off_peak(utc_ms(2026, 11, 21, 10), false);
+    let save = |catch_up: bool| {
+        t.auto.configure(&shared(json!({ "enabled": true, "window": off_peak, "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": catch_up }))).unwrap();
+        wait_ticks(&t.auto);
+    };
+    save(true);
+    assert_eq!(t.s.started().len(), 1);
+    save(false);
+    assert!(t.status("catchUp").is_null());
+    t.auto.tick();
+    assert_eq!(*t.s.paused.lock().unwrap(), vec!["job-1".to_string()], "the window applies again");
+}
+
+#[test]
+fn catch_up_means_the_same_in_interval_mode() {
+    let window = json!({ "startHour": 1, "endHour": 5 });
+    let now = utc_ms(2026, 11, 21, 10);
+    let t = sched(now);
+    t.auto.configure(&shared(json!({ "enabled": true, "window": window, "catchUp": true, "config": car("/cars/a", "h265") }))).unwrap();
+    wait_ticks(&t.auto);
+    assert_eq!(t.settings()["catchUp"], true);
+    assert_eq!(t.s.started().len(), 1, "a new vehicle's catch-up ignores the window here too");
+    t.auto.tick();
+    assert!(t.s.paused.lock().unwrap().is_empty());
+    // catchUp:false carried over by an Original save that clears the calendar still means off
+    let u = sched(now);
+    u.auto.configure(&shared(json!({ "enabled": true, "window": window, "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": false }))).unwrap();
+    wait_ticks(&u.auto);
+    u.auto.configure(&shared(json!({ "enabled": true, "intervalMinutes": 60, "window": window, "config": car("/cars/b", "h265") }))).unwrap();
+    wait_ticks(&u.auto);
+    let st = u.settings();
+    assert!(no_schedule(&st));
+    assert_eq!(st["catchUp"], false);
+    assert!(u.s.started().is_empty(), "the new vehicle waits for the window");
+    assert!(u.status("catchUp").is_null());
+}
+
+#[test]
+fn a_setup_saved_without_the_switch_keeps_nodes_behaviour() {
+    let window = json!({ "startHour": 1, "endHour": 5 });
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    t.auto.configure(&shared(json!({ "enabled": true, "window": window, "config": car("/cars/a", "h265") }))).unwrap();
+    wait_ticks(&t.auto);
+    assert!(t.settings().get("catchUp").is_none());
+    assert!(t.s.started().is_empty(), "waits for the window, as Node does");
+    assert!(t.status("catchUp").is_null());
 }

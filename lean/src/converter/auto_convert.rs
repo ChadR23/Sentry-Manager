@@ -148,13 +148,18 @@ pub fn normalize_settings(value: &Value) -> Result<Value, String> {
         "holdManual": value.get("holdManual") == Some(&json!(true)), "keepRunning": value.get("keepRunning") == Some(&json!(true)),
         "openAtLogin": value.get("openAtLogin") == Some(&json!(true)), "configs": configs
     });
-    // Node's settings have neither key: an interval schedule with catch-up on (the defaults) adds nothing
+    // `catchUp` means the same with a calendar schedule and with an interval: on, a vehicle's
+    // catch-up run (see `more_eligible`) ignores the window, and the schedule, until nothing
+    // eligible is left; off, its work follows both from the start. So a saved value carries
+    // over when an Original save clears the calendar. A calendar always stores it (a missing
+    // one reads as on). In interval mode only a value sent is stored: Node's settings have
+    // neither key, and a setup saved without one keeps Node's behaviour (no catch-up runs).
     let catch_up = value.get("catchUp") != Some(&json!(false));
     if !schedule.is_null() {
         s["schedule"] = schedule;
         s["catchUp"] = json!(catch_up);
-    } else if !catch_up {
-        s["catchUp"] = json!(false);
+    } else if value.get("catchUp").is_some_and(Value::is_boolean) {
+        s["catchUp"] = json!(catch_up);
     }
     Ok(s)
 }
@@ -181,6 +186,27 @@ fn normalize_window(value: &Value) -> Result<Value, String> {
 /// The calendar schedule of normalized settings, or None (interval mode).
 fn calendar_of(settings: &Value) -> Option<Value> {
     settings.get("schedule").filter(|s| !s.is_null()).cloned()
+}
+
+/// Normalized settings with the catch-up switch on (see `normalize_settings`).
+fn catch_up_on(settings: &Value) -> bool {
+    settings.get("catchUp") == Some(&json!(true))
+}
+
+/// A vehicle's saved config `old` (None: a vehicle new to automatic shrinking) becoming `new`
+/// makes footage eligible that wasn't: a shorter keep window (none keeps nothing), a group
+/// switched on, or another space level. Each of these starts a catch-up run.
+fn more_eligible(old: Option<&Value>, new: &Value) -> bool {
+    let Some(old) = old else { return true };
+    let days = |c: &Value| c.get("keepRecent").filter(|k| super::keep_recent::valid(k)).and_then(|k| k["days"].as_i64()).unwrap_or(0);
+    let groups = |c: &Value| -> Vec<&'static str> {
+        match c.get("includedGroups") {
+            Some(Value::Array(a)) => a.iter().filter_map(|g| g.as_str().and_then(super::scanner::canonical_group)).collect(),
+            _ => super::scanner::GROUPS.to_vec(),
+        }
+    };
+    let had = groups(old);
+    days(new) < days(old) || groups(new).iter().any(|g| !had.contains(g)) || old.get("profileId") != new.get("profileId")
 }
 
 /// inWindow(window, hour): inside [start, end), wrapping past midnight
@@ -644,9 +670,48 @@ impl Auto {
                 // (the times belong to this schedule: a later one ignores them)
                 body["schedule"] = cal;
             }
+            // (only while some vehicle is catching up, so Node's file stays as it was)
+            if let Some(c) = s.status.get("catchUp") {
+                body["catchUp"] = c.clone();
+            }
             body
         };
         let _ = self.write_json(STATE_FILE, &body);
+    }
+
+    /// The vehicles in their catch-up run: status `catchUp`, `{ "<sourceRoot>": { "since": ms } }`,
+    /// present only while one is.
+    fn catching(s: &Inner) -> Vec<String> {
+        s.status.get("catchUp").and_then(Value::as_object).map(|m| m.keys().cloned().collect()).unwrap_or_default()
+    }
+
+    fn start_catch_up(s: &mut Inner, root: &str, now: i64) {
+        if s.status.get("catchUp").is_none() {
+            s.status["catchUp"] = json!({});
+        }
+        // (a run already going keeps its start: more eligible footage makes it longer)
+        if s.status["catchUp"].get(root).is_none() {
+            s.status["catchUp"][root] = json!({ "since": now });
+        }
+    }
+
+    /// Ends `root`'s catch-up run; true when it had one.
+    fn end_catch_up(s: &mut Inner, root: &str) -> bool {
+        let Some(m) = s.status.get_mut("catchUp").and_then(Value::as_object_mut) else { return false };
+        let had = m.shift_remove(root).is_some();
+        if m.is_empty() {
+            s.status.as_object_mut().unwrap().shift_remove("catchUp");
+        }
+        had
+    }
+
+    /// Queues each vehicle catching up that has no job, for a check now.
+    fn queue_catch_up(s: &mut Inner) {
+        for root in Self::catching(s) {
+            if s.status["active"].get(&root).is_none() && !s.status["round"].as_array().unwrap().iter().any(|r| r == root.as_str()) {
+                s.status["round"].as_array_mut().unwrap().push(json!(root));
+            }
+        }
     }
 
     fn resume_job(&self, id: &str) -> Result<(), String> {
@@ -658,7 +723,10 @@ impl Auto {
     }
 
     fn follow_active_jobs(&self, inside: bool) -> Result<(), String> {
-        let entries: Vec<(String, Value)> = self.lock().status["active"].as_object().cloned().unwrap_or_default().into_iter().collect();
+        let (entries, catching) = {
+            let s = self.lock();
+            (s.status["active"].as_object().cloned().unwrap_or_default().into_iter().collect::<Vec<(String, Value)>>(), Self::catching(&s))
+        };
         for (root, entry) in entries {
             let id = entry["jobId"].as_str().unwrap_or("").to_string();
             let job = self.o.service.get(&id).ok().filter(|j| !j.is_null());
@@ -670,6 +738,12 @@ impl Auto {
                     let mut s = self.lock();
                     s.status["active"].as_object_mut().unwrap().shift_remove(&root);
                     let more = job.as_ref().is_some_and(|j| j["state"] == "completed" && super::jobstore::normalize::truthy(&j["moreAfter"]));
+                    // A catch-up run ends once its job is done with nothing left after it, or
+                    // the user cancelled it. A failed job's run goes on at the next check.
+                    let state = job.as_ref().map(|j| j["state"].clone()).unwrap_or(Value::Null);
+                    if (state == "completed" && !more) || state == "cancelled" {
+                        Self::end_catch_up(&mut s, &root);
+                    }
                     if more && s.settings["enabled"] == true && !s.status["round"].as_array().unwrap().iter().any(|r| r == root.as_str()) {
                         s.status["round"].as_array_mut().unwrap().push(json!(root));
                         // (a restart before the next part starts checks again, not at the next scheduled time)
@@ -688,6 +762,8 @@ impl Auto {
                 continue;
             }
             let paused_window = entry["pausedForWindow"] == true;
+            // (a catch-up run ignores the window; a job the user paused stays paused either way)
+            let inside = inside || catching.contains(&root);
             if !inside && !paused_window && job["state"] != "paused" {
                 self.o.service.pause(job["id"].as_str().unwrap_or("")).map_err(|e| code_of(&e))?;
                 self.set_entry(&root, "pausedForWindow", true);
@@ -842,7 +918,8 @@ impl Auto {
         s.status["sources"][root] = cur;
     }
 
-    fn sweep_round(&self) {
+    /// Checks the vehicles in the round, in order; with `only`, just those (the rest stay queued).
+    fn sweep_round(&self, only: Option<&[String]>) {
         {
             let mut s = self.lock();
             s.status["checking"] = json!(true);
@@ -852,11 +929,13 @@ impl Auto {
         loop {
             let next = {
                 let mut s = self.lock();
-                if s.settings["enabled"] != true || s.status["round"].as_array().unwrap().is_empty() {
-                    None
-                } else {
-                    let r = s.status["round"].as_array_mut().unwrap().remove(0);
-                    Some(r.as_str().unwrap_or("").to_string())
+                let at = s.status["round"].as_array().unwrap().iter().position(|r| only.is_none_or(|o| o.iter().any(|x| r == x.as_str())));
+                match at {
+                    Some(i) if s.settings["enabled"] == true => {
+                        let r = s.status["round"].as_array_mut().unwrap().remove(i);
+                        Some(r.as_str().unwrap_or("").to_string())
+                    }
+                    _ => None,
                 }
             };
             let Some(root) = next else { break };
@@ -886,6 +965,12 @@ impl Auto {
                 s.status["pending"][&root] = json!(new_files);
             } else {
                 s.status["pending"].as_object_mut().unwrap().shift_remove(&root);
+            }
+            // nothing eligible left: a catch-up run is over (a check that failed tries again later)
+            let ended = new_files == Some(0) && Self::end_catch_up(&mut s, &root);
+            drop(s);
+            if ended {
+                self.save_state();
             }
         }
         self.lock().status["checking"] = json!(false);
@@ -922,7 +1007,8 @@ impl Auto {
         }
     }
 
-    fn allocate(&self) -> Result<(), String> {
+    /// Starts jobs for the vehicles with clips waiting; with `only`, just those.
+    fn allocate(&self, only: Option<&[String]>) -> Result<(), String> {
         let (active_roots, waiting, configs) = {
             let s = self.lock();
             let active: Vec<String> = s.status["active"].as_object().unwrap().keys().cloned().collect();
@@ -930,7 +1016,11 @@ impl Auto {
                 return Ok(());
             }
             let configs = s.settings["configs"].as_array().cloned().unwrap_or_default();
-            let waiting: Vec<String> = configs.iter().filter_map(|c| c["sourceRoot"].as_str().map(str::to_string)).filter(|r| s.status["pending"][r].as_f64().unwrap_or(0.0) > 0.0 && s.status["active"].get(r).is_none()).collect();
+            let waiting: Vec<String> = configs
+                .iter()
+                .filter_map(|c| c["sourceRoot"].as_str().map(str::to_string))
+                .filter(|r| s.status["pending"][r].as_f64().unwrap_or(0.0) > 0.0 && s.status["active"].get(r).is_none() && only.is_none_or(|o| o.contains(r)))
+                .collect();
             (active, waiting, configs)
         };
         if active_roots.is_empty() && waiting.is_empty() {
@@ -1015,8 +1105,11 @@ impl Auto {
         let inside = self.inside_window_at(time);
         self.hold_manual_jobs(inside);
         self.follow_active_jobs(inside)?;
-        if self.lock().settings["enabled"] != true || !inside {
+        if self.lock().settings["enabled"] != true {
             return Ok(());
+        }
+        if !inside {
+            return self.catch_up_outside();
         }
         if (self.o.is_busy)() {
             return Ok(());
@@ -1024,6 +1117,7 @@ impl Auto {
         let mut opened = false;
         let round_left = {
             let mut s = self.lock();
+            let catching = Self::catching(&s);
             let known: Vec<String> = s.settings["configs"].as_array().cloned().unwrap_or_default().iter().filter_map(|c| c["sourceRoot"].as_str().map(str::to_string)).collect();
             let round: Vec<Value> = s.status["round"].as_array().unwrap().iter().filter(|r| r.as_str().is_some_and(|x| known.iter().any(|k| k == x))).cloned().collect();
             s.status["round"] = Value::Array(round);
@@ -1049,7 +1143,8 @@ impl Auto {
                     opened = true;
                 }
                 Some(_) => {}
-                None if s.status["round"].as_array().unwrap().is_empty() && due => {
+                // (vehicles queued for their catch-up run don't hold up a due check of the rest)
+                None if s.status["round"].as_array().unwrap().iter().all(|r| catching.iter().any(|c| r == c.as_str())) && due => {
                     s.status["round"] = json!(known);
                     s.status["nextCheckAt"] = json!(time + s.settings["intervalMinutes"].as_i64().unwrap_or(60) * 60_000);
                 }
@@ -1061,7 +1156,7 @@ impl Auto {
             self.save_state();
         }
         if round_left {
-            self.sweep_round();
+            self.sweep_round(None);
         }
         {
             let mut s = self.lock();
@@ -1074,7 +1169,23 @@ impl Auto {
                 s.status["nextCheckAt"] = json!(n);
             }
         }
-        let allocated = self.allocate();
+        let allocated = self.allocate(None);
+        self.note_round_done();
+        allocated
+    }
+
+    /// Outside the window only the vehicles in their catch-up run are checked and given jobs;
+    /// the rest of the round waits for the window, and no scheduled check starts.
+    fn catch_up_outside(&self) -> Result<(), String> {
+        let catching = Self::catching(&self.lock());
+        if catching.is_empty() || (self.o.is_busy)() {
+            return Ok(());
+        }
+        let queued = self.lock().status["round"].as_array().unwrap().iter().any(|r| catching.iter().any(|c| r == c.as_str()));
+        if queued {
+            self.sweep_round(Some(&catching));
+        }
+        let allocated = self.allocate(Some(&catching));
         self.note_round_done();
         allocated
     }
@@ -1195,6 +1306,16 @@ impl Auto {
                 }
                 s.status[k] = Value::Array(list);
             }
+            // catch-up runs go on where they were: a vehicle without its job is checked at once
+            if catch_up_on(&s.settings) && s.settings["enabled"] == true {
+                let known: Vec<String> = s.settings["configs"].as_array().cloned().unwrap_or_default().iter().filter_map(|c| c["sourceRoot"].as_str().map(str::to_string)).collect();
+                for (root, e) in st["catchUp"].as_object().into_iter().flatten() {
+                    if let Some(since) = e["since"].as_i64().filter(|_| known.contains(root)) {
+                        Self::start_catch_up(&mut s, root, since);
+                    }
+                }
+                Self::queue_catch_up(&mut s);
+            }
             // (turned off, nothing is due: turning it back on waits for the next scheduled time)
             if let Some(cal) = calendar_of(&s.settings).filter(|_| s.settings["enabled"] == true) {
                 let now = (self.o.now)();
@@ -1275,19 +1396,36 @@ impl Auto {
         for c in normalized["configs"].as_array().unwrap() {
             self.load_index(c);
         }
-        let added: Vec<String> = {
+        let (added, entering): (Vec<String>, Vec<String>) = {
             let s = self.lock();
-            let before: IndexMap<String, String> = s.settings["configs"].as_array().cloned().unwrap_or_default().iter().map(|c| (c["sourceRoot"].as_str().unwrap_or("").to_string(), c.to_string())).collect();
-            normalized["configs"].as_array().unwrap().iter().filter(|c| before.get(c["sourceRoot"].as_str().unwrap_or("")) != Some(&c.to_string())).map(|c| c["sourceRoot"].as_str().unwrap_or("").to_string()).collect()
+            let before: IndexMap<String, Value> = s.settings["configs"].as_array().cloned().unwrap_or_default().into_iter().map(|c| (c["sourceRoot"].as_str().unwrap_or("").to_string(), c)).collect();
+            let root_of = |c: &Value| c["sourceRoot"].as_str().unwrap_or("").to_string();
+            let after = normalized["configs"].as_array().unwrap();
+            let added = after.iter().filter(|c| before.get(&root_of(c)).map(Value::to_string) != Some(c.to_string())).map(root_of).collect();
+            let entering = if catch_up_on(&normalized) { after.iter().filter(|c| more_eligible(before.get(&root_of(c)), c)).map(root_of).collect() } else { vec![] };
+            (added, entering)
         };
         // (the schedule and its next check change together: a timer tick in between would
         // otherwise check at once)
-        let new_calendar = {
+        let (new_calendar, catch_up_changed) = {
             let mut s = self.lock();
             s.settings = normalized.clone();
-            Self::follow_calendar(&mut s, was.as_ref(), calendar.as_ref(), (self.o.now)())
+            let now = (self.o.now)();
+            let next = Self::follow_calendar(&mut s, was.as_ref(), calendar.as_ref(), now);
+            // a vehicle removed, or the switch turned off, ends its run; one re-added starts another
+            let had = s.status.get("catchUp").cloned();
+            let on = catch_up_on(&s.settings) && s.settings["enabled"] == true;
+            for root in Self::catching(&s) {
+                if !on || Self::config_for(&s, &root).is_none() {
+                    Self::end_catch_up(&mut s, &root);
+                }
+            }
+            for root in &entering {
+                Self::start_catch_up(&mut s, root, now);
+            }
+            (next, s.status.get("catchUp").cloned() != had)
         };
-        if new_calendar {
+        if new_calendar || catch_up_changed {
             self.save_state();
         }
         self.write_json(SETTINGS_FILE, &normalized).map_err(|e| super::owned::code_of(&e).to_string())?;
@@ -1302,8 +1440,13 @@ impl Auto {
         };
         self.write_saved(list);
         // With a calendar schedule a save starts no work by itself: changed vehicles wait for
-        // the next scheduled check. (Task 6: catch-up vehicles are queued here and start now.)
-        let queued: Vec<String> = if calendar.is_some() { vec![] } else { added };
+        // the next scheduled check, except those in their catch-up run, which start now.
+        let queued: Vec<String> = if calendar.is_some() {
+            let catching = Self::catching(&self.lock());
+            added.into_iter().filter(|r| catching.contains(r)).collect()
+        } else {
+            added
+        };
         {
             let mut s = self.lock();
             for r in &queued {
@@ -1503,6 +1646,8 @@ impl Auto {
             let mut s = self.lock();
             s.status["nextCheckAt"] = Value::Null;
             s.status["round"] = json!([]);
+            // (outside the window a check now still checks the vehicles catching up)
+            Self::queue_catch_up(&mut s);
         }
         self.tick();
         self.get_state()
