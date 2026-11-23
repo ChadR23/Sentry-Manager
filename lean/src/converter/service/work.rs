@@ -1274,7 +1274,7 @@ impl Service {
             Self::compose_into(rt, &id, &reserved_own);
             let used_tier = tiers.first().cloned();
             let fallback = if from_node { Some(self.take_fallback_slot(rt)?) } else { None };
-            let encoded = self.run_child(rt, &id, &EncodeRequest { source, target: &reserved.path, codec: &codec, encoder: &selected, bitrate, quality: quality.as_deref(), duration_us, hold_frames, smallest, keep_order, decode: used_tier.as_ref().map(|t| t.1.as_slice()), lane_id: lane.map(|l| l.id.as_str()) });
+            let encoded = self.run_child(rt, &id, &EncodeRequest { source, target: &reserved.path, codec: &codec, encoder: &selected, bitrate, quality: quality.as_deref(), duration_us, window: None, hold_frames, smallest, keep_order, decode: used_tier.as_ref().map(|t| t.1.as_slice()), lane_id: lane.map(|l| l.id.as_str()) });
             drop(fallback);
             timing.mark("encode");
             if let Err(code) = encoded {
