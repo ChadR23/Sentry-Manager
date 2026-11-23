@@ -85,6 +85,22 @@ pub fn with_valid_lanes(config: &Value) -> Value {
     Value::Object(r)
 }
 
+/// A sent config without `keepRecent` inherits the stored one for the same folder; `null` removes it
+/// (Original's page doesn't know the keep window, the guided page turns it off with null).
+fn inherit_keep_recent(sent: &mut serde_json::Map<String, Value>, stored: Option<&Value>) {
+    match sent.get("keepRecent") {
+        Some(Value::Null) => {
+            sent.shift_remove("keepRecent");
+        }
+        Some(_) => {}
+        None => {
+            if let Some(k) = stored.and_then(|c| c.get("keepRecent")) {
+                sent.insert("keepRecent".into(), k.clone());
+            }
+        }
+    }
+}
+
 fn is_config(c: &Value) -> bool {
     c.as_object().is_some_and(|m| m.get("sourceRoot").is_some_and(Value::is_string))
 }
@@ -1105,6 +1121,7 @@ impl Auto {
             let off = self.nodes_off_for(&with_valid_lanes(&Value::Object(sent.clone()))["lanes"]).unwrap_or_else(|| {
                 configs.iter().find(|c| c["sourceRoot"] == root).and_then(|c| c["nodesOff"].as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
             });
+            inherit_keep_recent(&mut sent, configs.iter().find(|c| c["sourceRoot"] == root));
             configs.retain(|c| c["sourceRoot"] != root);
             if !off.is_empty() {
                 sent.insert("nodesOff".into(), json!(off));
@@ -1256,6 +1273,7 @@ impl Auto {
         }
         let mut sent = config.as_object().unwrap().clone();
         sent.shift_remove("nodesOff");
+        inherit_keep_recent(&mut sent, saved.iter().find(|c| c["sourceRoot"] == config["sourceRoot"]));
         let mut list: Vec<Value> = saved.into_iter().filter(|c| c["sourceRoot"] != config["sourceRoot"]).collect();
         list.push(Value::Object(sent));
         self.write_saved(list);

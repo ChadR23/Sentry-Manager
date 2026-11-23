@@ -462,3 +462,52 @@ fn unknown_date_is_left_alone() {
     plain.as_object_mut().unwrap().remove("keepRecent");
     assert!(!auto.is_known(&plain, &no_key));
 }
+
+fn stored_config(t: &Cars, root: &str) -> Value {
+    t.auto.get_state()["settings"]["configs"].as_array().unwrap().iter().find(|c| c["sourceRoot"] == root).cloned().unwrap()
+}
+
+#[test]
+fn original_save_keeps_keep_recent() {
+    let t = cars();
+    let mut first = car("/cars/a", "h265");
+    first["keepRecent"] = json!({ "days": 30, "zone": "UTC" });
+    t.auto.configure(&shared(json!({ "enabled": true, "config": first }))).unwrap();
+    wait_ticks(&t.auto);
+    t.auto.configure(&shared(json!({ "enabled": true, "config": car("/cars/a", "av1") }))).unwrap();
+    wait_ticks(&t.auto);
+    let c = stored_config(&t, "/cars/a");
+    assert_eq!(c["codec"], "av1");
+    assert_eq!(c["keepRecent"]["days"], 30);
+}
+
+#[test]
+fn null_keep_recent_removes_it() {
+    let t = cars();
+    let mut first = car("/cars/a", "h265");
+    first["keepRecent"] = json!({ "days": 30, "zone": "UTC" });
+    t.auto.configure(&shared(json!({ "enabled": true, "config": first }))).unwrap();
+    wait_ticks(&t.auto);
+    let mut off = car("/cars/a", "h265");
+    off["keepRecent"] = Value::Null;
+    t.auto.configure(&shared(json!({ "enabled": true, "config": off }))).unwrap();
+    wait_ticks(&t.auto);
+    assert!(stored_config(&t, "/cars/a").get("keepRecent").is_none());
+}
+
+#[test]
+fn saved_but_not_automatic_vehicle_keeps_keep_recent_too() {
+    let t = cars();
+    let mut first = car("/cars/a", "h265");
+    first["keepRecent"] = json!({ "days": 7, "zone": "UTC" });
+    t.auto.save_vehicle(&first).unwrap();
+    t.auto.save_vehicle(&car("/cars/a", "av1")).unwrap();
+    let saved = t.auto.lock().saved.clone();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["codec"], "av1");
+    assert_eq!(saved[0]["keepRecent"]["days"], 7);
+    let mut off = car("/cars/a", "av1");
+    off["keepRecent"] = Value::Null;
+    t.auto.save_vehicle(&off).unwrap();
+    assert!(t.auto.lock().saved[0].get("keepRecent").is_none());
+}
