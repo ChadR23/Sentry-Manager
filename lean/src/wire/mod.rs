@@ -15,6 +15,7 @@
 pub mod arrival;
 pub mod can;
 pub mod converter;
+pub mod converter_preview;
 pub mod footage;
 pub mod nodes;
 pub mod ops;
