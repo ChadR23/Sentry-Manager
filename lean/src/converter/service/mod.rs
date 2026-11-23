@@ -14,7 +14,7 @@ mod encode;
 pub mod lanes;
 mod recover;
 pub mod tools;
-mod work;
+pub(crate) mod work;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
