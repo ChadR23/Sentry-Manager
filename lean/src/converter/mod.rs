@@ -31,6 +31,7 @@ pub mod mp4_header;
 pub mod mp4w;
 pub mod owned;
 pub mod planner;
+pub mod preview;
 pub mod process;
 pub mod recovery;
 pub mod runtime;

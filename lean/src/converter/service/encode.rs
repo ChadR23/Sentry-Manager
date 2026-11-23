@@ -167,6 +167,46 @@ pub struct EncodeRequest<'a> {
     pub lane_id: Option<&'a str>,
 }
 
+impl EncodeRequest<'_> {
+    /// Shared by production and previews; a window never inherits lead-in holds.
+    pub(crate) fn local_args(&self) -> Result<Vec<String>, &'static str> {
+        let r = self;
+        if r.encoder.remote || r.window.is_some_and(|(start, end)| start < 0 || end <= start) {
+            return Err("encoder-start-failed");
+        }
+        let device = if r.encoder.hardware { r.encoder.device.as_ref() } else { None };
+        let encode_args = super::super::planner::build_encode_args(&super::super::planner::EncodeArgs {
+            codec: r.codec,
+            encoder: &r.encoder.codec,
+            bitrate: r.bitrate,
+            quality: r.quality,
+            hw_frames: r.decode.is_some_and(|d| d.iter().any(|a| a == "-hwaccel_output_format")),
+            device,
+            hold_frames: if r.window.is_some() { 0 } else { r.hold_frames },
+            smallest: r.smallest,
+            keep_order: r.smallest.is_some() && r.keep_order,
+            ..Default::default()
+        })
+        .map_err(|_| "encoder-start-failed")?;
+        let mut args: Vec<String> = ["-nostdin", "-hide_banner", "-loglevel", "error", "-n"].iter().map(|s| s.to_string()).collect();
+        args.extend(r.decode.unwrap_or(&[]).iter().cloned());
+        if let Some((start, _)) = r.window {
+            args.extend(["-ss".into(), format!("{start}us")]);
+        }
+        args.push("-i".into());
+        args.push(r.source.into());
+        args.extend(encode_args);
+        if let Some((start, end)) = r.window {
+            args.extend(["-t".into(), format!("{}us", end - start)]);
+        }
+        for a in ["-an", "-sn", "-dn", "-progress", "pipe:1", "-nostats", "-f", "mp4"] {
+            args.push(a.into());
+        }
+        args.push(r.target.into());
+        Ok(args)
+    }
+}
+
 impl Service {
     /// liveCounts: clips waiting on a node, and those encoding now (here, or started on a node)
     fn live_counts(s: &RtState) -> (usize, usize) {
@@ -203,35 +243,7 @@ impl Service {
         if r.encoder.remote {
             return self.run_remote(rt, item_id, r);
         }
-        let device = if r.encoder.hardware { r.encoder.device.as_ref() } else { None };
-        let encode_args = super::super::planner::build_encode_args(&super::super::planner::EncodeArgs {
-            codec: r.codec,
-            encoder: &r.encoder.codec,
-            bitrate: r.bitrate,
-            quality: r.quality,
-            hw_frames: r.decode.is_some_and(|d| d.iter().any(|a| a == "-hwaccel_output_format")),
-            device,
-            hold_frames: if r.window.is_some() { 0 } else { r.hold_frames },
-            smallest: r.smallest,
-            keep_order: r.smallest.is_some() && r.keep_order,
-            ..Default::default()
-        })
-        .map_err(|_| "encoder-start-failed")?;
-        let mut args: Vec<String> = ["-nostdin", "-hide_banner", "-loglevel", "error", "-n"].iter().map(|s| s.to_string()).collect();
-        args.extend(r.decode.unwrap_or(&[]).iter().cloned());
-        if let Some((start, _)) = r.window {
-            args.extend(["-ss".into(), format!("{start}us")]);
-        }
-        args.push("-i".into());
-        args.push(r.source.into());
-        args.extend(encode_args.iter().cloned());
-        if let Some((start, end)) = r.window {
-            args.extend(["-t".into(), format!("{}us", end - start)]);
-        }
-        for a in ["-an", "-sn", "-dn", "-progress", "pipe:1", "-nostats", "-f", "mp4"] {
-            args.push(a.into());
-        }
-        args.push(r.target.into());
+        let args = r.local_args()?;
         let ffmpeg = self.0.o.tools.ffmpeg_path().to_string();
         if super::super::process::validate_request(&ffmpeg, &args).is_err() {
             return Err("encoder-start-failed");
@@ -253,7 +265,7 @@ impl Service {
             let live = json!({
                 "jobId": s.manifest.id(), "itemId": item_id, "relativePath": rel, "encoder": r.encoder.codec,
                 "hardware": r.encoder.hardware, "decode": if r.decode.is_some_and(|d| !d.is_empty()) { "gpu" } else { "cpu" },
-                "device": render_device(&[r.decode.unwrap_or(&[]), encode_args.as_slice()].concat()), "node": null,
+                "device": render_device(&args), "node": null,
                 "deviceId": r.lane_id, "remote": false, "started": true, "pid": pid, "fps": null, "speed": null,
                 "bitrateKbps": null, "frame": null, "outTimeUs": null,
                 "durationUs": r.duration_us.filter(|d| *d > 0), "dropFrames": null, "dupFrames": null, "totalSizeB": null

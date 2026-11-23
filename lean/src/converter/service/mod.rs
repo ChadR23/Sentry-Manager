@@ -23,6 +23,7 @@ pub mod lanes_tests;
 mod node_tests;
 
 pub use encode::{parse_progress_line, Progress};
+pub(crate) use encode::EncodeRequest;
 
 use super::contracts;
 use super::error::CError;
