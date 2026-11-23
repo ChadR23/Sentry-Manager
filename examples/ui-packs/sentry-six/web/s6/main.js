@@ -4,6 +4,10 @@ import { icon } from './icons.js';
 import { showStudio, hideStudio } from './studio.js';
 import { notifications } from './pages/notifications.js';
 import { bellTone } from './status.js';
+let encoderExpert = false;
+try {
+  encoderExpert = localStorage.getItem('s6-encoder-expert') === '1';
+} catch {}
 export const state = {
   vehicles: [],
   vehicleId: localStorage.getItem('s6:vehicle'),
@@ -132,14 +136,27 @@ export async function render(vehicleChanged = false, { quiet = false } = {}) {
   const header = document.getElementById('page-actions');
   header.replaceChildren();
   header.onclick = null;
+  if (key === 'encoder') {
+    header.innerHTML = `<label class="encoder-expert"><span>Expert</span><input id="encoder-expert" class="toggle-switch" type="checkbox" role="switch" aria-label="Expert" ${encoderExpert ? 'checked' : ''}></label>`;
+    header.querySelector('input').onchange = (e) => {
+      encoderExpert = e.target.checked;
+      try {
+        localStorage.setItem('s6-encoder-expert', encoderExpert ? '1' : '0');
+      } catch {}
+      render();
+      document.getElementById('encoder-expert')?.focus();
+    };
+  }
   const mount = document.createElement('div');
   mount.hidden = quiet;
   page.append(mount);
-  const owner = scope(() => [current()?.id], { alive: () => ticket === seq });
-  renderScope = owner;
   try {
-    if (['viewer', 'encoder'].includes(key)) {
-      if (vehicleChanged !== true) selectVehicle(q.get('vehicle'));
+    // Apply deep-linked vehicles before the new page's request scope is captured.
+    if (['viewer', 'encoder'].includes(key) && vehicleChanged !== true)
+      selectVehicle(q.get('vehicle'));
+    const owner = scope(() => [current()?.id], { alive: () => ticket === seq });
+    renderScope = owner;
+    if (key === 'viewer' || (key === 'encoder' && encoderExpert)) {
       showStudio(
         key,
         current(),
@@ -156,7 +173,7 @@ export async function render(vehicleChanged = false, { quiet = false } = {}) {
       cleanup = () => p?.destroy?.();
       return;
     }
-    const known = ['overview', 'footage', 'activity', 'bin', 'health', 'settings', 'drives'];
+    const known = ['overview', 'footage', 'encoder', 'activity', 'bin', 'health', 'settings', 'drives'];
     if (!known.includes(key)) throw new Error('Page not found');
     const m = await import(`./pages/${key}.js`);
     if (ticket !== seq) return;

@@ -2998,3 +2998,140 @@ dialog {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* encoder setup */
+.encoder-expert {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 8px 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-size: 14px;
+  cursor: pointer;
+}
+.encoder-expert:has(:checked) {
+  color: var(--accent);
+  border-color: oklch(0.82 0.18 150 / 0.45);
+}
+.encoder-expert input {
+  margin: 0;
+}
+.encoder-stepper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+  padding: 0;
+  margin: 0 0 20px;
+}
+.encoder-stepper li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px 7px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-size: 14px;
+}
+.encoder-stepper [aria-current='step'] {
+  color: #fff;
+  border-color: oklch(0.82 0.18 150 / 0.5);
+  background: oklch(0.82 0.18 150 / 0.12);
+}
+.encoder-step-number {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  font-weight: 600;
+}
+[aria-current='step'] .encoder-step-number {
+  background: var(--solid);
+  color: #fff;
+}
+.encoder-eyebrow {
+  margin-bottom: 10px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.encoder-lead,
+.encoder-scope-note {
+  max-width: 75ch;
+}
+.encoder-scope-note {
+  font-size: 13px;
+}
+.encoder-status {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+.encoder-status-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 64px;
+  height: 64px;
+  border-radius: 18px;
+  color: var(--accent);
+  background: oklch(0.82 0.18 150 / 0.12);
+}
+.encoder-status-icon .icon {
+  width: 36px;
+  height: 36px;
+}
+@media (max-width: 760px) {
+  #workspace > header:has(.encoder-expert) #vehicles:has(#car) {
+    order: 5;
+    max-width: 100%;
+    flex-basis: 100%;
+  }
+}
+@media (max-width: 600px) {
+  .encoder-expert {
+    padding: 6px 8px;
+  }
+  .encoder-expert > span {
+    display: none;
+  }
+  .encoder-stepper li:not([aria-current='step']) {
+    padding: 7px;
+  }
+  /* Keep the other step names available to screen readers. */
+  .encoder-stepper li:not([aria-current='step']) .encoder-step-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .encoder-status {
+    align-items: flex-start;
+    gap: 14px;
+  }
+  .encoder-status-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+  }
+  .encoder-status-icon .icon {
+    width: 28px;
+    height: 28px;
+  }
+}
