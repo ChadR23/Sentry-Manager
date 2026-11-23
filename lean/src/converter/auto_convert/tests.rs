@@ -399,3 +399,66 @@ fn planning_with_a_nodes_devices_the_node_goes_to_one_vehicle_as_a_whole() {
     let plan = plan_lanes(&[a], &roots(&["a"]), Some("/cars/a"), &[json!({ "id": GPU, "kind": "gpu" }), g2, c2], &json!({}));
     assert_eq!(plan["/cars/a"], vec![json!({ "device": GPU, "concurrency": 2 })]);
 }
+
+fn young_setup(dir: &Path, key: Option<&str>) -> (Arc<Auto>, Value, Arc<std::sync::atomic::AtomicI64>) {
+    let now = Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let key = key.map(str::to_string);
+    let scanner: Arc<Scanner> = Arc::new(move |_c: &Value, _a: &AtomicBool, out: &mut dyn FnMut(Value) -> bool| {
+        let mut d = json!({ "relativePath": "RecentClips/2026-11-20_10-00-00-front.mp4", "sourceBytes": 100, "mtimeMs": 1, "camera": "front" });
+        if let Some(k) = &key {
+            d["timestampKey"] = json!(k);
+        }
+        out(d);
+        Ok(())
+    });
+    let mut o = opts(Arc::new(FakeService::default()), scanner, dir);
+    let n = now.clone();
+    o.now = Arc::new(move || n.load(std::sync::atomic::Ordering::SeqCst));
+    let c = json!({ "sourceRoot": dir.join("src"), "autoConvert": true, "keepRecent": { "days": 7, "zone": "UTC" } });
+    (Auto::new(o), c, now)
+}
+
+fn at_ms(y: i32, mo: u32, d: u32) -> i64 {
+    chrono::NaiveDate::from_ymd_opt(y, mo, d).unwrap().and_hms_opt(12, 0, 0).unwrap().and_utc().timestamp() * 1000
+}
+
+const YOUNG_CLIP: &str = "RecentClips/2026-11-20_10-00-00-front.mp4";
+
+fn young_d() -> Value {
+    json!({ "relativePath": YOUNG_CLIP, "sourceBytes": 100, "mtimeMs": 1, "timestampKey": "2026-11-20_10-00-00", "camera": "front" })
+}
+
+#[test]
+fn young_clip_is_deferred_then_converted_once_old() {
+    let d = tempdir().unwrap();
+    let (auto, c, now) = young_setup(d.path(), Some("2026-11-20_10-00-00"));
+    now.store(at_ms(2026, 11, 21), std::sync::atomic::Ordering::SeqCst);
+    assert!(auto.is_known(&c, &young_d()));
+    assert_eq!(auto.sweep(&c).unwrap(), 0);
+    assert!(auto.lock().indexes.get(&setup_key(&c)).is_none_or(|ix| !ix.files.contains_key(YOUNG_CLIP) && !ix.gave_up.contains_key(YOUNG_CLIP)));
+    now.store(at_ms(2026, 11, 28), std::sync::atomic::Ordering::SeqCst);
+    assert!(!auto.is_known(&c, &young_d()));
+    assert_eq!(auto.sweep(&c).unwrap(), 1);
+}
+
+#[test]
+fn manual_jobs_ignore_keep_recent() {
+    let d = tempdir().unwrap();
+    let (auto, mut c, now) = young_setup(d.path(), Some("2026-11-20_10-00-00"));
+    c.as_object_mut().unwrap().remove("autoConvert");
+    now.store(at_ms(2026, 11, 21), std::sync::atomic::Ordering::SeqCst);
+    assert!(!auto.is_known(&c, &young_d()));
+}
+
+#[test]
+fn unknown_date_is_left_alone() {
+    let d = tempdir().unwrap();
+    let (auto, c, now) = young_setup(d.path(), None);
+    now.store(at_ms(2026, 11, 21), std::sync::atomic::Ordering::SeqCst);
+    let no_key = json!({ "relativePath": "RecentClips/x.mp4", "sourceBytes": 100, "mtimeMs": 1 });
+    assert!(auto.is_known(&c, &no_key));
+    assert_eq!(auto.sweep(&c).unwrap(), 0);
+    let mut plain = c.clone();
+    plain.as_object_mut().unwrap().remove("keepRecent");
+    assert!(!auto.is_known(&plain, &no_key));
+}

@@ -461,6 +461,9 @@ impl Auto {
         if config.get("autoConvert") != Some(&json!(true)) {
             return false;
         }
+        if super::keep_recent::is_young(config, d, (self.o.now)()) {
+            return true;
+        }
         let s = self.lock();
         s.indexes.get(&setup_key(config)).is_some_and(|ix| Self::known_in(ix, d, Some(config)))
     }
@@ -483,6 +486,9 @@ impl Auto {
         *self.sweep_abort.lock().unwrap() = Some(abort.clone());
         let mut new_files = 0;
         let r = (self.o.scanner)(config, &abort, &mut |d: Value| {
+            if config.get("autoConvert") == Some(&json!(true)) && super::keep_recent::is_young(config, &d, (self.o.now)()) {
+                return true;
+            }
             let known = self.lock().indexes.get(&key).is_some_and(|ix| Self::known_in(ix, &d, Some(config)));
             if known {
                 return true;
