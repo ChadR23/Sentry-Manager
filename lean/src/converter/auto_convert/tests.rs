@@ -511,3 +511,364 @@ fn saved_but_not_automatic_vehicle_keeps_keep_recent_too() {
     t.auto.save_vehicle(&off).unwrap();
     assert!(t.auto.lock().saved[0].get("keepRecent").is_none());
 }
+
+// ---- calendar schedules
+
+fn utc_ms(y: i32, mo: u32, d: u32, h: u32) -> i64 {
+    chrono::NaiveDate::from_ymd_opt(y, mo, d).unwrap().and_hms_opt(h, 0, 0).unwrap().and_utc().timestamp() * 1000
+}
+
+fn nightly() -> Value {
+    json!({ "kind": "daily", "hour": 2, "zone": "UTC" })
+}
+
+struct Sched {
+    d: crate::converter::testutil::TempDir,
+    auto: Arc<Auto>,
+    s: Arc<FakeService>,
+    now: Arc<std::sync::atomic::AtomicI64>,
+    scans: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Sched {
+    fn at(&self, ms: i64) {
+        self.now.store(ms, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn scans(&self) -> usize {
+        self.scans.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn status(&self, k: &str) -> Value {
+        self.auto.get_state()["status"][k].clone()
+    }
+    fn settings(&self) -> Value {
+        self.auto.get_state()["settings"].clone()
+    }
+}
+
+/// A store in `d` whose clock reads `now`; each vehicle folder holds 2 new clips, and every scan is counted.
+fn sched_in(d: crate::converter::testutil::TempDir, now: i64) -> Sched {
+    let s = Arc::new(FakeService::default());
+    let scans = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = scans.clone();
+    let scanner: Arc<Scanner> = Arc::new(move |_c: &Value, _a: &AtomicBool, out: &mut dyn FnMut(Value) -> bool| {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        for i in 0..2 {
+            out(json!({ "relativePath": format!("RecentClips/{i}.mp4"), "sourceBytes": 100, "mtimeMs": 1 }));
+        }
+        Ok(())
+    });
+    let clock = Arc::new(std::sync::atomic::AtomicI64::new(now));
+    let mut o = opts(s.clone(), scanner, d.path());
+    let c = clock.clone();
+    o.now = Arc::new(move || c.load(std::sync::atomic::Ordering::SeqCst));
+    o.hour_of = Arc::new(|ms| (ms / 3_600_000).rem_euclid(24));
+    let auto = Auto::new(o);
+    Sched { d, auto, s, now: clock, scans }
+}
+
+fn sched(now: i64) -> Sched {
+    sched_in(tempdir().unwrap(), now)
+}
+
+fn nightly_without_catch_up(t: &Sched) {
+    t.auto.configure(&shared(json!({ "enabled": true, "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": false }))).unwrap();
+    wait_ticks(&t.auto);
+}
+
+fn no_schedule(settings: &Value) -> bool {
+    settings.get("schedule").is_none_or(Value::is_null)
+}
+
+#[test]
+fn daily_schedule_sets_next_check() {
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    nightly_without_catch_up(&t);
+    assert_eq!(t.status("nextCheckAt"), json!(utc_ms(2026, 11, 22, 2)));
+    assert!(t.s.started().is_empty());
+    let st = t.settings();
+    assert_eq!(st["schedule"], nightly());
+    assert_eq!(st["catchUp"], false);
+    assert_eq!(st["intervalMinutes"], 1440, "Original's dropdown reads every 24 hours");
+    assert_eq!(st["window"], Value::Null);
+}
+
+#[test]
+fn due_check_runs_then_moves_to_next_slot() {
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    nightly_without_catch_up(&t);
+    t.at(utc_ms(2026, 11, 22, 2));
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 1);
+    assert_eq!(t.status("nextCheckAt"), json!(utc_ms(2026, 11, 23, 2)));
+    assert_eq!(t.status("lastCheckAt"), json!(utc_ms(2026, 11, 22, 2)));
+}
+
+#[test]
+fn one_catch_up_after_downtime() {
+    let now = utc_ms(2026, 11, 21, 10);
+    let d = tempdir().unwrap();
+    let settings = json!({ "enabled": true, "intervalMinutes": 1440, "window": null, "holdManual": false, "keepRunning": false, "openAtLogin": false,
+        "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": false });
+    std::fs::write(d.path().join("settings.json"), settings.to_string()).unwrap();
+    std::fs::write(d.path().join("state.json"), json!({ "lastCheckAt": now - 3 * 86_400_000 }).to_string()).unwrap();
+    let t = sched_in(d, now);
+    t.auto.start();
+    t.auto.tick();
+    assert_eq!(t.scans(), 1, "one catch-up round, not one per missed night");
+    assert_eq!(t.s.started().len(), 1);
+    t.s.set("job-1", |j| j["state"] = json!("completed"));
+    t.auto.tick();
+    t.auto.tick();
+    assert_eq!(t.scans(), 1);
+    assert_eq!(t.s.started().len(), 1);
+    assert_eq!(t.status("nextCheckAt"), json!(utc_ms(2026, 11, 22, 2)));
+    t.auto.stop();
+}
+
+#[test]
+fn no_catch_up_when_nothing_was_missed() {
+    let now = utc_ms(2026, 11, 21, 10);
+    let d = tempdir().unwrap();
+    let settings = json!({ "enabled": true, "intervalMinutes": 1440, "window": null, "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": false });
+    std::fs::write(d.path().join("settings.json"), settings.to_string()).unwrap();
+    std::fs::write(d.path().join("state.json"), json!({ "lastCheckAt": utc_ms(2026, 11, 21, 2) }).to_string()).unwrap();
+    let t = sched_in(d, now);
+    t.auto.start();
+    t.auto.tick();
+    assert_eq!(t.scans(), 0);
+    assert_eq!(t.status("nextCheckAt"), json!(utc_ms(2026, 11, 22, 2)));
+    assert_eq!(t.status("lastCheckAt"), json!(utc_ms(2026, 11, 21, 2)));
+    t.auto.stop();
+}
+
+#[test]
+fn a_scheduled_check_is_remembered_across_a_restart() {
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    nightly_without_catch_up(&t);
+    t.at(utc_ms(2026, 11, 22, 2));
+    t.auto.tick();
+    t.s.set("job-1", |j| j["state"] = json!("completed"));
+    t.auto.tick();
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(t.d.path().join("state.json")).unwrap()).unwrap();
+    assert_eq!(saved["lastCheckAt"], json!(utc_ms(2026, 11, 22, 2)));
+    // back an hour later: nothing missed, so no check until the next night
+    let again = sched_in(t.d, utc_ms(2026, 11, 22, 3));
+    again.auto.start();
+    again.auto.tick();
+    assert_eq!(again.scans(), 0);
+    assert_eq!(again.status("nextCheckAt"), json!(utc_ms(2026, 11, 23, 2)));
+    again.auto.stop();
+}
+
+#[test]
+fn original_save_keeps_calendar() {
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    nightly_without_catch_up(&t);
+    t.auto.configure(&shared(json!({ "enabled": true, "intervalMinutes": 1440, "window": null, "config": car("/cars/a", "av1") }))).unwrap();
+    wait_ticks(&t.auto);
+    let st = t.settings();
+    assert_eq!(st["schedule"], nightly());
+    assert_eq!(st["catchUp"], false, "Original doesn't send the catch-up switch either");
+    assert_eq!(st["configs"][0]["codec"], "av1");
+    assert_eq!(t.status("nextCheckAt"), json!(utc_ms(2026, 11, 22, 2)));
+    assert!(t.s.started().is_empty());
+}
+
+#[test]
+fn original_save_keeps_calendar_with_off_peak() {
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    let off_peak = json!({ "follow": "off-peak" });
+    t.auto.configure(&shared(json!({ "enabled": true, "window": off_peak, "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": false }))).unwrap();
+    wait_ticks(&t.auto);
+    assert_eq!(t.settings()["window"], off_peak);
+    assert_eq!(t.settings()["intervalMinutes"], 1440);
+    t.auto.configure(&shared(json!({ "enabled": true, "intervalMinutes": 1440, "window": off_peak, "config": car("/cars/a", "av1") }))).unwrap();
+    wait_ticks(&t.auto);
+    assert_eq!(t.settings()["schedule"], nightly());
+    assert_eq!(t.settings()["window"], off_peak);
+    // a different window from Original replaces the calendar
+    t.auto.configure(&shared(json!({ "enabled": true, "intervalMinutes": 1440, "window": null, "config": car("/cars/a", "av1") }))).unwrap();
+    wait_ticks(&t.auto);
+    assert!(no_schedule(&t.settings()));
+}
+
+#[test]
+fn original_save_vehicle_keeps_calendar() {
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    nightly_without_catch_up(&t);
+    t.auto.save_vehicle(&car("/cars/a", "av1")).unwrap();
+    wait_ticks(&t.auto);
+    let st = t.settings();
+    assert_eq!(st["schedule"], nightly());
+    assert_eq!(st["configs"][0]["codec"], "av1");
+    assert!(t.s.started().is_empty());
+}
+
+#[test]
+fn original_interval_change_clears_calendar() {
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    nightly_without_catch_up(&t);
+    t.auto.configure(&shared(json!({ "enabled": true, "intervalMinutes": 60, "window": null, "config": car("/cars/a", "h265") }))).unwrap();
+    wait_ticks(&t.auto);
+    let st = t.settings();
+    assert!(no_schedule(&st));
+    assert_eq!(st["intervalMinutes"], 60);
+}
+
+#[test]
+fn null_schedule_clears_calendar() {
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    nightly_without_catch_up(&t);
+    t.auto.configure(&shared(json!({ "enabled": true, "intervalMinutes": 1440, "window": null, "schedule": null, "config": car("/cars/a", "h265") }))).unwrap();
+    wait_ticks(&t.auto);
+    assert!(no_schedule(&t.settings()));
+    assert_eq!(t.settings()["intervalMinutes"], 1440);
+}
+
+#[test]
+fn asap_is_interval_60() {
+    let now = utc_ms(2026, 11, 21, 10);
+    let t = sched(now);
+    t.auto.configure(&shared(json!({ "enabled": true, "intervalMinutes": 60, "schedule": null, "config": car("/cars/a", "h265") }))).unwrap();
+    wait_ticks(&t.auto);
+    assert_eq!(t.s.started().len(), 1, "saving checks at once, as today");
+    assert_eq!(t.status("nextCheckAt"), json!(now + 60 * 60_000));
+    assert!(no_schedule(&t.settings()));
+}
+
+#[test]
+fn save_without_catch_up_does_not_tick_now() {
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    nightly_without_catch_up(&t);
+    assert!(t.s.started().is_empty());
+    assert_eq!(t.scans(), 0);
+    // the next timer tick (still before 02:00) doesn't check the new vehicle either
+    t.at(utc_ms(2026, 11, 21, 10) + 30_000);
+    t.auto.tick();
+    assert_eq!(t.scans(), 0);
+    assert!(t.s.started().is_empty());
+}
+
+#[test]
+fn a_bad_schedule_is_refused() {
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    let bad = json!({ "kind": "monthly", "day": 31, "hour": 2, "zone": "UTC" });
+    let e = t.auto.configure(&shared(json!({ "enabled": true, "configs": [car("/cars/a", "h265")], "schedule": bad }))).unwrap_err();
+    assert_eq!(e, "INVALID_AUTO_SCHEDULE");
+}
+
+fn saved_state(t: &Sched) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(t.d.path().join("state.json")).unwrap()).unwrap()
+}
+
+fn two_nightly_cars(t: &Sched) {
+    t.auto.configure(&shared(json!({ "enabled": true, "configs": [car("/cars/a", "h265"), car("/cars/b", "h265")], "schedule": nightly(), "catchUp": false }))).unwrap();
+    wait_ticks(&t.auto);
+}
+
+#[test]
+fn a_check_now_cut_short_by_a_restart_checks_again() {
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    two_nightly_cars(&t);
+    t.auto.check_now();
+    assert_eq!(t.s.started().len(), 1, "one job at a time: /cars/b waits");
+    assert!(saved_state(&t)["nextCheckAt"].as_i64().unwrap() <= utc_ms(2026, 11, 21, 10), "saved as due while /cars/b has no job");
+    let again = sched_in(t.d, utc_ms(2026, 11, 21, 11));
+    again.auto.start();
+    assert_eq!(again.scans(), 2, "both vehicles checked again");
+    again.auto.stop();
+}
+
+#[test]
+fn a_round_saves_its_next_time_once_its_jobs_are_done() {
+    let t = sched(utc_ms(2026, 11, 22, 2));
+    two_nightly_cars(&t);
+    t.auto.check_now();
+    t.s.set("job-1", |j| j["state"] = json!("completed"));
+    t.auto.tick();
+    assert_eq!(t.s.started().len(), 2);
+    assert_eq!(saved_state(&t)["nextCheckAt"], json!(utc_ms(2026, 11, 22, 2)), "a running job may still have a next part");
+    t.s.set("job-2", |j| j["state"] = json!("completed"));
+    t.auto.tick();
+    let st = saved_state(&t);
+    assert_eq!((st["lastCheckAt"].clone(), st["nextCheckAt"].clone()), (json!(utc_ms(2026, 11, 22, 2)), json!(utc_ms(2026, 11, 23, 2))));
+    assert_eq!(st["schedule"], nightly());
+}
+
+#[test]
+fn changing_the_schedule_mid_round_keeps_the_round_due() {
+    let t = sched(utc_ms(2026, 11, 22, 2));
+    two_nightly_cars(&t);
+    t.auto.check_now();
+    let weekly = json!({ "kind": "weekly", "weekday": 3, "hour": 2, "zone": "UTC" });
+    t.auto.configure(&shared(json!({ "enabled": true, "intervalMinutes": 1440, "schedule": weekly, "config": car("/cars/a", "h265") }))).unwrap();
+    assert!(saved_state(&t)["nextCheckAt"].as_i64().unwrap() <= utc_ms(2026, 11, 22, 2));
+    assert_eq!(t.status("nextCheckAt"), json!(utc_ms(2026, 11, 25, 2)));
+}
+
+#[test]
+fn a_next_part_waiting_outside_the_window_survives_a_restart() {
+    let t = sched(utc_ms(2026, 11, 22, 2));
+    let window = json!({ "startHour": 1, "endHour": 5 });
+    t.auto.configure(&shared(json!({ "enabled": true, "window": window, "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": false }))).unwrap();
+    t.auto.check_now();
+    assert_eq!(t.s.started().len(), 1);
+    t.at(utc_ms(2026, 11, 22, 6));
+    t.s.set("job-1", |j| {
+        j["state"] = json!("completed");
+        j["moreAfter"] = json!("RecentClips/1.mp4");
+    });
+    t.auto.tick();
+    assert!(saved_state(&t)["nextCheckAt"].as_i64().unwrap() <= utc_ms(2026, 11, 22, 6));
+    let again = sched_in(t.d, utc_ms(2026, 11, 22, 7));
+    again.auto.start();
+    assert_eq!(again.status("nextCheckAt"), json!(utc_ms(2026, 11, 22, 7)), "due: the next part goes once the window opens");
+    again.auto.stop();
+}
+
+#[test]
+fn turned_off_over_a_scheduled_time_then_on_waits_for_the_next() {
+    let t = sched(utc_ms(2026, 11, 21, 10));
+    nightly_without_catch_up(&t);
+    t.auto.configure(&shared(json!({ "enabled": false, "intervalMinutes": 1440, "removeSource": "/cars/a" }))).unwrap();
+    let again = sched_in(t.d, utc_ms(2026, 11, 22, 3));
+    again.auto.start();
+    again.auto.configure(&shared(json!({ "enabled": true, "intervalMinutes": 1440, "config": car("/cars/a", "h265") }))).unwrap();
+    again.auto.tick();
+    assert_eq!(again.scans(), 0);
+    assert_eq!(again.status("nextCheckAt"), json!(utc_ms(2026, 11, 23, 2)));
+    again.auto.stop();
+}
+
+#[test]
+fn times_saved_for_another_schedule_are_ignored() {
+    let now = utc_ms(2026, 11, 21, 10);
+    let d = tempdir().unwrap();
+    let settings = json!({ "enabled": true, "intervalMinutes": 1440, "window": null, "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": false });
+    std::fs::write(d.path().join("settings.json"), settings.to_string()).unwrap();
+    let monthly = json!({ "kind": "monthly", "day": 1, "hour": 2, "zone": "UTC" });
+    std::fs::write(d.path().join("state.json"), json!({ "lastCheckAt": now - 3 * 86_400_000, "nextCheckAt": utc_ms(2026, 12, 1, 2), "schedule": monthly }).to_string()).unwrap();
+    let t = sched_in(d, now);
+    t.auto.start();
+    assert_eq!(t.scans(), 0);
+    assert_eq!(t.status("nextCheckAt"), json!(utc_ms(2026, 11, 22, 2)));
+    t.auto.stop();
+}
+
+#[test]
+fn a_round_owed_after_a_restart_stays_due_when_the_schedule_changes() {
+    let t = sched(utc_ms(2026, 11, 22, 2));
+    let window = json!({ "startHour": 1, "endHour": 5 });
+    t.auto.configure(&shared(json!({ "enabled": true, "window": window, "configs": [car("/cars/a", "h265")], "schedule": nightly(), "catchUp": false }))).unwrap();
+    t.auto.check_now();
+    let again = sched_in(t.d, utc_ms(2026, 11, 22, 7));
+    again.auto.start();
+    let weekly = json!({ "kind": "weekly", "weekday": 3, "hour": 2, "zone": "UTC" });
+    again.auto.configure(&shared(json!({ "enabled": true, "intervalMinutes": 1440, "window": window, "schedule": weekly, "config": car("/cars/a", "h265") }))).unwrap();
+    assert_eq!(again.status("nextCheckAt"), json!(utc_ms(2026, 11, 22, 7)), "still owed: it runs once the window opens");
+    again.at(utc_ms(2026, 11, 23, 1));
+    again.auto.tick();
+    assert_eq!(again.scans(), 1);
+    assert_eq!(again.status("nextCheckAt"), json!(utc_ms(2026, 11, 25, 2)));
+    again.auto.stop();
+}

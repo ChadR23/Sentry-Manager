@@ -974,14 +974,20 @@ impl Bridge {
 
     fn set_auto(&self, p: Option<&Value>, replacement: &str) -> R<Value> {
         let Some(auto) = self.extras().auto else { return fail("AUTO_UNAVAILABLE") };
-        let Some(m) = p.and_then(Value::as_object).filter(|m| m.keys().all(|k| ["enabled", "intervalMinutes", "window", "holdManual", "keepRunning", "openAtLogin", "config", "removeSource"].contains(&k.as_str()))) else { return fail("INVALID_REQUEST") };
+        let Some(m) = p.and_then(Value::as_object).filter(|m| m.keys().all(|k| ["enabled", "intervalMinutes", "window", "holdManual", "keepRunning", "openAtLogin", "config", "removeSource", "schedule", "catchUp"].contains(&k.as_str()))) else { return fail("INVALID_REQUEST") };
         let interval_ok = m.get("intervalMinutes").and_then(Value::as_f64).is_some_and(|i| super::auto_convert::INTERVAL_MINUTES.iter().any(|x| *x as f64 == i));
         if !m.get("enabled").is_some_and(Value::is_boolean) || !interval_ok || !m.get("keepRunning").is_some_and(Value::is_boolean) || !m.get("openAtLogin").is_some_and(Value::is_boolean) {
             return fail("INVALID_REQUEST");
         }
-        if m.get("holdManual").is_some_and(|h| !h.is_boolean()) {
+        if m.get("holdManual").is_some_and(|h| !h.is_boolean()) || m.get("catchUp").is_some_and(|c| !c.is_boolean()) {
             return fail("INVALID_REQUEST");
         }
+        // (the guided page's calendar schedule; Original sends none, and the stored one may stay)
+        let schedule = match m.get("schedule") {
+            None => None,
+            Some(Value::Null) => Some(Value::Null),
+            Some(v) => Some(super::schedule::normalize(v).map_err(code_err)?),
+        };
         if let Some(r) = m.get("removeSource") {
             if !r.as_str().is_some_and(|r| js_len(r) <= 4096) {
                 return fail("INVALID_REQUEST");
@@ -1007,6 +1013,12 @@ impl Bridge {
         let mut next = json!({ "enabled": enabled, "intervalMinutes": m["intervalMinutes"], "window": window, "holdManual": m.get("holdManual") == Some(&json!(true)), "keepRunning": m["keepRunning"], "openAtLogin": m["openAtLogin"], "config": config });
         if let Some(r) = m.get("removeSource") {
             next["removeSource"] = r.clone();
+        }
+        if let Some(s) = schedule {
+            next["schedule"] = s;
+        }
+        if let Some(c) = m.get("catchUp") {
+            next["catchUp"] = c.clone();
         }
         bounded(&auto.configure(&next).map_err(code_err)?, MAX_PAYLOAD_BYTES, false, true)
     }
@@ -1251,6 +1263,36 @@ mod tests {
         assert_eq!((stored(&bridge)["codec"].clone(), stored(&bridge)["keepRecent"].clone()), (json!("av1"), keep));
         ok(bridge.invoke("setAuto", Some(set_auto_payload(keep_config(&base, "av1", Some(Value::Null)))), None));
         assert!(stored(&bridge).get("keepRecent").is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn set_auto_takes_a_calendar_schedule_and_an_original_save_keeps_it() {
+        let (bridge, base, _) = keep_recent_bridge("schedule");
+        let settings = |b: &Arc<Bridge>| b.extras().auto.unwrap().get_state()["settings"].clone();
+        let nightly = json!({ "kind": "daily", "hour": 2, "zone": "UTC" });
+        let mut guided = set_auto_payload(keep_config(&base, "h265", None));
+        guided["intervalMinutes"] = json!(1440);
+        guided["schedule"] = nightly.clone();
+        guided["catchUp"] = json!(false);
+        let a = bridge.invoke("setAuto", Some(guided.clone()), None);
+        assert_eq!(a["ok"], true, "{a}");
+        assert_eq!((settings(&bridge)["schedule"].clone(), settings(&bridge)["catchUp"].clone()), (nightly.clone(), json!(false)));
+        // Original's save: no schedule, no catchUp, the 1440 and window it was shown
+        let mut original = set_auto_payload(keep_config(&base, "av1", None));
+        original["intervalMinutes"] = json!(1440);
+        assert_eq!(bridge.invoke("setAuto", Some(original), None)["ok"], true);
+        assert_eq!((settings(&bridge)["schedule"].clone(), settings(&bridge)["catchUp"].clone()), (nightly, json!(false)));
+        for (k, bad, code) in [("schedule", json!({ "kind": "daily", "hour": 25, "zone": "UTC" }), "INVALID_AUTO_SCHEDULE"), ("catchUp", json!("yes"), "INVALID_REQUEST")] {
+            let mut p = guided.clone();
+            p[k] = bad;
+            assert_eq!(bridge.invoke("setAuto", Some(p), None)["error"]["code"], code);
+        }
+        let mut off = guided.clone();
+        off["schedule"] = Value::Null;
+        off["intervalMinutes"] = json!(60);
+        assert_eq!(bridge.invoke("setAuto", Some(off), None)["ok"], true);
+        assert!(settings(&bridge).get("schedule").is_none());
         let _ = std::fs::remove_dir_all(&base);
     }
 
