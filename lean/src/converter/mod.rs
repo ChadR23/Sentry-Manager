@@ -24,6 +24,7 @@ pub mod fs_hook;
 pub mod h265;
 pub mod host;
 pub mod ipc;
+pub mod keep_recent;
 pub mod jobstore;
 pub mod lead_in;
 pub mod mp4_header;

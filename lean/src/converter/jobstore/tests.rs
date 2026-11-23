@@ -56,6 +56,19 @@ fn changed(item: &Arc<Item>, changes: Value) -> ItemIn {
 }
 
 #[test]
+fn keep_recent_round_trips_through_normalize() {
+    let root = tmp("keep-recent");
+    let store = quiet(&root);
+    let mut m = initial("job-k", (0..1).map(clip).collect());
+    m.get_mut("config").unwrap()["keepRecent"] = json!({ "days": 30, "zone": "America/New_York" });
+    let created = store.create(&m).unwrap();
+    assert_eq!(created.config()["keepRecent"], json!({ "days": 30, "zone": "America/New_York" }));
+    let again = quiet(&root).load("job-k").unwrap().unwrap();
+    assert_eq!(again.config()["keepRecent"], json!({ "days": 30, "zone": "America/New_York" }));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn journal_appends_and_replays() {
     let root = tmp("journal");
     let store = quiet(&root);

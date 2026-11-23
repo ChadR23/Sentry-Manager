@@ -410,7 +410,7 @@ pub fn validate_start_config(p: Option<&Value>, replacement: &str) -> R<Value> {
     let Some(m) = p.and_then(Value::as_object) else { return fail("INVALID_REQUEST") };
     let has = |k: &str| m.contains_key(k);
     let mut expected: Vec<&str> = vec!["sourceRoot", "destinationRoot", "codec", "profileId", "networkMode", "outputMode", "includedGroups", "replacementConfirmed"];
-    for k in ["groupOrder", "concurrency", "bitrateKbps", "qualityLevel", "verifyMode", "lanes", "keepOffTarget", "keepLarger"] {
+    for k in ["groupOrder", "concurrency", "bitrateKbps", "qualityLevel", "verifyMode", "lanes", "keepOffTarget", "keepLarger", "keepRecent"] {
         if has(k) {
             expected.push(k);
         }
@@ -436,6 +436,9 @@ pub fn validate_start_config(p: Option<&Value>, replacement: &str) -> R<Value> {
     }
     if has("keepLarger") && (!m["keepLarger"].is_boolean() || (m["keepLarger"] == true && !no_target)) {
         return fail("INVALID_KEEP_LARGER");
+    }
+    if has("keepRecent") && !super::keep_recent::valid(&m["keepRecent"]) {
+        return fail("INVALID_REQUEST");
     }
     let mut lanes = None;
     if has("lanes") {
@@ -1143,6 +1146,22 @@ mod tests {
         bridge.set_extras(Extras { devices: Some(Arc::new(|| Err("Internal error".into()))), auto: None, benchmark: None });
         assert_eq!(bridge.invoke("devices", None, None), json!({ "ok": false, "error": { "code": "OPERATION_FAILED", "retryable": false } }));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn start_config_allows_keep_recent() {
+        let base = std::env::temp_dir().join(format!("lean-keep-recent-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        let config = |keep: Value| json!({
+            "sourceRoot": base.join("src"), "destinationRoot": null, "codec": "h265", "profileId": "balanced", "networkMode": "direct",
+            "outputMode": "replace", "includedGroups": ["RecentClips"], "replacementConfirmed": true, "keepRecent": keep
+        });
+        let ok = validate_start_config(Some(&config(json!({ "days": 7, "zone": "UTC" }))), "available").unwrap();
+        assert_eq!(ok["keepRecent"], json!({ "days": 7, "zone": "UTC" }));
+        for bad in [json!({ "days": 0, "zone": "UTC" }), json!({ "days": 7 }), Value::Null] {
+            assert_eq!(validate_start_config(Some(&config(bad)), "available").unwrap_err().code, "INVALID_REQUEST");
+        }
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

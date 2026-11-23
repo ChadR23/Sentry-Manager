@@ -26,9 +26,9 @@ pub const TOP_FIELDS: [&str; 22] = [
     "schemaVersion", "id", "state", "revision", "config", "items", "counters", "summary", "summaryDismissed", "discoveryComplete", "createdAt", "updatedAt", "activeItemId", "ownedPaths", "ownedArtifacts",
     "publicationArtifact", "replacementPhase", "recovery", "failure", "timings", "pausedMs", "moreAfter",
 ];
-const CONFIG_FIELDS: [&str; 19] = [
+const CONFIG_FIELDS: [&str; 20] = [
     "sourceRoot", "destinationRoot", "codec", "profileId", "networkMode", "outputMode", "includedGroups", "groupOrder", "replacementConfirmed", "concurrency", "bitrateKbps", "qualityLevel", "autoConvert", "verifyMode", "lanes",
-    "keepOffTarget", "keepLarger", "resumeAfter", "part",
+    "keepOffTarget", "keepLarger", "resumeAfter", "part", "keepRecent",
 ];
 const ITEM_FIELDS: [&str; 25] = [
     "id", "state", "kind", "group", "eventId", "relativePath", "sourcePath", "sourceBytes", "mtimeMs", "timestampKey", "camera", "assetType", "eligibleVideo", "outputPath", "outputBytes", "attempts", "encoder", "failure",
@@ -655,6 +655,12 @@ fn normalize_config(v: &Value) -> R<Value> {
         if b && !contracts::has_size_target(&profile_id) {
             out.insert("keepLarger".into(), Value::Bool(true));
         }
+    }
+    if let Some(k) = m.get("keepRecent") {
+        if !super::super::keep_recent::valid(k) {
+            return invalid();
+        }
+        out.insert("keepRecent".into(), k.clone());
     }
     if let Some(r) = m.get("resumeAfter") {
         if !r.is_null() {
