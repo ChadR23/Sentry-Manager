@@ -19,6 +19,16 @@ const groups = ['SavedClips', 'SentryClips', 'RecentClips'];
 const simple = { codec: 'h265', outputMode: 'replace', profileId: 'aggressive' };
 const choice = (patch = {}) => ({ ...structuredClone(model.DEFAULTS), ...patch });
 
+test('guided saves preserve the schedule zone until step 3 is changed', () => {
+  for (const kind of ['daily', 'weekly', 'monthly']) {
+    const settings = { schedule: {kind, hour:2, weekday:3, day:12, zone:'America/New_York'} };
+    const selected = model.fromSaved(simple, settings);
+    assert.equal(model.toAutoSettings(selected, 'Asia/Tokyo', settings).schedule.zone, 'America/New_York');
+    assert.equal(model.toAutoSettings(selected, 'Asia/Tokyo', settings, {scheduleChanged:true}).schedule.zone, 'Asia/Tokyo');
+  }
+  assert.equal(model.toAutoSettings(choice(), 'Asia/Tokyo').schedule.zone, 'Asia/Tokyo');
+});
+
 test('Coming up formats the actual check in the browser zone, including DST and overdue checks', () => {
   const now = Date.parse('2026-11-01T04:00:00Z');
   assert.equal(model.nextCheckText(null, 'America/New_York', now), 'The next check time is not available yet.');
@@ -240,7 +250,7 @@ test('off-peak follows the electricity plan for calendar cards, but asap clears 
   });
   for (const when of ['night', 'week', 'month', 'asap']) {
     const selected = choice({ when, offPeak: true, catchUp: false, hour: 23, weekday: 6, day: 28 });
-    const settings = model.toAutoSettings(selected, 'Asia/Tokyo', existing);
+    const settings = model.toAutoSettings(selected, 'Asia/Tokyo', existing, { scheduleChanged: true });
     assert.deepEqual(settings.window, when === 'asap' ? null : { follow: 'off-peak' });
     assert.equal(settings.catchUp, false);
     for (const key of ['holdManual', 'keepRunning', 'openAtLogin']) assert.equal(settings[key], true);

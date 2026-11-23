@@ -54,7 +54,7 @@ async function renderStatus(mount, ctx, initial, show) {
       <span class="encoder-status-icon" aria-hidden="true">${icon('check_circle')}</span>
       <div class="encoder-status-copy"><div class="encoder-eyebrow">Automatic shrinking is on</div><h2 tabindex="-1">${esc(vehicle.name)} is set up.</h2><p data-plan></p></div>
       <div class="encoder-status-actions"><button type="button" data-change>Change setup</button><button type="button" data-off>Turn off</button></div>
-    </div><div data-custom-status hidden></div><div class="encoder-summary" data-status-numbers></div>
+    </div><div data-custom-status hidden></div><p data-separate-output hidden>Copies go to a separate folder, so this doesn't free space on the drive.</p><div class="encoder-summary" data-status-numbers></div>
       <p class="encoder-estimate-note" data-savings-note hidden>Recorded savings for this vehicle since its savings counter was last reset.</p>
     </section>
     <section class="card encoder-catchup" data-catchup hidden aria-labelledby="encoder-catchup-heading"><div class="row"><h3 id="encoder-catchup-heading" class="grow">Catching up on older footage</h3><button type="button" data-job-command hidden>Pause</button></div><div data-catchup-progress></div><p>Pause holds until you press Resume.</p></section>
@@ -76,7 +76,9 @@ async function renderStatus(mount, ctx, initial, show) {
     custom.hidden = choice.level !== 'custom';
     update('[data-custom-status]', `<h3>Customized in Expert</h3><p>${esc(expertSummary(config))}</p>`);
     const numbers = [];
-    if (Number.isFinite(saved?.bytes)) numbers.push([size(saved.bytes), 'space saved so far']);
+    const separate = config.outputMode === 'separate';
+    mount.querySelector('[data-separate-output]').hidden = !separate;
+    if (Number.isFinite(saved?.bytes)) numbers.push([size(saved.bytes), separate ? 'size saved by the copies' : 'space saved so far']);
     if (Number.isFinite(saved?.clips)) numbers.push([saved.clips.toLocaleString(), 'clips shrunk']);
     const pending = status.pending?.[root];
     const waiting = c ? c.queued + c.inFlight : Number.isFinite(pending) ? pending : null;
@@ -287,7 +289,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
       <p class="encoder-lead">It runs by itself in the background. A scheduled check starts work; it doesn't promise to finish by a set time.</p>
       <div class="encoder-when" data-schedules role="group" aria-label="When to check"></div>
       <div class="encoder-picker" data-picker></div>
-      <p>Your time zone (${esc(zone)}). One schedule for every vehicle that shrinks automatically.</p>
+      <p><span data-schedule-zone></span> One schedule for every vehicle that shrinks automatically.</p>
       ${otherVehicles.length ? `<p class="encoder-callout">Changing this also changes the schedule for ${esc(otherVehicles.join(', '))}.</p>` : ''}
       <label class="encoder-switch"><input class="toggle-switch" type="checkbox" role="switch" data-off-peak><span><b>Only when electricity is cheapest</b><small>Uses the off-peak hours of your plan in Settings › Electricity price.</small></span></label>
       <p class="encoder-estimate-note" data-schedule-help></p>
@@ -308,8 +310,12 @@ async function renderWizard(mount, ctx, auto, editing, show) {
   </div>`;
 
   const customInput = mount.querySelector('#encoder-keep-days');
+  let scheduleChanged = false;
   const next = mount.querySelector('[data-continue]');
   function drawSchedule() {
+    const scheduleZone = toAutoSettings(choice, zone, auto.settings, { scheduleChanged }).schedule?.zone || zone;
+    mount.querySelector('[data-schedule-zone]').textContent = scheduleZone === zone
+      ? `Your time zone (${zone}).` : `Schedule time zone (${scheduleZone}).`;
     mount.querySelector('[data-schedules]').innerHTML = Object.entries(SCHEDULES).map(([id, name]) => `<button type="button" class="encoder-when-card" data-when="${id}" aria-pressed="${choice.when === id}"><b>${name}${id !== 'asap' && choice.offPeak ? ', when electricity is cheapest' : ''}</b><small>${{ night: 'Best for most people', week: 'Choose a weekday', month: 'Choose a day of the month', asap: 'Checks every hour, any time' }[id]}</small></button>`).join('');
     const select = (key, label, values) => `<label>${label}<select data-timing="${key}">${values.map(([value, text]) => `<option value="${value}" ${choice[key] === value ? 'selected' : ''}>${text}</option>`).join('')}</select></label>`;
     mount.querySelector('[data-picker]').innerHTML = choice.when === 'custom'
@@ -355,6 +361,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
   }
   let devices = null;
   let previewId = null, previewOwner = null, previewTimer = null, previewGeneration = 0;
+  let previewWasCancelled = false;
   let previewState = 'idle', waitingFor = null, previewError = '', previewKind = 'saved', requestedKind = null;
   let previewClips = {}, progressLevels = new Set(), split = 50, pausePending = false;
   let progressEvent = null;
@@ -424,6 +431,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
     }
   }
   function cancelPreview() {
+    if (previewId || previewState === 'starting') previewWasCancelled = true;
     previewGeneration++;
     clearTimeout(previewTimer); previewTimer = null;
     previewOwner?.abort(); previewOwner = null;
@@ -458,8 +466,20 @@ async function renderWizard(mount, ctx, auto, editing, show) {
       if (!pause) await streamReady(previewOwner);
       if (!valid()) return;
       // Do not abort the start response: if navigation wins, we still need its id to cancel it.
-      const { id } = await previewInvoke('previewStart', { vehicleId: vehicle.id, exclude: [...excluded], ...(pause ? { pauseConversion: true } : {}) });
+      const payload = { vehicleId: vehicle.id, exclude: [...excluded], ...(pause ? { pauseConversion: true } : {}) };
+      let started;
+      try {
+        started = await previewInvoke('previewStart', payload);
+      } catch (error) {
+        if (pause || !previewWasCancelled || !valid() || (error.code || error.message) !== 'PREVIEW_ACTIVE') throw error;
+        // A running worker releases its slot after cancellation has unwound.
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        if (!valid()) return;
+        started = await previewInvoke('previewStart', payload);
+      }
+      const { id } = started;
       if (!valid()) { cancelPreviewId(id); return; }
+      previewWasCancelled = false;
       previewId = id;
       clearTimeout(previewTimer);
       const poll = async () => {
@@ -606,14 +626,19 @@ async function renderWizard(mount, ctx, auto, editing, show) {
     const button = event.target.closest('[data-when]');
     if (!button) return;
     choice.when = button.dataset.when;
+    scheduleChanged = true;
     if (choice.when === 'asap') choice.offPeak = false;
     drawSchedule(); mount.querySelector(`[data-when="${choice.when}"]`).focus();
   };
   mount.querySelector('[data-picker]').onchange = (event) => {
-    if (event.target.dataset.timing) choice[event.target.dataset.timing] = Number(event.target.value);
+    const key = event.target.dataset.timing;
+    if (key) {
+      choice[key] = Number(event.target.value); scheduleChanged = true; drawSchedule();
+      mount.querySelector(`[data-timing="${key}"]`).focus();
+    }
   };
-  mount.querySelector('[data-off-peak]').onchange = (event) => { choice.offPeak = event.target.checked; drawSchedule(); };
-  mount.querySelector('[data-catch-up]').onchange = (event) => { choice.catchUp = event.target.checked; };
+  mount.querySelector('[data-off-peak]').onchange = (event) => { choice.offPeak = event.target.checked; scheduleChanged = true; drawSchedule(); };
+  mount.querySelector('[data-catch-up]').onchange = (event) => { choice.catchUp = event.target.checked; scheduleChanged = true; drawSchedule(); };
   mount.querySelector('[data-review]').onclick = (event) => {
     const button = event.target.closest('[data-edit]');
     if (button && !saving) { step = Number(button.dataset.edit); showStep(); }
@@ -627,7 +652,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
       const current = await invoke('getAuto');
       const existing = current.settings?.configs?.find((c) => c.sourceRoot === root) || current.saved?.find((c) => c.sourceRoot === root);
       const config = toVehicleConfig(choice, vehicle, existing);
-      const shared = toAutoSettings(choice, zone, current.settings);
+      const shared = toAutoSettings(choice, zone, current.settings, { scheduleChanged });
       await invoke('saveVehicle', { config });
       const updated = await invoke('setAuto', { enabled: true, ...shared, config });
       if (ctx.alive()) await show(updated);

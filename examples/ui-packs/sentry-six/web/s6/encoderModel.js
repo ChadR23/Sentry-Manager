@@ -120,19 +120,20 @@ export function toVehicleConfig(choice, vehicle, existing) {
 }
 
 /** Shared setAuto fields only. The caller supplies enabled and config (or removeSource). */
-export function toAutoSettings(choice, browserZone, existingSettings = {}) {
+export function toAutoSettings(choice, browserZone, existingSettings = {}, { scheduleChanged = false } = {}) {
+  const zone = !scheduleChanged && existingSettings.schedule?.zone || browserZone;
   let schedule = null,
     intervalMinutes = 1440,
     window = choice.offPeak ? { follow: 'off-peak' } : null;
   switch (choice.when) {
     case 'night':
-      schedule = { kind: 'daily', hour: choice.hour, zone: browserZone };
+      schedule = { kind: 'daily', hour: choice.hour, zone };
       break;
     case 'week':
-      schedule = { kind: 'weekly', weekday: choice.weekday, hour: choice.hour, zone: browserZone };
+      schedule = { kind: 'weekly', weekday: choice.weekday, hour: choice.hour, zone };
       break;
     case 'month':
-      schedule = { kind: 'monthly', day: choice.day, hour: choice.hour, zone: browserZone };
+      schedule = { kind: 'monthly', day: choice.day, hour: choice.hour, zone };
       break;
     case 'asap':
       intervalMinutes = 60;
