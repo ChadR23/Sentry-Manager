@@ -1,8 +1,9 @@
 import { esc, invoke as previewInvoke, api as previewApi, clientId, scope } from '../core.js';
 import { icon } from '../icons.js';
 import { size } from '../format.js';
-import { KEEP_CHIPS, LEVELS, fromSaved, dayStates, levelOf, levelDevice, previewPercent, previewMeasured, previewSource, previewMegabytes } from '../encoderModel.js';
-import { onPreview, streamReady } from '../convert.js';
+import { KEEP_CHIPS, LEVELS, fromSaved, toVehicleConfig, toAutoSettings, planSentence, scheduleText, nextCheckText, expertSummary, dayStates, levelOf, levelDevice, previewPercent, previewMeasured, previewSource, previewMegabytes } from '../encoderModel.js';
+import { onPreview, streamReady, follow, counts, ACTIVE, PAUSED, describe, applySnapshot } from '../convert.js';
+import { describeJob } from '../jobs.js';
 
 const GROUPS = {
   SavedClips: { name: 'Saved clips', description: 'Clips you saved with the horn, your voice or the screen', color: 'saved' },
@@ -11,6 +12,24 @@ const GROUPS = {
 };
 const DAY_LABELS = { kept: 'Kept as recorded', shrink: 'Will be shrunk', done: 'Already shrunk', none: 'No footage' };
 const STEPS = ['Keep', 'Space', 'Schedule', 'Review'];
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const SCHEDULES = { night: 'Every night', week: 'Once a week', month: 'Once a month', asap: 'As clips age' };
+const browserZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+const rootOf = (vehicle) => vehicle.studioRoot || vehicle.root;
+function openExpert() {
+  const expert = document.getElementById('encoder-expert');
+  if (expert) { expert.checked = true; expert.dispatchEvent(new Event('change', { bubbles: true })); }
+}
+const errorText = (error) => error?.message || 'Could not save these settings. Try again.';
+// Keep a server explanation as well as its code; the shared legacy invoke helper
+// exposes only the code. Scope still owns the request and navigation cancellation.
+const setupInvoke = (owner) => async (name, payload) => {
+  const out = await owner.api(`/api/converter/invoke/${name}`, {
+    method: 'POST', body: payload, headers: { 'X-Client-Id': clientId },
+  });
+  if (!out?.ok) throw Object.assign(new Error(out?.error?.message || out?.error?.code || 'Converter request failed'), { code: out?.error?.code });
+  return out.value;
+};
 const QUALITY = {
   std: { dots: 5, note: 'Looks the same as the original. Fastest.' },
   med: { dots: 4, note: 'Very slight softness in fine detail.' },
@@ -20,8 +39,138 @@ const cancelPreviewId = (id) => previewApi('/api/converter/invoke/previewCancel'
   method: 'POST', body: { id }, keepalive: true, headers: { 'X-Client-Id': clientId },
 }).catch(() => {});
 
+async function renderStatus(mount, ctx, initial, show) {
+  const { api, confirmDialog } = ctx.scope;
+  const invoke = setupInvoke(ctx.scope);
+  const vehicle = ctx.current(), root = rootOf(vehicle), zone = browserZone();
+  let auto = initial, saved = null, jobs = [], snapshot = null, nodeWaiting = null;
+  let readError = '', commandError = '', busy = false, loading = false, stopped = false;
+  let share = vehicle.share;
+  const valid = () => !stopped && ctx.alive();
+  const activeJob = () => snapshot && snapshot.config?.sourceRoot === root && ACTIVE.has(snapshot.state) &&
+    auto.status?.active?.[root]?.jobId === snapshot.id ? snapshot : null;
+  mount.innerHTML = `<div class="encoder-status-screen" data-encoder-screen="status">
+    <section class="card"><div class="encoder-status">
+      <span class="encoder-status-icon" aria-hidden="true">${icon('check_circle')}</span>
+      <div class="encoder-status-copy"><div class="encoder-eyebrow">Automatic shrinking is on</div><h2 tabindex="-1">${esc(vehicle.name)} is set up.</h2><p data-plan></p></div>
+      <div class="encoder-status-actions"><button type="button" data-change>Change setup</button><button type="button" data-off>Turn off</button></div>
+    </div><div data-custom-status hidden></div><div class="encoder-summary" data-status-numbers></div>
+      <p class="encoder-estimate-note" data-savings-note hidden>Recorded savings for this vehicle since its savings counter was last reset.</p>
+    </section>
+    <section class="card encoder-catchup" data-catchup hidden aria-labelledby="encoder-catchup-heading"><div class="row"><h3 id="encoder-catchup-heading" class="grow">Catching up on older footage</h3><button type="button" data-job-command hidden>Pause</button></div><div data-catchup-progress></div><p>Pause holds until you press Resume.</p></section>
+    <section class="card"><h3>Coming up</h3><p data-next-check></p><p data-next-work></p><small>Times shown in ${esc(zone)}.</small></section>
+    <section class="card encoder-problems" data-problems hidden aria-labelledby="encoder-problems-heading"><h3 id="encoder-problems-heading">Needs attention</h3><div data-problem-list role="status"></div><div class="form-actions"><button type="button" data-refresh>Check again</button><a class="btn" href="#/activity">Activity</a><button type="button" data-problem-expert>Open Expert</button></div></section>
+  </div>`;
+  const update = (selector, html) => {
+    const el = mount.querySelector(selector);
+    if (el.innerHTML !== html) el.innerHTML = html;
+  };
+  function draw() {
+    if (!valid()) return;
+    const config = auto.settings?.configs?.find((c) => c.sourceRoot === root);
+    if (!config) return;
+    const choice = fromSaved(config, auto.settings), status = auto.status || {};
+    const active = activeJob(), c = active ? counts(active) : null;
+    update('[data-plan]', esc(planSentence(choice)));
+    const custom = mount.querySelector('[data-custom-status]');
+    custom.hidden = choice.level !== 'custom';
+    update('[data-custom-status]', `<h3>Customized in Expert</h3><p>${esc(expertSummary(config))}</p>`);
+    const numbers = [];
+    if (Number.isFinite(saved?.bytes)) numbers.push([size(saved.bytes), 'space saved so far']);
+    if (Number.isFinite(saved?.clips)) numbers.push([saved.clips.toLocaleString(), 'clips shrunk']);
+    const pending = status.pending?.[root];
+    const waiting = c ? c.queued + c.inFlight : Number.isFinite(pending) ? pending : null;
+    if (waiting !== null) numbers.push([`${c ? '' : 'About '}${waiting.toLocaleString()}`, c ? 'clips waiting or in progress' : 'files waiting · last-check estimate']);
+    update('[data-status-numbers]', numbers.map(([value, label]) => `<div class="encoder-stat"><b>${esc(value)}</b><span>${label}</span></div>`).join(''));
+    mount.querySelector('[data-savings-note]').hidden = !Number.isFinite(saved?.bytes) && !Number.isFinite(saved?.clips);
+    mount.querySelector('[data-catchup]').hidden = !status.catchUp?.[root];
+    const paused = active && PAUSED.has(active.state);
+    update('[data-catchup-progress]', c?.total
+      ? `<progress max="${c.total}" value="${c.done}" aria-label="Catch-up progress for the current job"></progress><p>${c.done.toLocaleString()} of ${c.total.toLocaleString()} clips processed in this job · ${paused ? 'Paused' : 'In progress'}${active.discoveryComplete === false ? ' · Still looking for clips; the total may grow.' : ''}</p>`
+      : `<progress aria-label="Preparing catch-up"></progress><p>${active ? paused ? 'Paused.' : 'Looking for eligible clips…' : status.active?.[root] ? 'Reading catch-up progress…' : 'Waiting for the server to start the catch-up job.'}</p>`);
+    const jobButton = mount.querySelector('[data-job-command]');
+    jobButton.hidden = !active; jobButton.disabled = busy;
+    jobButton.textContent = paused ? 'Resume' : 'Pause';
+    mount.querySelector('[data-change]').disabled = busy;
+    mount.querySelector('[data-off]').disabled = busy;
+    update('[data-next-check]', esc(nextCheckText(status.nextCheckAt, zone)));
+    update('[data-next-work]', esc(waiting > 0
+      ? `${c ? `${waiting.toLocaleString()} clips waiting or in progress.` : `About ${waiting.toLocaleString()} files waiting at the last check; eligible clips are counted when the job starts.`} Later checks look for included clips ${choice.keep == null ? 'that have not been shrunk yet' : `older than the ${choice.keep}-day keep window`}.`
+      : `The next check looks for included clips ${choice.keep == null ? 'that have not been shrunk yet' : `that have aged past the ${choice.keep}-day keep window`}. The amount will be known when it checks.`));
+    const problems = [];
+    if (readError) problems.push(readError);
+    if (commandError) problems.push(commandError);
+    const sourceError = status.sources?.[root]?.error;
+    if (share?.healthy === false || share?.readable === false || active?.state === 'paused_network' || ['PATH_UNAVAILABLE', 'SOURCE_UNAVAILABLE'].includes(sourceError))
+      problems.push(`The footage share is offline or cannot be reached. ${share?.lastError || 'Check its connection; your originals stay where they are.'}`);
+    if (sourceError && !['PATH_UNAVAILABLE', 'SOURCE_UNAVAILABLE'].includes(sourceError)) problems.push(describe({ code: sourceError }));
+    if (c?.failed) problems.push(`${c.failed} clips could not be shrunk. Their originals were kept. Open Expert to review or retry them.`);
+    for (const job of jobs.filter((j) => j.vehicleId === vehicle.id && ['conversion', 'convert'].includes(j.type) && j.status === 'failed'))
+      problems.push(describeJob(job).outcome || 'A previous shrinking run failed. Open Activity for details.');
+    if (status.active?.[root]?.pausedForDevices || (active && nodeWaiting?.jobId === active.id && nodeWaiting.count > 0))
+      problems.push('Waiting for an encoding device or GPU to become available.');
+    else if (pending > 0 && Object.entries(status.active || {}).some(([source]) => source !== root))
+      problems.push('Waiting for another vehicle’s shrinking run to free an encoding device.');
+    if (status.active?.[root]?.pausedForWindow) problems.push('Waiting for the next cheap electricity period.');
+    mount.querySelector('[data-problems]').hidden = !problems.length;
+    update('[data-problem-list]', [...new Set(problems)].map((message) => `<p>${esc(message)}</p>`).join(''));
+  }
+  async function load() {
+    if (!valid() || loading || busy) return;
+    loading = true;
+    try {
+      const [current, vehicles, history] = await Promise.all([
+        invoke('getAuto'), api('/api/vehicles'), api(`/api/jobs?vehicle=${encodeURIComponent(vehicle.id)}`),
+      ]);
+      if (!valid()) return;
+      auto = current;
+      if (!auto.settings?.configs?.some((c) => c.sourceRoot === root)) { await show(auto); return; }
+      const currentVehicle = vehicles.vehicles?.find((v) => v.id === vehicle.id);
+      saved = currentVehicle?.saved; share = currentVehicle?.share;
+      jobs = history.jobs || []; readError = '';
+    } catch (error) { if (valid()) readError = `Could not refresh status. ${errorText(error)}`; }
+    finally { loading = false; draw(); }
+  }
+  mount.querySelector('[data-change]').onclick = () => show(auto, true).catch((error) => { commandError = errorText(error); draw(); });
+  mount.querySelector('[data-off]').onclick = async () => {
+    if (busy) return;
+    busy = true; draw();
+    try {
+      const yes = await confirmDialog({ title: `Turn off automatic shrinking for ${vehicle.name}?`, body: '<p>This removes only this vehicle’s automatic setup. Other vehicles keep their setup.</p>', ok: 'Turn off', danger: true });
+      if (!yes) return;
+      const current = await invoke('getAuto');
+      // Removing a vehicle must not reinterpret the shared schedule in this browser's zone.
+      const shared = toAutoSettings({ ...fromSaved(null, current.settings), when: 'custom' }, zone, current.settings);
+      const updated = await invoke('setAuto', { enabled: false, ...shared, removeSource: root });
+      if (valid()) await show(updated);
+    } catch (error) { if (valid()) commandError = errorText(error); }
+    finally { busy = false; draw(); }
+  };
+  mount.querySelector('[data-job-command]').onclick = async () => {
+    const job = activeJob();
+    if (!job || busy) return;
+    busy = true; commandError = ''; draw();
+    try {
+      const result = await invoke(PAUSED.has(job.state) ? 'resume' : 'pause', { jobId: job.id });
+      if (valid()) { snapshot = result; applySnapshot(result); }
+    } catch (error) { if (valid()) commandError = errorText(error); }
+    finally { busy = false; draw(); }
+  };
+  mount.querySelector('[data-refresh]').onclick = load;
+  mount.querySelector('[data-problem-expert]').onclick = openExpert;
+  draw();
+  const stop = follow((next, waiting) => {
+    if (next?.config?.sourceRoot === root) { snapshot = next; nodeWaiting = waiting; }
+    draw();
+  }, ctx.scope);
+  const timer = setInterval(load, 5000);
+  const cleanup = () => { stopped = true; clearInterval(timer); stop(); };
+  ctx.scope.signal.addEventListener('abort', cleanup, { once: true });
+  await load();
+  return cleanup;
+}
+
 export async function render(mount, ctx) {
-  const { invoke, api } = ctx.scope;
   const vehicle = ctx.current();
   mount.className = 'encoder-setup';
   if (!vehicle) {
@@ -29,21 +178,40 @@ export async function render(mount, ctx) {
     return;
   }
   mount.innerHTML = '<p role="status">Loading encoder setup…</p>';
-  const auto = await invoke('getAuto');
+  const auto = await ctx.scope.invoke('getAuto');
   if (!ctx.alive()) return;
-  const root = vehicle.studioRoot || vehicle.root;
-  const config = auto.settings?.configs?.find((entry) => entry.sourceRoot === root);
-  if (config) {
-    mount.innerHTML = `<section class="card encoder-status" data-encoder-screen="status">
-      <span class="encoder-status-icon" aria-hidden="true">${icon('check_circle')}</span>
-      <div><div class="encoder-eyebrow">Automatic shrinking</div>
-        <h2>${esc(vehicle.name)} is set up.</h2>
-        <p>Your automatic shrinking setup for this vehicle is saved.</p>
-      </div>
-    </section>`;
-    return;
+  let owner, cleanup, opened = false;
+  async function show(current, editing = false) {
+    const focus = opened; opened = true;
+    owner?.abort(); cleanup?.(); cleanup = null;
+    owner = scope([], { signal: ctx.scope.signal });
+    const screenOwner = owner;
+    const screen = { ...ctx, scope: screenOwner, alive: () => ctx.alive() && screenOwner.alive() };
+    const config = current.settings?.configs?.find((entry) => entry.sourceRoot === rootOf(vehicle));
+    try {
+      const stop = config && !editing
+        ? await renderStatus(mount, screen, current, show)
+        : await renderWizard(mount, screen, current, editing, show);
+      if (screen.alive()) {
+        cleanup = stop;
+        if (focus && config && !editing) mount.querySelector('h2')?.focus();
+      }
+      else stop?.();
+    } catch (error) {
+      if (!screen.alive()) return;
+      mount.innerHTML = `<section class="card"><p role="alert">${esc(errorText(error))}</p><button type="button" data-reload>Try again</button></section>`;
+      mount.querySelector('[data-reload]').onclick = () => ctx.render();
+    }
   }
-  const saved = auto.saved?.find((entry) => entry.sourceRoot === root);
+  await show(auto);
+  return () => { owner?.abort(); cleanup?.(); };
+}
+
+async function renderWizard(mount, ctx, auto, editing, show) {
+  const { api } = ctx.scope;
+  const invoke = setupInvoke(ctx.scope);
+  const vehicle = ctx.current(), root = rootOf(vehicle), zone = browserZone();
+  const saved = auto.settings?.configs?.find((entry) => entry.sourceRoot === root) || auto.saved?.find((entry) => entry.sourceRoot === root);
   // A new setup starts with the guided defaults; an existing shared schedule
   // belongs to all configured vehicles and must survive editing this one.
   const choice = fromSaved(saved, auto.settings?.configs?.length ? auto.settings : undefined);
@@ -56,7 +224,9 @@ export async function render(mount, ctx) {
   const today = `${part('year')}-${part('month')}-${part('day')}`;
   const currentMonth = today.slice(0, 7) + '-01';
   let month = new Date(currentMonth + 'T00:00:00Z');
-  let step = 1;
+  let step = editing ? 4 : 1;
+  let acknowledged = false, saving = false, replacementUnavailable = false, capabilitiesReady = false, saveError = '';
+  const otherVehicles = ctx.state.vehicles.filter((v) => rootOf(v) !== root && auto.settings?.configs?.some((c) => c.sourceRoot === rootOf(v))).map((v) => v.name);
   let customOpen = choice.keep != null && !KEEP_CHIPS.includes(choice.keep);
   const noKeep = choice.keep == null;
   const byDay = new Map(days.map((day) => [day.day, day]));
@@ -100,7 +270,7 @@ export async function render(mount, ctx) {
       <div class="encoder-eyebrow">Step 2 of 4</div><h2 id="encoder-step-2-heading" tabindex="-1">How much space should older footage save?</h2>
       <p class="encoder-lead">Choose how much space to save, then compare the picture on your own footage.</p>
       ${saved && levelOf(saved) === 'custom' ? `<div class="encoder-customized"><h3>Customized in Expert</h3>
-        <p>${esc([saved.codec?.toUpperCase(), saved.profileId, saved.qualityLevel && `Quality: ${saved.qualityLevel}`, saved.bitrateKbps && `${saved.bitrateKbps} kbps`, saved.outputMode === 'separate' ? 'Separate copies' : 'Replace originals', saved.lanes?.length && `${saved.lanes.length} device lane${saved.lanes.length === 1 ? '' : 's'}`].filter(Boolean).join(' · '))}</p>
+        <p>${esc(expertSummary(saved))}</p>
         <div class="form-actions"><button type="button" data-keep-expert>Keep my Expert settings</button><button type="button" data-pick-level>Pick a level</button></div></div>` : ''}
       <div class="encoder-tiles" data-levels role="group" aria-label="Space to save"></div>
       <section class="encoder-cmp-card" data-cmp aria-labelledby="encoder-preview-heading">
@@ -112,14 +282,77 @@ export async function render(mount, ctx) {
         <div id="encoder-preview-panel" role="tabpanel" tabindex="0" data-preview-body></div>
       </section>
     </section>
-    ${['When should shrinking happen?', 'Review your setup'].map((heading, i) => `<section data-encoder-step="${i + 3}" hidden aria-labelledby="encoder-step-${i + 3}-heading"><div class="encoder-eyebrow">Step ${i + 3} of 4</div><h2 id="encoder-step-${i + 3}-heading" tabindex="-1">${heading}</h2></section>`).join('')}
-    <footer class="encoder-foot"><button type="button" data-back disabled>Back</button><button type="button" class="primary" data-continue>Continue</button></footer>
+    <section data-encoder-step="3" hidden aria-labelledby="encoder-step-3-heading">
+      <div class="encoder-eyebrow">Step 3 of 4</div><h2 id="encoder-step-3-heading" tabindex="-1">When should it shrink footage?</h2>
+      <p class="encoder-lead">It runs by itself in the background. A scheduled check starts work; it doesn't promise to finish by a set time.</p>
+      <div class="encoder-when" data-schedules role="group" aria-label="When to check"></div>
+      <div class="encoder-picker" data-picker></div>
+      <p>Your time zone (${esc(zone)}). One schedule for every vehicle that shrinks automatically.</p>
+      ${otherVehicles.length ? `<p class="encoder-callout">Changing this also changes the schedule for ${esc(otherVehicles.join(', '))}.</p>` : ''}
+      <label class="encoder-switch"><input class="toggle-switch" type="checkbox" role="switch" data-off-peak><span><b>Only when electricity is cheapest</b><small>Uses the off-peak hours of your plan in Settings › Electricity price.</small></span></label>
+      <p class="encoder-estimate-note" data-schedule-help></p>
+      <label class="encoder-switch"><input class="toggle-switch" type="checkbox" role="switch" data-catch-up><span><b>Finish the first catch-up run as soon as possible</b><small>The first run shrinks everything already older than your cut-off. With this on, it starts as soon as setup finishes and keeps going until done, ignoring the schedule and electricity hours. After that, only clips that age past the cut-off get shrunk, at the scheduled times.</small></span></label>
+      <p class="encoder-estimate-note">Turning a vehicle back on, shortening its keep window, including another kind of clip or changing the space level can start another catch-up run. Pause holds until you press Resume.</p>
+    </section>
+    <section data-encoder-step="4" hidden aria-labelledby="encoder-step-4-heading">
+      <div class="encoder-eyebrow">Step 4 of 4</div><h2 id="encoder-step-4-heading" tabindex="-1">Here's what will happen</h2>
+      <p class="encoder-lead" data-plan></p><div class="encoder-review" data-review></div>
+      <p class="encoder-callout" data-level-change hidden></p>
+      <label class="encoder-switch encoder-ack"><input class="toggle-switch" type="checkbox" role="switch" data-ack required><span><b>Replace the originals with the smaller copies</b><small>Needed to free space. Each copy is checked against the original before the original is replaced.</small></span></label>
+      <div class="encoder-callout" data-replacement hidden></div>
+      <p class="encoder-problem" data-save-error role="alert" hidden></p>
+    </section>
+    <footer class="encoder-foot"><button type="button" data-back disabled>Back</button><button type="button" class="primary" data-continue>Continue</button><button type="button" class="primary" data-save hidden>Turn on automatic shrinking</button><button type="button" data-review-expert hidden>Open Expert</button></footer>
     </div>
     <p class="encoder-scope-note">Keep, space and clip choices apply to <b>${esc(vehicle.name)}</b>. The schedule is shared by every vehicle.</p>
   </div>`;
 
   const customInput = mount.querySelector('#encoder-keep-days');
   const next = mount.querySelector('[data-continue]');
+  function drawSchedule() {
+    mount.querySelector('[data-schedules]').innerHTML = Object.entries(SCHEDULES).map(([id, name]) => `<button type="button" class="encoder-when-card" data-when="${id}" aria-pressed="${choice.when === id}"><b>${name}${id !== 'asap' && choice.offPeak ? ', when electricity is cheapest' : ''}</b><small>${{ night: 'Best for most people', week: 'Choose a weekday', month: 'Choose a day of the month', asap: 'Checks every hour, any time' }[id]}</small></button>`).join('');
+    const select = (key, label, values) => `<label>${label}<select data-timing="${key}">${values.map(([value, text]) => `<option value="${value}" ${choice[key] === value ? 'selected' : ''}>${text}</option>`).join('')}</select></label>`;
+    mount.querySelector('[data-picker]').innerHTML = choice.when === 'custom'
+      ? '<p>Customized in Expert. Your existing timing stays unchanged unless you choose a schedule above.</p>'
+      : (choice.when === 'week' ? select('weekday', 'Weekday', WEEKDAYS.map((name, n) => [n, name])) : '') +
+        (choice.when === 'month' ? select('day', 'Day of the month', Array.from({ length: 28 }, (_, i) => [i + 1, i + 1])) : '') +
+        (!choice.offPeak && choice.when !== 'asap' ? select('hour', 'Start at', Array.from({ length: 24 }, (_, i) => [i, `${String(i).padStart(2, '0')}:00`])) : '');
+    const offPeak = mount.querySelector('[data-off-peak]');
+    offPeak.checked = choice.offPeak; offPeak.disabled = ['asap', 'custom'].includes(choice.when);
+    mount.querySelector('[data-catch-up]').checked = choice.catchUp;
+    mount.querySelector('[data-schedule-help]').textContent = choice.when === 'asap'
+      ? 'As clips age checks every hour, any time, without an electricity window.'
+      : choice.when === 'custom' ? 'Choose a guided schedule above to change the electricity window here.'
+      : choice.offPeak ? 'Checks start when the cheap period begins. A running job pauses when it ends and resumes in the next cheap period, even with a weekly or monthly schedule.'
+      : 'Once a job starts, it runs until done. It does not pause at a set hour.';
+  }
+  function drawReview() {
+    const expertOnly = choice.level === 'custom' && saved?.outputMode !== 'replace';
+    mount.querySelector('[data-plan]').textContent = planSentence(choice);
+    const rows = [
+      ['Keep', choice.keep == null ? 'No keep window' : `Newest ${choice.keep} ${choice.keep === 1 ? 'day' : 'days'} as recorded`, 1],
+      ['Order', choice.order.filter((g) => choice.included[g]).map((g) => GROUPS[g].name).join(' → '), 1],
+      ['Space', choice.level === 'custom' ? `Customized in Expert: ${expertSummary(saved)}` : `${LEVELS.find((l) => l.id === choice.level).name} · about ${LEVELS.find((l) => l.id === choice.level).pct}% smaller`, 2],
+      ['Schedule', `${scheduleText(choice)}. ${choice.catchUp ? 'Catch-up starts as soon as setup finishes.' : 'Catch-up follows the schedule and electricity hours.'}`, 3],
+    ];
+    mount.querySelector('[data-review]').innerHTML = rows.map(([label, text, target]) => `<div class="encoder-review-row"><span>${label}</span><b>${esc(text)}</b><button type="button" data-edit="${target}" aria-label="Edit ${label.toLowerCase()}" ${saving ? 'disabled' : ''}>Edit</button></div>`).join('');
+    const change = mount.querySelector('[data-level-change]');
+    change.hidden = !saved || levelOf(saved) !== 'custom' || choice.level === 'custom';
+    change.textContent = `Picking a level changes your Expert encoding to H.265 with the selected space target, removes custom bitrate, quality and larger-result settings, and replaces the originals. Other settings, including device lanes and verification, stay as saved.`;
+    const notice = mount.querySelector('[data-replacement]');
+    notice.hidden = !replacementUnavailable && !expertOnly;
+    notice.textContent = replacementUnavailable
+      ? 'This storage cannot safely replace the originals. Automatic shrinking needs replacement to free space. Open Expert to set up separate copies instead.'
+      : 'Separate copies stay in Expert because they need a destination and do not free space on this share. Open Expert to keep these settings, or pick a space level to replace originals.';
+    const ack = mount.querySelector('[data-ack]');
+    ack.checked = acknowledged; ack.disabled = saving || replacementUnavailable || expertOnly;
+    const button = mount.querySelector('[data-save]');
+    button.hidden = step !== 4 || replacementUnavailable || expertOnly;
+    button.disabled = !acknowledged || !capabilitiesReady || saving;
+    button.textContent = saving ? 'Saving…' : 'Turn on automatic shrinking';
+    mount.querySelector('[data-review-expert]').hidden = step !== 4 || (!replacementUnavailable && !expertOnly);
+    const error = mount.querySelector('[data-save-error]'); error.hidden = !saveError; error.textContent = saveError;
+  }
   let devices = null;
   let previewId = null, previewOwner = null, previewTimer = null, previewGeneration = 0;
   let previewState = 'idle', waitingFor = null, previewError = '', previewKind = 'saved', requestedKind = null;
@@ -168,7 +401,7 @@ export async function render(mount, ctx) {
           <img src="${esc(original.frame)}" alt="Original frame" data-original-frame><img class="encoder-after" src="${esc(selected.frame)}" alt="${name} frame">
           <span class="encoder-zoom-box" hidden></span><span class="encoder-cmp-handle" aria-hidden="true"></span><span class="encoder-cmp-tag original">Original</span><span class="encoder-cmp-tag selected">${name}</span>
           <input class="encoder-cmp-range" type="range" min="0" max="100" value="${split}" aria-label="Compare original and shrunk frame" aria-valuetext="${split}% original">
-        </div><div class="encoder-zooms">${[[original, 'Original'], [selected, name]].map(([result, label]) => `<figure class="encoder-zoom ${result.level === 'orig' ? '' : 'selected'}"><img src="${esc(result.zoom)}" alt="${label}, up close"><figcaption><b>${label}</b><span>${esc(previewMegabytes(result.after_bytes))} · ${previewPercent(result.saved_percent)}</span></figcaption></figure>`).join('')}</div></div>
+        </div><div class="encoder-zooms">${[[original, 'Original'], [selected, name]].map(([result, label]) => `<figure class="encoder-zoom ${result.level === 'orig' ? '' : 'selected'}"><img src="${esc(result.zoom)}" alt="${label}, up close"><figcaption><b>${label}</b><span>${esc(previewMegabytes(result.after_bytes))}${result.level === 'orig' ? '' : ` · ${previewPercent(result.saved_percent)}`}</span></figcaption></figure>`).join('')}</div></div>
         <p class="encoder-measured">${esc(previewMeasured(results))}</p>`;
     } else if (!busy && Object.keys(previewClips).length) body = `<p>No ${previewKind === 'saved' ? 'Saved' : 'Sentry'} clips to preview${requestedKind === previewKind ? ' besides those already shown' : ''}.</p>`;
     const key = JSON.stringify([clip, choice.level, busy, requestedKind]);
@@ -320,11 +553,13 @@ export async function render(mount, ctx) {
       if (i + 1 === step) item.setAttribute('aria-current', 'step');
       else item.removeAttribute('aria-current');
     });
-    mount.querySelector('[data-back]').disabled = step === 1;
+    mount.querySelector('[data-back]').disabled = step === 1 || saving;
     next.hidden = step === STEPS.length;
     drawChips();
     if (step === 1) drawFootage();
     if (step === 2) { drawLevels(); startPreview(); }
+    if (step === 3) drawSchedule();
+    drawReview();
     mount.querySelector(`[data-encoder-step="${step}"] h2`).focus();
   }
   mount.querySelector('.encoder-chips').onclick = (event) => {
@@ -367,12 +602,48 @@ export async function render(mount, ctx) {
   };
   mount.querySelector('[data-back]').onclick = () => { if (step > 1) { step--; showStep(); } };
   next.onclick = () => { if (!next.disabled && step < STEPS.length) { step++; showStep(); } };
+  mount.querySelector('[data-schedules]').onclick = (event) => {
+    const button = event.target.closest('[data-when]');
+    if (!button) return;
+    choice.when = button.dataset.when;
+    if (choice.when === 'asap') choice.offPeak = false;
+    drawSchedule(); mount.querySelector(`[data-when="${choice.when}"]`).focus();
+  };
+  mount.querySelector('[data-picker]').onchange = (event) => {
+    if (event.target.dataset.timing) choice[event.target.dataset.timing] = Number(event.target.value);
+  };
+  mount.querySelector('[data-off-peak]').onchange = (event) => { choice.offPeak = event.target.checked; drawSchedule(); };
+  mount.querySelector('[data-catch-up]').onchange = (event) => { choice.catchUp = event.target.checked; };
+  mount.querySelector('[data-review]').onclick = (event) => {
+    const button = event.target.closest('[data-edit]');
+    if (button && !saving) { step = Number(button.dataset.edit); showStep(); }
+  };
+  mount.querySelector('[data-ack]').onchange = (event) => { acknowledged = event.target.checked; drawReview(); };
+  mount.querySelector('[data-review-expert]').onclick = openExpert;
+  mount.querySelector('[data-save]').onclick = async () => {
+    if (saving || !acknowledged || replacementUnavailable || !capabilitiesReady) return;
+    saving = true; saveError = ''; drawReview(); mount.querySelector('[data-back]').disabled = true;
+    try {
+      const current = await invoke('getAuto');
+      const existing = current.settings?.configs?.find((c) => c.sourceRoot === root) || current.saved?.find((c) => c.sourceRoot === root);
+      const config = toVehicleConfig(choice, vehicle, existing);
+      const shared = toAutoSettings(choice, zone, current.settings);
+      await invoke('saveVehicle', { config });
+      const updated = await invoke('setAuto', { enabled: true, ...shared, config });
+      if (ctx.alive()) await show(updated);
+    } catch (error) {
+      if (!ctx.alive()) return;
+      saveError = errorText(error);
+      if (error.code === 'REPLACEMENT_UNAVAILABLE' || saveError.includes('REPLACEMENT_UNAVAILABLE')) replacementUnavailable = true;
+    } finally {
+      if (ctx.alive()) { saving = false; drawReview(); mount.querySelector('[data-back]').disabled = false; }
+    }
+  };
   mount.querySelector('[data-levels]').onclick = (event) => {
     const button = event.target.closest('button');
     if (!button) return;
     if (button.hasAttribute('data-open-expert')) {
-      const expert = document.getElementById('encoder-expert');
-      if (expert) { expert.checked = true; expert.dispatchEvent(new Event('change', { bubbles: true })); }
+      openExpert();
       return;
     }
     choice.level = button.dataset.level;
@@ -412,6 +683,15 @@ export async function render(mount, ctx) {
   drawChips();
   drawFootage();
   drawOrder();
+  invoke('getCapabilities').then((answer) => {
+    if (!ctx.alive()) return;
+    replacementUnavailable = answer.replacement === 'unavailable'; capabilitiesReady = true; drawReview();
+  }).catch((error) => {
+    if (!ctx.alive()) return;
+    // An older server may not publish capabilities. The save still enforces replacement.
+    capabilitiesReady = true; saveError = errorText(error); drawReview();
+  });
+  if (editing) showStep();
   return () => {
     cancelPreview();
     window.removeEventListener('pagehide', onPageHide);

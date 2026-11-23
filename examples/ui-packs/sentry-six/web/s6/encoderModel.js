@@ -227,6 +227,14 @@ export function planSentence(choice, vehicleNames = []) {
       : `Keeping the last ${choice.keep} ${choice.keep === 1 ? 'day' : 'days'} as recorded, shrinking older footage ${saving ? `by ${saving}` : 'with your Expert settings'}`;
   const first = choice.order.find((group) => choice.included[group]);
   const order = first ? `${GROUP_NAMES[first]} first` : 'no clip groups selected';
+  const schedule = scheduleText(choice).replace(/^./, (letter) => letter.toLowerCase());
+  const sentence = `${start}, ${order}, ${schedule}.`;
+  if (!vehicleNames.length) return sentence;
+  const names = new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(vehicleNames);
+  return `For ${names}: ${sentence[0].toLowerCase()}${sentence.slice(1)}`;
+}
+
+export function scheduleText(choice) {
   const at = choice.offPeak
     ? ', when electricity is cheapest'
     : ` at ${String(choice.hour).padStart(2, '0')}:00`;
@@ -237,8 +245,21 @@ export function planSentence(choice, vehicleNames = []) {
     asap: 'as clips age, checking every hour',
     custom: 'on your Expert schedule',
   }[choice.when];
-  const sentence = `${start}, ${order}, ${schedule}.`;
-  if (!vehicleNames.length) return sentence;
-  const names = new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(vehicleNames);
-  return `For ${names}: ${sentence[0].toLowerCase()}${sentence.slice(1)}`;
+  return schedule.replace(/^./, (letter) => letter.toUpperCase());
+}
+
+export function nextCheckText(at, zone, now = Date.now()) {
+  if (!Number.isFinite(at) || at <= 0) return "The next check time is not available yet.";
+  if (at <= now) return "A check is due. It will start when the server is ready.";
+  return new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short" }).format(new Date(at));
+}
+
+export function expertSummary(config) {
+  return [config.codec?.toUpperCase(), config.profileId,
+    config.qualityLevel != null && `Quality: ${config.qualityLevel}`,
+    config.bitrateKbps != null && `${config.bitrateKbps} kbps`,
+    config.outputMode === "separate" ? "Separate copies" : "Replace originals",
+    config.lanes?.length && `${config.lanes.length} device lane${config.lanes.length === 1 ? "" : "s"}`,
+    config.keepLarger && "Larger results can be kept (set in Expert).",
+  ].filter(Boolean).join(" · ");
 }

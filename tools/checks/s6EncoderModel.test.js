@@ -19,6 +19,29 @@ const groups = ['SavedClips', 'SentryClips', 'RecentClips'];
 const simple = { codec: 'h265', outputMode: 'replace', profileId: 'aggressive' };
 const choice = (patch = {}) => ({ ...structuredClone(model.DEFAULTS), ...patch });
 
+test('Coming up formats the actual check in the browser zone, including DST and overdue checks', () => {
+  const now = Date.parse('2026-11-01T04:00:00Z');
+  assert.equal(model.nextCheckText(null, 'America/New_York', now), 'The next check time is not available yet.');
+  assert.equal(model.nextCheckText('bad', 'America/New_York', now), 'The next check time is not available yet.');
+  assert.equal(model.nextCheckText(now - 1, 'America/New_York', now), 'A check is due. It will start when the server is ready.');
+  assert.equal(model.nextCheckText(Date.parse('2026-11-01T06:00:00Z'), 'America/New_York', now), 'Sun, Nov 1, 01:00 EST');
+  assert.equal(model.nextCheckText(Date.parse('2026-11-01T06:00:00Z'), 'Asia/Tokyo', now), 'Sun, Nov 1, 15:00 GMT+9');
+});
+
+test('schedule text shares exact timing with the plan and does not invent an Expert schedule', () => {
+  assert.equal(model.scheduleText(choice()), 'Every night at 02:00');
+  assert.equal(model.scheduleText(choice({when:'week', weekday:3, hour:23})), 'Every Wednesday at 23:00');
+  assert.equal(model.scheduleText(choice({when:'month', day:28, offPeak:true})), 'On day 28 of each month, when electricity is cheapest');
+  assert.equal(model.scheduleText(choice({when:'asap', offPeak:true})), 'As clips age, checking every hour');
+  assert.equal(model.scheduleText(choice({when:'custom'})), 'On your Expert schedule');
+});
+
+test('Expert summary states custom encoding, output, device lanes and larger-result policy', () => {
+  assert.equal(model.expertSummary({ codec:'av1', profileId:'quality', qualityLevel:25, outputMode:'separate', lanes:[{device:'node:test'},{device:'cpu'}], keepLarger:true }),
+    'AV1 · quality · Quality: 25 · Separate copies · 2 device lanes · Larger results can be kept (set in Expert).');
+  assert.match(model.expertSummary({...simple, bitrateKbps:6000}), /6000 kbps · Replace originals/);
+});
+
 test('preview copy distinguishes targets, measured savings, growth and shorter samples', () => {
   assert.equal(model.previewPercent(19.6), '20% smaller');
   assert.equal(model.previewPercent(-2.4), '2% larger');
