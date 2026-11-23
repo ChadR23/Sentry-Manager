@@ -369,6 +369,7 @@ static VIEWER_POSTS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 
 static VIEWER_HIDDEN: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
+        r"^/api/converter/previews",
         r"^/api/metrics",
         r"^/api/can/(settings|files|tokens|pairing|export)(/|$)",
         r"^/api/logs",
@@ -400,6 +401,12 @@ pub fn viewer_may(method: &str, p: &str) -> bool {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicI64, Ordering};
+
+    #[test]
+    fn viewer_cannot_get_preview_images() {
+        assert!(!viewer_may("GET", "/api/converter/previews/x/images/a.jpg"));
+        assert!(!viewer_may("HEAD", "/api/converter/previews/x/images/a.jpg"));
+    }
 
     fn accounts_at(clock: Arc<AtomicI64>) -> (Arc<Db>, Accounts) {
         let db = Arc::new(Db::memory().unwrap());

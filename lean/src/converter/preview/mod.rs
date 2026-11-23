@@ -34,6 +34,14 @@ pub struct LevelResult {
 }
 
 type Result<T> = std::result::Result<T, String>;
+/// Inspect/probe the runner's exact source/window/encoder cache key, but never
+/// extract or encode a sample on a miss. Busy converters can still return hits.
+pub fn cached_preview(clip: &PreviewClip, levels: &[(&str, Value)], work: &Path, cancel: &AtomicBool, progress: &dyn Fn(Value)) -> Result<Option<Vec<LevelResult>>> {
+    match run_checked(clip, levels, work, cancel, progress, true) {
+        Err(e) if e == "PREVIEW_CACHE_MISS" => Ok(None),
+        result => result.map(Some),
+    }
+}
 fn err(e: impl std::fmt::Display) -> String { e.to_string() }
 fn words(args: &[&str]) -> Vec<String> { args.iter().map(|s| s.to_string()).collect() }
 fn check(cancel: &AtomicBool) -> Result<()> {
@@ -76,6 +84,10 @@ impl Drop for Finished<'_> { fn drop(&mut self) { self.0.store(true, Ordering::S
 /// Cancellation is borrowed by the API, while existing process/tools APIs own an Arc.
 /// A scoped monitor bridges them and is joined on every return (including errors).
 pub fn run_preview(clip: &PreviewClip, levels: &[(&str, Value)], work: &Path, cancel: &AtomicBool, progress: &dyn Fn(Value)) -> Result<Vec<LevelResult>> {
+    run_checked(clip, levels, work, cancel, progress, false)
+}
+
+fn run_checked(clip: &PreviewClip, levels: &[(&str, Value)], work: &Path, cancel: &AtomicBool, progress: &dyn Fn(Value), cached_only: bool) -> Result<Vec<LevelResult>> {
     check(cancel)?;
     let signal = Arc::new(AtomicBool::new(false));
     let done = AtomicBool::new(false);
@@ -90,13 +102,13 @@ pub fn run_preview(clip: &PreviewClip, levels: &[(&str, Value)], work: &Path, ca
         let result = run(clip, levels, work, &signal, &|e| {
             progress(e);
             if cancel.load(Ordering::SeqCst) { signal.store(true, Ordering::SeqCst); }
-        });
+        }, cached_only);
         // Existing tools may wrap an aborted probe/read in their own error code.
         if result.is_err() && cancel.load(Ordering::SeqCst) { Err("CANCELLED".into()) } else { result }
     })
 }
 
-fn run(clip: &PreviewClip, levels: &[(&str, Value)], work: &Path, cancel: &Arc<AtomicBool>, progress: &dyn Fn(Value)) -> Result<Vec<LevelResult>> {
+fn run(clip: &PreviewClip, levels: &[(&str, Value)], work: &Path, cancel: &Arc<AtomicBool>, progress: &dyn Fn(Value), cached_only: bool) -> Result<Vec<LevelResult>> {
     let source = fs::canonicalize(&clip.source).map_err(err)?;
     fs::create_dir_all(work).map_err(err)?;
     let work = fs::canonicalize(work).map_err(err)?;
@@ -154,6 +166,7 @@ fn run(clip: &PreviewClip, levels: &[(&str, Value)], work: &Path, cancel: &Arc<A
             }
         }
     }
+    if cached_only { return Err("PREVIEW_CACHE_MISS".into()); }
     if path.exists() { remove(&path)?; }
     fs::create_dir(&path).map_err(err)?;
     let mut entry = Entry { path, keep: false };
@@ -337,6 +350,22 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(events.borrow().iter().filter(|e| e["phase"] == "encoding").count(), 0);
         assert!(events.borrow().iter().any(|e| e["phase"] == "cached"));
+    }
+
+    #[test]
+    fn preview_cache_lookup_never_extracts_or_encodes_a_sample() {
+        let dir = tempdir().unwrap();
+        let clip = fixture(dir.path(), false);
+        let work = dir.path().join("work");
+        let cancel = AtomicBool::new(false);
+        let events = RefCell::new(vec![]);
+        let progress = |e: Value| events.borrow_mut().push(e);
+        assert!(cached_preview(&clip, &levels()[..1], &work, &cancel, &progress).unwrap().is_none());
+        assert!(events.borrow().is_empty());
+        assert!(fs::read_dir(&work).unwrap().next().is_none());
+        let results = run_preview(&clip, &levels()[..1], &work, &cancel, &|_| {}).unwrap();
+        assert_eq!(cached_preview(&clip, &levels()[..1], &work, &cancel, &progress).unwrap(), Some(results));
+        assert_eq!(*events.borrow(), vec![json!({"phase":"cached"})]);
     }
 
     #[test]

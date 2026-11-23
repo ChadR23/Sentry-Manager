@@ -49,6 +49,7 @@ pub struct CoreConverter {
 impl Conv {
     /// converterHost stop(): the lifecycle's beforeQuit
     pub fn stop(&self) {
+        if let Some(p) = self.bridge.previews() { p.shutdown(); }
         self.host.stop();
     }
     /// a conversion runs now (encoderStats.js RUNNING)
@@ -394,8 +395,12 @@ pub fn spawn(srv: &Arc<Server>) {
                 }
             };
             let caps = crate::converter::ipc::capabilities(&runtime.staging.capabilities());
-            let bridge = Bridge::new(Arc::new(runtime.service.clone()), ctx, caps);
+            let bridge = Bridge::new(Arc::new(runtime.service.clone()), ctx.clone(), caps);
             bridge.mount_runtime(&runtime);
+            match super::converter_preview::mount(&s, &runtime, ctx, &bridge) {
+                Ok(p) => bridge.mount_previews(p),
+                Err(e) => st.logger.scope("converter").error(format!("Previews did not start: {e}")),
+            }
             // (the conversion speed notes: best effort, each failure logged; a failed read is not written over)
             let (get_db, set_db) = (st.db.clone(), st.db.clone());
             let (get_log, set_log) = (st.logger.scope("converter"), st.logger.scope("converter"));
@@ -453,6 +458,7 @@ pub fn spawn(srv: &Arc<Server>) {
 
 /// POST /api/converter/invoke/:name
 pub fn invoke(srv: &Arc<Server>, c: &mut CoreCtx) -> Result<Reply, HttpError> {
+    if c.method == "GET" || c.method == "HEAD" { return super::converter_preview::image(srv, c); }
     let Some(conv) = srv.converter() else { return Ok(Reply::json(json!({ "ok": false, "error": { "code": "CONVERTER_STARTING" } }))) };
     let name = c.params.get("name").cloned().unwrap_or_default();
     let client = c.headers.get("x-client-id").and_then(|v| v.to_str().ok()).map(String::from);

@@ -4,7 +4,7 @@
 
 use super::Area;
 
-pub const ROUTES: [(&str, &str, Area); 144] = [
+pub const ROUTES: [(&str, &str, Area); 145] = [
     ("GET", "/api/system", Area::Ops),
     ("GET", "/api/ui-packs", Area::Ui),
     ("PUT", "/api/ui-packs/active", Area::Ui),
@@ -139,6 +139,7 @@ pub const ROUTES: [(&str, &str, Area); 144] = [
     ("GET", "/api/updates", Area::Ops),
     ("POST", "/api/updates/check", Area::Ops),
     ("POST", "/api/converter/invoke/:name", Area::Converter),
+    ("GET", "/api/converter/previews/:id/images/:asset", Area::Converter),
     ("POST", "/api/studio/readDir", Area::Viewer),
     ("POST", "/api/studio/readFile", Area::Viewer),
     ("POST", "/api/studio/exists", Area::Viewer),

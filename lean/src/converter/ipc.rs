@@ -1,4 +1,4 @@
-//! src/main/converter/ipc.js (the 22 channels, their checks and answers,
+//! src/main/converter/ipc.js (the original channels, their checks and answers,
 //! the live updates) behind server/converterBridge.js (verification never
 //! Off from the server, every folder through the footage guard):
 //!
@@ -16,10 +16,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-pub const CHANNELS: [&str; 22] = [
+pub const CHANNELS: [&str; 25] = [
     "converter:chooseFolder", "converter:start", "converter:getCurrent", "converter:pause", "converter:setConcurrency", "converter:resume", "converter:cancel", "converter:discard", "converter:retryFailed", "converter:dismissSummary",
     "converter:getCapabilities", "converter:subscribeProgress", "converter:unsubscribeProgress", "converter:runBenchmark", "converter:cancelBenchmark", "converter:getAuto", "converter:setAuto", "converter:checkAutoNow",
     "converter:saveVehicle", "converter:forgetVehicle", "converter:devices", "converter:setLanes",
+    "converter:previewStart", "converter:previewGet", "converter:previewCancel",
 ];
 const GROUPS: [&str; 3] = ["RecentClips", "SavedClips", "SentryClips"];
 const ACTIVE_STATES: [&str; 10] = ["discovering", "waiting", "staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing", "paused", "paused_network"];
@@ -572,6 +573,7 @@ pub struct Bridge {
     senders: Arc<Mutex<HashMap<String, Sender>>>,
     vetted: Mutex<HashMap<String, usize>>,
     extras: Mutex<Extras>,
+    previews: Mutex<Option<Arc<crate::wire::converter_preview::Previews>>>,
 }
 
 /// validateCapabilities(staging.capabilities + destinationContainment)
@@ -590,7 +592,7 @@ pub fn capabilities(staging: &Value) -> Value {
 
 impl Bridge {
     pub fn new(service: Arc<dyn ServiceApi>, ctx: Arc<dyn ConverterCtx>, capabilities: Value) -> Arc<Bridge> {
-        let b = Arc::new(Bridge { service: service.clone(), ctx: ctx.clone(), capabilities, clients: Mutex::new(HashMap::new()), senders: Arc::new(Mutex::new(HashMap::new())), vetted: Mutex::new(HashMap::new()), extras: Mutex::new(Extras::default()) });
+        let b = Arc::new(Bridge { service: service.clone(), ctx: ctx.clone(), capabilities, clients: Mutex::new(HashMap::new()), senders: Arc::new(Mutex::new(HashMap::new())), vetted: Mutex::new(HashMap::new()), extras: Mutex::new(Extras::default()), previews: Mutex::new(None) });
         let senders = b.senders.clone();
         let dropped_logged = Arc::new(std::sync::atomic::AtomicBool::new(false));
         service.subscribe(Arc::new(move |event: &Value| {
@@ -648,6 +650,21 @@ impl Bridge {
 
     pub fn channels(&self) -> Vec<&'static str> {
         CHANNELS.to_vec()
+    }
+
+    pub fn mount_previews(&self, previews: Arc<crate::wire::converter_preview::Previews>) {
+        *self.previews.lock().unwrap() = Some(previews);
+    }
+
+    pub fn previews(&self) -> Option<Arc<crate::wire::converter_preview::Previews>> { self.previews.lock().unwrap().clone() }
+
+    /// Preview updates use the same subscriptions, SSE name and dead-client cleanup.
+    pub fn preview_progress(&self, event: Value) {
+        let text = format!("event: converter:progress\ndata: {event}\n\n");
+        let list: Vec<_> = self.senders.lock().unwrap().iter().map(|(k, s)| (k.clone(), s.sink.clone(), s.alive.clone())).collect();
+        for (key, sink, alive) in list {
+            if !alive.load(std::sync::atomic::Ordering::SeqCst) || !sink(&text) { self.senders.lock().unwrap().remove(&key); }
+        }
     }
 
     /// attachEvents(clientId, res): `sink` writes SSE text and answers false once the client is gone.
@@ -725,7 +742,9 @@ impl Bridge {
             }
         }
         let mut added = vec![];
-        if self.check_paths(&mut payload, &mut added).is_err() {
+        // Preview payloads contain ids only. Their strict schema rejects path
+        // keys before the folder guard can resolve or rewrite any of them.
+        if !matches!(name, "previewStart" | "previewGet" | "previewCancel") && self.check_paths(&mut payload, &mut added).is_err() {
             self.release(&added);
             return json!({ "ok": false, "error": { "code": "PATH_NOT_ALLOWED" } });
         }
@@ -752,6 +771,16 @@ impl Bridge {
     fn handle(&self, name: &str, p: Option<&Value>, client: Option<&str>) -> R<Value> {
         let replacement = self.capabilities["replacement"].as_str().unwrap_or("unavailable").to_string();
         match name {
+            "previewStart" | "previewGet" | "previewCancel" => {
+                let p = p.ok_or_else(|| code_err("INVALID_REQUEST".into()))?;
+                if name == "previewStart" { crate::wire::converter_preview::validate_start(p).map_err(code_err)?; }
+                let previews = self.previews().ok_or_else(|| code_err("PREVIEW_UNAVAILABLE".into()))?;
+                match name {
+                    "previewStart" => previews.start(p),
+                    "previewGet" => previews.get(p),
+                    _ => previews.cancel(p),
+                }.map_err(code_err)
+            }
             "chooseFolder" => {
                 let Some(m) = p.and_then(Value::as_object) else { return fail("INVALID_REQUEST") };
                 if !m.get("purpose").and_then(Value::as_str).is_some_and(|x| x == "source" || x == "destination") || m.keys().any(|k| k != "purpose" && k != "defaultPath") {
@@ -1037,6 +1066,18 @@ pub fn clamp_verify(v: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_channels_reject_paths() {
+        let bridge = Bridge::new(Arc::new(Fake::default()), Arc::new(Guard(std::env::temp_dir())), json!({}));
+        for key in ["path", "sourceRoot", "defaultPath", "ffmpegArgs"] {
+            let mut p = json!({"vehicleId":"car"}); p[key] = json!("/outside");
+            assert_eq!(bridge.invoke("previewStart", Some(p), None)["error"]["code"], "INVALID_REQUEST");
+        }
+        for name in ["previewStart", "previewGet", "previewCancel"] {
+            assert_ne!(bridge.invoke(name, Some(json!({})), None)["error"]["code"], "UNKNOWN_CHANNEL");
+        }
+    }
 
     /// The stand-in job service of lean/parity/converterBridge.js.
     #[derive(Default)]
