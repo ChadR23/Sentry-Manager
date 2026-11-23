@@ -27,6 +27,9 @@ pub struct LevelResult {
     pub device: String,
     pub frame: PathBuf,
     pub zoom: PathBuf,
+    /// Pixel coordinates in the full frame, shared by every level and its zoom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<frames::Crop>,
     /// Actual source interval, shared by original, encoded and cached results.
     pub window_start_us: i64,
     pub window_end_us: i64,
@@ -161,7 +164,7 @@ fn run(clip: &PreviewClip, levels: &[(&str, Value)], work: &Path, cancel: &Arc<A
     let manifest = path.join("result.json");
     if let Ok(bytes) = fs::read(&manifest) {
         if let Ok(results) = serde_json::from_slice::<Vec<LevelResult>>(&bytes) {
-            if results.len() == levels.len() + 1 && results.iter().all(|r| [&r.frame, &r.zoom].iter().all(|p| p.parent() == Some(path.as_path()) && p.is_file()) && r.frame.with_extension("mp4").is_file()) {
+            if results.len() == levels.len() + 1 && results.iter().all(|r| r.crop.is_some() && [&r.frame, &r.zoom].iter().all(|p| p.parent() == Some(path.as_path()) && p.is_file()) && r.frame.with_extension("mp4").is_file()) {
                 progress(json!({"phase":"cached"})); check(cancel)?; return Ok(results);
             }
         }
@@ -185,7 +188,7 @@ fn run(clip: &PreviewClip, levels: &[(&str, Value)], work: &Path, cancel: &Arc<A
     let (frame, zoom, crop) = frames::save(&ffmpeg, &before, &original, frame_index, None, cancel)?;
     let before_bytes = fs::metadata(&before).map_err(err)?.len();
     let mut results = vec![LevelResult { level: "orig".into(), profile: "".into(), before_bytes, after_bytes: before_bytes, saved_percent: 0.0, device: "".into(), frame, zoom,
-        window_start_us: window.0, window_end_us: window.1, duration_us: window.1 - window.0 }];
+        crop: Some(crop), window_start_us: window.0, window_end_us: window.1, duration_us: window.1 - window.0 }];
     progress(json!({"phase":"level", "result":results[0], "crop":crop}));
     for (i, ((level, _), plan)) in levels.iter().zip(plans).enumerate() {
         check(cancel)?;
@@ -217,7 +220,7 @@ fn run(clip: &PreviewClip, levels: &[(&str, Value)], work: &Path, cancel: &Arc<A
         let after_bytes = fs::metadata(&target).map_err(err)?.len();
         results.push(LevelResult { level: (*level).into(), profile: plan.profile_id, before_bytes, after_bytes,
             saved_percent: 100.0 * (before_bytes as f64 - after_bytes as f64) / before_bytes as f64, device, frame, zoom,
-            window_start_us: window.0, window_end_us: window.1, duration_us: window.1 - window.0 });
+            crop: Some(crop), window_start_us: window.0, window_end_us: window.1, duration_us: window.1 - window.0 });
         progress(json!({"phase":"level", "result":results.last(), "crop":crop}));
     }
     check(cancel)?;
@@ -350,6 +353,30 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(events.borrow().iter().filter(|e| e["phase"] == "encoding").count(), 0);
         assert!(events.borrow().iter().any(|e| e["phase"] == "cached"));
+    }
+
+    #[test]
+    fn preview_crop_survives_cache_and_legacy_entries_are_misses() {
+        let dir = tempdir().unwrap();
+        let clip = fixture(dir.path(), false);
+        let work = dir.path().join("work");
+        let cancel = AtomicBool::new(false);
+        let events = RefCell::new(vec![]);
+        let results = run_preview(&clip, &levels()[..1], &work, &cancel, &|e| events.borrow_mut().push(e)).unwrap();
+        let crop = events.borrow().iter().find_map(|e| e.get("crop").cloned()).unwrap();
+        for r in &results { assert_eq!(serde_json::to_value(r).unwrap()["crop"], crop); }
+        assert_eq!(crop["width"], 72); assert_eq!(crop["height"], 54);
+        assert!(crop["x"].as_u64().unwrap() + 72 <= 320);
+        assert!(crop["y"].as_u64().unwrap() + 54 <= 240);
+        assert_eq!(cached_preview(&clip, &levels()[..1], &work, &cancel, &|_| {}).unwrap(), Some(results.clone()));
+        let manifest = results[0].frame.parent().unwrap().join("result.json");
+        let mut legacy = serde_json::to_value(&results).unwrap();
+        for r in legacy.as_array_mut().unwrap() { r.as_object_mut().unwrap().remove("crop"); }
+        assert!(serde_json::from_value::<Vec<LevelResult>>(legacy.clone()).is_ok(), "old manifests remain readable");
+        fs::write(manifest, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(cached_preview(&clip, &levels()[..1], &work, &cancel, &|_| {}).unwrap().is_none());
+        let rebuilt = run_preview(&clip, &levels()[..1], &work, &cancel, &|_| {}).unwrap();
+        for r in rebuilt { assert_eq!(serde_json::to_value(r).unwrap()["crop"], crop); }
     }
 
     #[test]

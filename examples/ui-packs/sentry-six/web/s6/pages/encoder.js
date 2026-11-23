@@ -1,7 +1,8 @@
-import { esc } from '../core.js';
+import { esc, invoke as previewInvoke, api as previewApi, clientId, scope } from '../core.js';
 import { icon } from '../icons.js';
 import { size } from '../format.js';
-import { KEEP_CHIPS, LEVELS, fromSaved, dayStates } from '../encoderModel.js';
+import { KEEP_CHIPS, LEVELS, fromSaved, dayStates, levelOf, levelDevice, previewPercent, previewMeasured, previewSource, previewMegabytes } from '../encoderModel.js';
+import { onPreview, streamReady } from '../convert.js';
 
 const GROUPS = {
   SavedClips: { name: 'Saved clips', description: 'Clips you saved with the horn, your voice or the screen', color: 'saved' },
@@ -10,6 +11,14 @@ const GROUPS = {
 };
 const DAY_LABELS = { kept: 'Kept as recorded', shrink: 'Will be shrunk', done: 'Already shrunk', none: 'No footage' };
 const STEPS = ['Keep', 'Space', 'Schedule', 'Review'];
+const QUALITY = {
+  std: { dots: 5, note: 'Looks the same as the original. Fastest.' },
+  med: { dots: 4, note: 'Very slight softness in fine detail.' },
+  high: { dots: 3, note: 'Fine detail softer, plates still readable up close. Slower, uses the CPU.' },
+};
+const cancelPreviewId = (id) => previewApi('/api/converter/invoke/previewCancel', {
+  method: 'POST', body: { id }, keepalive: true, headers: { 'X-Client-Id': clientId },
+}).catch(() => {});
 
 export async function render(mount, ctx) {
   const { invoke, api } = ctx.scope;
@@ -87,7 +96,23 @@ export async function render(mount, ctx) {
       <ol class="encoder-order" data-order aria-labelledby="encoder-order-heading"></ol>
       <p class="encoder-estimate-note" id="encoder-order-help">At least one kind must stay included.</p>
     </section>
-    ${['How much space should older footage save?', 'When should shrinking happen?', 'Review your setup'].map((heading, i) => `<section data-encoder-step="${i + 2}" hidden aria-labelledby="encoder-step-${i + 2}-heading"><div class="encoder-eyebrow">Step ${i + 2} of 4</div><h2 id="encoder-step-${i + 2}-heading" tabindex="-1">${heading}</h2></section>`).join('')}
+    <section data-encoder-step="2" hidden aria-labelledby="encoder-step-2-heading">
+      <div class="encoder-eyebrow">Step 2 of 4</div><h2 id="encoder-step-2-heading" tabindex="-1">How much space should older footage save?</h2>
+      <p class="encoder-lead">Choose how much space to save, then compare the picture on your own footage.</p>
+      ${saved && levelOf(saved) === 'custom' ? `<div class="encoder-customized"><h3>Customized in Expert</h3>
+        <p>${esc([saved.codec?.toUpperCase(), saved.profileId, saved.qualityLevel && `Quality: ${saved.qualityLevel}`, saved.bitrateKbps && `${saved.bitrateKbps} kbps`, saved.outputMode === 'separate' ? 'Separate copies' : 'Replace originals', saved.lanes?.length && `${saved.lanes.length} device lane${saved.lanes.length === 1 ? '' : 's'}`].filter(Boolean).join(' · '))}</p>
+        <div class="form-actions"><button type="button" data-keep-expert>Keep my Expert settings</button><button type="button" data-pick-level>Pick a level</button></div></div>` : ''}
+      <div class="encoder-tiles" data-levels role="group" aria-label="Space to save"></div>
+      <section class="encoder-cmp-card" data-cmp aria-labelledby="encoder-preview-heading">
+        <div class="encoder-cmp-head"><h3 id="encoder-preview-heading">See it on your own clip</h3><small>Drag the line. The dashed box is shown up close.</small></div>
+        <div class="encoder-cmp-toolbar"><div class="encoder-cmp-tabs" role="tablist" aria-label="Preview clip kind">
+          ${['saved', 'sentry'].map((kind) => `<button type="button" role="tab" id="encoder-tab-${kind}" data-preview-kind="${kind}" aria-controls="encoder-preview-panel"><span class="encoder-group-dot ${kind}" aria-hidden="true"></span>${kind === 'saved' ? 'Saved' : 'Sentry'}</button>`).join('')}
+        </div><button type="button" data-another>Try another clip</button></div>
+        <div data-preview-status role="status" aria-live="polite"></div>
+        <div id="encoder-preview-panel" role="tabpanel" tabindex="0" data-preview-body></div>
+      </section>
+    </section>
+    ${['When should shrinking happen?', 'Review your setup'].map((heading, i) => `<section data-encoder-step="${i + 3}" hidden aria-labelledby="encoder-step-${i + 3}-heading"><div class="encoder-eyebrow">Step ${i + 3} of 4</div><h2 id="encoder-step-${i + 3}-heading" tabindex="-1">${heading}</h2></section>`).join('')}
     <footer class="encoder-foot"><button type="button" data-back disabled>Back</button><button type="button" class="primary" data-continue>Continue</button></footer>
     </div>
     <p class="encoder-scope-note">Keep, space and clip choices apply to <b>${esc(vehicle.name)}</b>. The schedule is shared by every vehicle.</p>
@@ -95,6 +120,141 @@ export async function render(mount, ctx) {
 
   const customInput = mount.querySelector('#encoder-keep-days');
   const next = mount.querySelector('[data-continue]');
+  let devices = null;
+  let previewId = null, previewOwner = null, previewTimer = null, previewGeneration = 0;
+  let previewState = 'idle', waitingFor = null, previewError = '', previewKind = 'saved', requestedKind = null;
+  let previewClips = {}, progressLevels = new Set(), split = 50, pausePending = false;
+  let progressEvent = null;
+  const excluded = new Set();
+  const previewBody = mount.querySelector('[data-preview-body]');
+  const previewStatus = mount.querySelector('[data-preview-status]');
+  function drawLevels() {
+    mount.querySelector('[data-levels]').innerHTML = LEVELS.map((level) => `<button type="button" class="encoder-tile" data-level="${level.id}" aria-pressed="${choice.level === level.id}">
+      <span class="encoder-tile-title">${level.name}${level.rec ? '<span class="encoder-recommended">Recommended</span>' : ''}</span>
+      <span class="encoder-pct"><small>about</small> ${level.pct}% <small>smaller</small></span>
+      <span class="encoder-bars"><span>1 hour of driving: <b>10 GB → ${10 * (100 - level.pct) / 100} GB</b></span><span class="encoder-bar"><i style="width:100%"></i></span><span class="encoder-bar after"><i style="width:${100 - level.pct}%"></i></span></span>
+      <span class="encoder-quality" aria-label="Picture quality: ${QUALITY[level.id].dots} out of 5">Picture ${[1, 2, 3, 4, 5].map((n) => `<i class="${n <= QUALITY[level.id].dots ? 'filled' : ''}" aria-hidden="true"></i>`).join('')}</span>
+      <span class="encoder-quality-note">${QUALITY[level.id].note}</span><span class="encoder-device">${esc(levelDevice(devices, level.id))}</span><small>Typical results, not a promise</small>
+    </button>`).join('') + `<button type="button" class="encoder-tile" data-open-expert aria-pressed="${choice.level === 'custom'}"><span class="encoder-tile-title">Custom</span>${icon('tune')}<span>Pick the codec, quality or bitrate yourself</span><small>Opens Expert</small></button>`;
+    mount.querySelector('[data-keep-expert]')?.setAttribute('aria-pressed', String(choice.level === 'custom'));
+  }
+  function drawPreview() {
+    mount.querySelector('[data-cmp]').dataset.state = previewState;
+    const busy = ['starting', 'waiting', 'running'].includes(previewState);
+    const clip = previewClips[previewKind];
+    const results = clip?.results || [];
+    const original = results.find((result) => result.level === 'orig');
+    const selected = results.find((result) => result.level === choice.level);
+    const name = LEVELS.find((level) => level.id === choice.level)?.name;
+    mount.querySelectorAll('[data-preview-kind]').forEach((tab) => {
+      const active = tab.dataset.previewKind === previewKind;
+      tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1;
+    });
+    previewBody.setAttribute('aria-labelledby', `encoder-tab-${previewKind}`);
+    mount.querySelector('[data-another]').disabled = busy || !clip;
+    let status = '';
+    if (previewState === 'waiting') status = `<p>Waiting for ${waitingFor === 'benchmark' ? 'the benchmark' : 'conversion'} to finish.</p>${waitingFor === 'conversion' ? `<button type="button" data-pause-preview ${pausePending ? 'disabled' : ''}>${pausePending ? 'Pausing conversion…' : 'Pause conversion and preview now'}</button>` : ''}`;
+    else if (busy) status = `<p>${requestedKind ? `Picking another ${requestedKind === 'saved' ? 'Saved' : 'Sentry'} clip…` : 'Preparing a preview from your footage…'}</p><div class="encoder-preview-levels">${LEVELS.map((level) => `<span class="${progressLevels.has(level.id) ? 'done' : ''}">${progressLevels.has(level.id) ? '✓ ' : ''}${level.name}</span>`).join('')}</div>`;
+    else if (previewState === 'failed') status = `<p>${esc(previewError || 'Could not make this preview. Try again.')}</p><button type="button" data-retry-preview>Try preview again</button>`;
+    else if (previewState === 'cancelled') status = '<p>Preview cancelled.</p><button type="button" data-retry-preview>Try preview again</button>';
+    else if (!Object.keys(previewClips).length) status = '<p>No Saved or Sentry clips to preview yet.</p>';
+    // Avoid re-announcing unchanged status and replacing focused buttons on every poll.
+    if (previewStatus.innerHTML !== status) previewStatus.innerHTML = status;
+    let body = '';
+    if (clip && choice.level === 'custom') body = '<p>Your Expert settings are kept. Pick Standard, Medium or High to compare the guided levels; this preview does not measure your custom settings.</p>';
+    else if (original && selected) {
+      body = `<p class="encoder-preview-source">${esc(previewSource(clip, selected, vehicle.timezone))}</p>
+        <div class="encoder-cmp-grid"><div class="encoder-cmp" data-cmpdrag style="--split:${split}%">
+          <img src="${esc(original.frame)}" alt="Original frame" data-original-frame><img class="encoder-after" src="${esc(selected.frame)}" alt="${name} frame">
+          <span class="encoder-zoom-box" hidden></span><span class="encoder-cmp-handle" aria-hidden="true"></span><span class="encoder-cmp-tag original">Original</span><span class="encoder-cmp-tag selected">${name}</span>
+          <input class="encoder-cmp-range" type="range" min="0" max="100" value="${split}" aria-label="Compare original and shrunk frame" aria-valuetext="${split}% original">
+        </div><div class="encoder-zooms">${[[original, 'Original'], [selected, name]].map(([result, label]) => `<figure class="encoder-zoom ${result.level === 'orig' ? '' : 'selected'}"><img src="${esc(result.zoom)}" alt="${label}, up close"><figcaption><b>${label}</b><span>${esc(previewMegabytes(result.after_bytes))} · ${previewPercent(result.saved_percent)}</span></figcaption></figure>`).join('')}</div></div>
+        <p class="encoder-measured">${esc(previewMeasured(results))}</p>`;
+    } else if (!busy && Object.keys(previewClips).length) body = `<p>No ${previewKind === 'saved' ? 'Saved' : 'Sentry'} clips to preview${requestedKind === previewKind ? ' besides those already shown' : ''}.</p>`;
+    const key = JSON.stringify([clip, choice.level, busy, requestedKind]);
+    if (previewBody.dataset.key === key) return;
+    previewBody.dataset.key = key;
+    previewBody.innerHTML = body;
+    const frame = previewBody.querySelector('[data-original-frame]');
+    if (frame) {
+      const placeCrop = () => {
+        if (!frame.naturalWidth || !frame.isConnected) return;
+        const comparison = frame.closest('[data-cmpdrag]');
+        comparison.style.aspectRatio = `${frame.naturalWidth} / ${frame.naturalHeight}`;
+        const crop = original.crop, box = comparison.querySelector('.encoder-zoom-box');
+        if (!crop) return;
+        Object.assign(box.style, { left: `${100 * crop.x / frame.naturalWidth}%`, top: `${100 * crop.y / frame.naturalHeight}%`, width: `${100 * crop.width / frame.naturalWidth}%`, height: `${100 * crop.height / frame.naturalHeight}%` });
+        box.hidden = false;
+      };
+      frame.onload = placeCrop;
+      if (frame.complete) placeCrop();
+    }
+  }
+  function cancelPreview() {
+    previewGeneration++;
+    clearTimeout(previewTimer); previewTimer = null;
+    previewOwner?.abort(); previewOwner = null;
+    const id = previewId; previewId = null;
+    // The page scope is already aborted during navigation. Cleanup must still reach the server.
+    if (id) cancelPreviewId(id);
+  }
+  async function startPreview({ another = false, pause = false } = {}) {
+    if (step !== 2 || !ctx.alive()) return;
+    if (!pause) {
+      cancelPreview();
+      if (another && previewClips[previewKind]) excluded.add(previewClips[previewKind].eventId);
+      requestedKind = another ? previewKind : null;
+      if (another) delete previewClips[previewKind]; else previewClips = {};
+      progressLevels = new Set(); previewState = 'starting'; previewError = ''; pausePending = false;
+      previewOwner = scope([], { signal: ctx.scope.signal });
+      onPreview((event) => {
+        if (event.id !== previewId || step !== 2) return;
+        if (event.eventId && event.eventId !== progressEvent) { progressEvent = event.eventId; progressLevels = new Set(); }
+        if (event.result?.level) progressLevels.add(event.result.level);
+        drawPreview();
+      }, previewOwner);
+    } else {
+      pausePending = true;
+      previewGeneration++;
+      clearTimeout(previewTimer);
+    }
+    drawPreview();
+    const generation = previewGeneration;
+    const valid = () => generation === previewGeneration && step === 2 && ctx.alive();
+    try {
+      if (!pause) await streamReady(previewOwner);
+      if (!valid()) return;
+      // Do not abort the start response: if navigation wins, we still need its id to cancel it.
+      const { id } = await previewInvoke('previewStart', { vehicleId: vehicle.id, exclude: [...excluded], ...(pause ? { pauseConversion: true } : {}) });
+      if (!valid()) { cancelPreviewId(id); return; }
+      previewId = id;
+      clearTimeout(previewTimer);
+      const poll = async () => {
+        try {
+          const answer = await invoke('previewGet', { id });
+          if (!valid()) return;
+          previewState = answer.state; waitingFor = answer.waitingFor;
+          if (answer.error) previewError = `Could not make this preview (${answer.error}). Try again.`;
+          if (['failed', 'cancelled'].includes(previewState)) {
+            // The server revokes this preview's image URLs on failure/cancellation.
+            if (requestedKind) delete previewClips[requestedKind]; else previewClips = {};
+          }
+          for (const clip of answer.clips || []) {
+            if (!['saved', 'sentry'].includes(clip.kind) || (requestedKind && clip.kind !== requestedKind)) continue;
+            previewClips[clip.kind] = clip;
+          }
+          if (!requestedKind && !previewClips[previewKind] && previewClips.sentry) previewKind = 'sentry';
+          drawPreview();
+          if (['waiting', 'running'].includes(previewState)) previewTimer = setTimeout(poll, 1500);
+        } catch (error) {
+          if (valid()) { previewState = 'failed'; previewError = error.message; drawPreview(); }
+        }
+      };
+      await poll();
+    } catch (error) {
+      if (valid()) { pausePending = false; previewState = 'failed'; previewError = error.message; drawPreview(); }
+    }
+  }
   function drawChips() {
     mount.querySelectorAll('[data-keep]').forEach((button) => {
       const selected = button.dataset.keep === 'none' ? choice.keep == null : !customOpen && Number(button.dataset.keep) === choice.keep;
@@ -152,6 +312,7 @@ export async function render(mount, ctx) {
     }).join('');
   }
   function showStep() {
+    if (step !== 2) cancelPreview();
     mount.querySelectorAll('[data-encoder-step]').forEach((panel) => {
       panel.hidden = Number(panel.dataset.encoderStep) !== step;
     });
@@ -163,6 +324,7 @@ export async function render(mount, ctx) {
     next.hidden = step === STEPS.length;
     drawChips();
     if (step === 1) drawFootage();
+    if (step === 2) { drawLevels(); startPreview(); }
     mount.querySelector(`[data-encoder-step="${step}"] h2`).focus();
   }
   mount.querySelector('.encoder-chips').onclick = (event) => {
@@ -205,7 +367,54 @@ export async function render(mount, ctx) {
   };
   mount.querySelector('[data-back]').onclick = () => { if (step > 1) { step--; showStep(); } };
   next.onclick = () => { if (!next.disabled && step < STEPS.length) { step++; showStep(); } };
+  mount.querySelector('[data-levels]').onclick = (event) => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    if (button.hasAttribute('data-open-expert')) {
+      const expert = document.getElementById('encoder-expert');
+      if (expert) { expert.checked = true; expert.dispatchEvent(new Event('change', { bubbles: true })); }
+      return;
+    }
+    choice.level = button.dataset.level;
+    drawLevels(); drawPreview();
+    mount.querySelector(`[data-level="${choice.level}"]`).focus();
+  };
+  mount.querySelector('[data-keep-expert]')?.addEventListener('click', () => {
+    choice.level = 'custom'; drawLevels(); drawPreview();
+  });
+  mount.querySelector('[data-pick-level]')?.addEventListener('click', () => mount.querySelector('[data-level="med"]').focus());
+  mount.querySelector('[data-cmp]').onclick = (event) => {
+    const tab = event.target.closest('[data-preview-kind]');
+    if (tab) { previewKind = tab.dataset.previewKind; drawPreview(); }
+    else if (event.target.closest('[data-another]')) startPreview({ another: true });
+    else if (event.target.closest('[data-pause-preview]')) startPreview({ pause: true });
+    else if (event.target.closest('[data-retry-preview]')) startPreview();
+  };
+  mount.querySelector('.encoder-cmp-tabs').onkeydown = (event) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    previewKind = event.key === 'Home' ? 'saved' : event.key === 'End' ? 'sentry' : previewKind === 'saved' ? 'sentry' : 'saved';
+    drawPreview(); mount.querySelector(`[data-preview-kind="${previewKind}"]`).focus();
+  };
+  previewBody.oninput = (event) => {
+    if (!event.target.matches('.encoder-cmp-range')) return;
+    split = Number(event.target.value);
+    event.target.closest('[data-cmpdrag]').style.setProperty('--split', `${split}%`);
+    event.target.setAttribute('aria-valuetext', `${split}% original`);
+  };
+  const onPageHide = () => cancelPreview();
+  window.addEventListener('pagehide', onPageHide);
+  ctx.scope.signal.addEventListener('abort', cancelPreview, { once: true });
+  invoke('devices').then((answer) => {
+    devices = answer; if (ctx.alive()) drawLevels();
+  }).catch(() => { /* Unknown hardware keeps the honest CPU fallback. */ });
+  drawLevels();
   drawChips();
   drawFootage();
   drawOrder();
+  return () => {
+    cancelPreview();
+    window.removeEventListener('pagehide', onPageHide);
+    ctx.scope.signal.removeEventListener('abort', cancelPreview);
+  };
 }

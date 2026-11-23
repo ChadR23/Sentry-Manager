@@ -18,6 +18,38 @@ const vehicle = { root: '/footage/car-a', timezone: 'America/New_York' };
 const groups = ['SavedClips', 'SentryClips', 'RecentClips'];
 const simple = { codec: 'h265', outputMode: 'replace', profileId: 'aggressive' };
 const choice = (patch = {}) => ({ ...structuredClone(model.DEFAULTS), ...patch });
+
+test('preview copy distinguishes targets, measured savings, growth and shorter samples', () => {
+  assert.equal(model.previewPercent(19.6), '20% smaller');
+  assert.equal(model.previewPercent(-2.4), '2% larger');
+  assert.equal(model.previewPercent(0), '0% smaller');
+  assert.equal(model.previewPercent(null), 'Not measured');
+  assert.equal(model.previewMegabytes(1_326_177), '1.33 MB');
+  assert.equal(model.previewMegabytes(4_800), '<0.01 MB');
+  const results = [{ level: 'orig', duration_us: 5_250_000 },
+    { level: 'std', saved_percent: 18.4 }, { level: 'med', saved_percent: -2.1 }, { level: 'high', saved_percent: 63.8 }];
+  assert.equal(model.previewMeasured(results), 'Measured on this 5.25-second sample: Standard 18% · Medium 2% larger · High 64%.');
+  assert.equal(model.previewMeasured([{ level: 'orig', duration_us: 6_000_000 }]),
+    'Measured on this 6-second sample: Standard not measured · Medium not measured · High not measured.');
+  assert.equal(model.previewSource({ kind: 'saved', when: '2026-06-02T21:25:00' }, { duration_us: 5_250_000, device: 'CPU' }, 'America/New_York'),
+    'From your footage: Saved clip, Jun 2, 21:25 · Front camera · 5.25 seconds around the moment it was saved, shrunk just now on the CPU with the same settings a real run uses. Your clip is only read.');
+  assert.match(model.previewSource({ kind: 'sentry', when: '2026-06-03T01:25:00Z' }, { duration_us: 6_000_000, device: 'Test GPU' }, 'America/New_York'),
+    /Sentry clip, Jun 2, 21:25 · Front camera · 6 seconds around the moment Sentry was triggered, shrunk just now on your Test GPU/);
+});
+
+test('tile hardware uses the working local H.265 default, never a remote or untested device', () => {
+  const gpu = { id: 'pci:1', name: 'Test GPU', encoders: { h265: 'hevc_qsv' } };
+  const answer = { devices: [gpu, { id: 'cpu', name: 'CPU', encoders: { h265: 'libx265' } }], defaultDevices: { h265: 'pci:1' } };
+  assert.equal(model.levelDevice(answer, 'std'), 'Uses your Test GPU');
+  assert.equal(model.levelDevice(answer, 'med'), 'Uses your Test GPU');
+  assert.equal(model.levelDevice(answer, 'high'), 'Uses the CPU');
+  assert.equal(model.levelDevice({ ...answer, defaultDevices: { h265: 'cpu' } }, 'std'), 'Uses the CPU');
+  for (const device of [{ ...gpu, name: '' }, { ...gpu, encoders: null }, { ...gpu, encoders: { av1: 'av1_qsv' } },
+    { ...gpu, id: 'node:remote:gpu' }, { ...gpu, encoders: { h265: null } }]) {
+    assert.equal(model.levelDevice({ devices: [device] }, 'med'), 'Uses the CPU');
+  }
+  assert.equal(model.levelDevice(null, 'med'), 'Uses the CPU');
+});
 function freeze(value) {
   if (value && typeof value === 'object') {
     Object.values(value).forEach(freeze);

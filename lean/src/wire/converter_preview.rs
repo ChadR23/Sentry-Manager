@@ -868,7 +868,7 @@ mod channel_tests {
                     let zoom = dir.join(format!("{level}-zoom.jpg"));
                     std::fs::write(&frame, b"frame").unwrap(); std::fs::write(&zoom, b"zoom").unwrap();
                     LevelResult { level: level.into(), profile, before_bytes: 100, after_bytes: 60, saved_percent: 40.0,
-                        device: "CPU".into(), frame, zoom, window_start_us: 0, window_end_us: 6_000_000, duration_us: 6_000_000 }
+                        device: "CPU".into(), frame, zoom, crop: serde_json::from_value(json!({"x":12,"y":16,"width":72,"height":54})).ok(), window_start_us: 0, window_end_us: 6_000_000, duration_us: 6_000_000 }
                 }).collect::<Vec<_>>();
             progress(json!({"phase": if cached_only { "cached" } else { "level" }, "result": results[0]}));
             Ok(Some(results))

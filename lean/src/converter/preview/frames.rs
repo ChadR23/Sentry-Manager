@@ -1,6 +1,6 @@
 //! Timestamp-proven native frames and a deterministic shared detail crop.
 use super::{command, err, words, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{fs, path::{Path, PathBuf}, sync::{Arc, atomic::AtomicBool}};
 
@@ -42,8 +42,8 @@ pub(super) fn probe(ffprobe: &str, path: &Path, keyframes: bool, cancel: &Arc<At
         duration_us: micros(stream.get("duration").unwrap_or(&v["format"]["duration"]))? })
 }
 
-#[derive(Clone, Copy, Serialize)]
-pub(super) struct Crop { pub x: usize, pub y: usize, pub width: usize, pub height: usize }
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Crop { pub x: usize, pub y: usize, pub width: usize, pub height: usize }
 
 /// Of 5x5 candidate centres, choose the highest grayscale variance in a 64x48
 /// patch, breaking ties by mean brightness, then row/column order. Compute once

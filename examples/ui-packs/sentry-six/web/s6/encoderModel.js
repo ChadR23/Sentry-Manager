@@ -5,6 +5,48 @@ export const LEVELS = [
   { id: 'high', name: 'High', profileId: 'smallest', pct: 60 },
 ];
 export const KEEP_CHIPS = [3, 7, 14, 30, 60];
+
+export function levelDevice(answer, level) {
+  const devices = answer?.devices || [];
+  const preferred = answer?.defaultDevices?.h265 ?? answer?.defaultDevice;
+  const working = (device) => device.id !== 'cpu' && !device.id?.startsWith('node:') &&
+    device.name && typeof device.encoders?.h265 === 'string' && device.encoders.h265.startsWith('hevc_');
+  const device = preferred ? devices.find((entry) => entry.id === preferred) : devices.find(working);
+  return level !== 'high' && device && working(device) ? `Uses your ${device.name}` : 'Uses the CPU';
+}
+
+export function previewPercent(value, compact = false) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return compact ? 'not measured' : 'Not measured';
+  return `${Math.round(Math.abs(value))}%${value < 0 ? ' larger' : compact ? '' : ' smaller'}`;
+}
+
+export function previewSeconds(result) {
+  return Number((result.duration_us / 1e6).toFixed(3));
+}
+
+export function previewMegabytes(bytes) {
+  return bytes > 0 && bytes < 10_000 ? '<0.01 MB' : `${(bytes / 1e6).toFixed(2)} MB`;
+}
+
+export function previewMeasured(results) {
+  const sample = results.find((entry) => entry.duration_us > 0);
+  if (!sample) return '';
+  return `Measured on this ${previewSeconds(sample)}-second sample: ${LEVELS.map(({ id, name }) =>
+    `${name} ${previewPercent(results.find((entry) => entry.level === id)?.saved_percent, true)}`).join(' · ')}.`;
+}
+
+export function previewSource(clip, result, zone) {
+  // Unzoned event timestamps are already vehicle-local; do not reinterpret them in the browser zone.
+  const zoned = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(clip.when);
+  const date = new Date(clip.when + (zoned ? '' : 'Z'));
+  const when = Number.isNaN(date.getTime()) ? clip.when : new Intl.DateTimeFormat('en-US', {
+    timeZone: zoned ? zone : 'UTC', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).format(date);
+  const kind = clip.kind === 'saved' ? 'Saved' : 'Sentry';
+  const moment = clip.kind === 'saved' ? 'the moment it was saved' : 'the moment Sentry was triggered';
+  const device = result.device === 'CPU' ? 'on the CPU' : `on your ${result.device}`;
+  return `From your footage: ${kind} clip, ${when} · Front camera · ${previewSeconds(result)} seconds around ${moment}, shrunk just now ${device} with the same settings a real run uses. Your clip is only read.`;
+}
 export const DEFAULTS = {
   keep: 30,
   level: 'med',
