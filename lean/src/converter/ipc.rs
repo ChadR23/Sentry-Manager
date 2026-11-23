@@ -405,6 +405,16 @@ fn group_list_ok(v: Option<&Value>, exact: bool) -> bool {
     a.iter().all(|g| g.as_str().is_some_and(|s| GROUPS.contains(&s) && seen.insert(s.to_string())))
 }
 
+/// A manual job never carries a null `keepRecent`: the job's config is normalized without it
+fn without_null_keep_recent(mut config: Value) -> Value {
+    if let Some(m) = config.as_object_mut() {
+        if m.get("keepRecent").is_some_and(Value::is_null) {
+            m.shift_remove("keepRecent");
+        }
+    }
+    config
+}
+
 /// validateStartConfig(payload)
 pub fn validate_start_config(p: Option<&Value>, replacement: &str) -> R<Value> {
     let Some(m) = p.and_then(Value::as_object) else { return fail("INVALID_REQUEST") };
@@ -437,7 +447,9 @@ pub fn validate_start_config(p: Option<&Value>, replacement: &str) -> R<Value> {
     if has("keepLarger") && (!m["keepLarger"].is_boolean() || (m["keepLarger"] == true && !no_target)) {
         return fail("INVALID_KEEP_LARGER");
     }
-    if has("keepRecent") && !super::keep_recent::valid(&m["keepRecent"]) {
+    // (null is how the guided page turns the keep window off: saveVehicle/setAuto carry it to the
+    // automatic settings, which remove it; a manual start drops it below)
+    if has("keepRecent") && !m["keepRecent"].is_null() && !super::keep_recent::valid(&m["keepRecent"]) {
         return fail("INVALID_REQUEST");
     }
     let mut lanes = None;
@@ -754,7 +766,7 @@ impl Bridge {
                 }
             }
             "start" => {
-                let config = validate_start_config(p, &replacement)?;
+                let config = without_null_keep_recent(validate_start_config(p, &replacement)?);
                 self.check_lane_encoders(&config)?;
                 Ok(json!({ "jobId": safe_job_id(Some(&json!(self.service.start(&config)?)))? }))
             }
@@ -1073,6 +1085,27 @@ mod tests {
         }
     }
 
+    impl super::super::auto_convert::AutoService for Fake {
+        fn start(&self, c: &Value) -> SResult<String> {
+            ServiceApi::start(self, c)
+        }
+        fn get(&self, id: &str) -> SResult<Value> {
+            self.get_(id)
+        }
+        fn list(&self) -> SResult<Vec<Value>> {
+            ServiceApi::list(self)
+        }
+        fn pause(&self, id: &str) -> SResult<Value> {
+            self.get_(id)
+        }
+        fn resume(&self, id: &str) -> SResult<Value> {
+            self.get_(id)
+        }
+        fn set_lanes(&self, id: &str, _l: &Value) -> SResult<Value> {
+            self.get_(id)
+        }
+    }
+
     struct Guard(std::path::PathBuf);
 
     impl ConverterCtx for Guard {
@@ -1158,10 +1191,78 @@ mod tests {
         });
         let ok = validate_start_config(Some(&config(json!({ "days": 7, "zone": "UTC" }))), "available").unwrap();
         assert_eq!(ok["keepRecent"], json!({ "days": 7, "zone": "UTC" }));
-        for bad in [json!({ "days": 0, "zone": "UTC" }), json!({ "days": 7 }), Value::Null] {
+        for bad in [json!({ "days": 0, "zone": "UTC" }), json!({ "days": 7 }), json!("UTC")] {
             assert_eq!(validate_start_config(Some(&config(bad)), "available").unwrap_err().code, "INVALID_REQUEST");
         }
+        // null passes through (the automatic settings read it as "remove"); a manual start strips it
+        let off = validate_start_config(Some(&config(Value::Null)), "available").unwrap();
+        assert_eq!(off.get("keepRecent"), Some(&Value::Null));
+        assert!(without_null_keep_recent(off).get("keepRecent").is_none());
+        assert_eq!(without_null_keep_recent(ok.clone()), ok);
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A bridge over a stand-in service with a real automatic-conversion store (no timer, no clips).
+    fn keep_recent_bridge(tag: &str) -> (Arc<Bridge>, std::path::PathBuf, Arc<Fake>) {
+        let base = std::env::temp_dir().join(format!("lean-keep-recent-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("allowed/src")).unwrap();
+        let caps = capabilities(&json!({ "separatePublication": "native-atomic", "ownershipCleanup": "atomic-expected-ownership", "replacement": "available" }));
+        let fake = Arc::new(Fake::default());
+        let bridge = Bridge::new(fake.clone(), Arc::new(Guard(base.clone())), caps);
+        let scanner: Arc<super::super::auto_convert::Scanner> = Arc::new(|_c: &Value, _a: &std::sync::atomic::AtomicBool, _out: &mut dyn FnMut(Value) -> bool| Ok(()));
+        let mut o = super::super::auto_convert::AutoOptions::new(fake.clone(), scanner, base.clone());
+        o.timer = false;
+        bridge.set_extras(Extras { devices: None, auto: Some(super::super::auto_convert::Auto::new(o)), benchmark: None });
+        (bridge, base, fake)
+    }
+
+    fn keep_config(base: &std::path::Path, codec: &str, keep: Option<Value>) -> Value {
+        let mut c = json!({
+            "sourceRoot": base.join("allowed/src"), "destinationRoot": null, "codec": codec, "profileId": "balanced", "networkMode": "direct",
+            "outputMode": "replace", "includedGroups": ["RecentClips"], "replacementConfirmed": true
+        });
+        if let Some(k) = keep {
+            c["keepRecent"] = k;
+        }
+        c
+    }
+
+    fn set_auto_payload(config: Value) -> Value {
+        json!({ "enabled": true, "intervalMinutes": 60, "window": null, "holdManual": false, "keepRunning": false, "openAtLogin": false, "config": config })
+    }
+
+    #[test]
+    fn save_vehicle_and_set_auto_keep_or_remove_keep_recent() {
+        let (bridge, base, _) = keep_recent_bridge("save");
+        let ok = |a: Value| assert_eq!(a["ok"], true, "{a}");
+        let keep = json!({ "days": 30, "zone": "UTC" });
+        let saved = |b: &Arc<Bridge>| b.extras().auto.unwrap().get_state()["saved"].as_array().unwrap().clone();
+        // saveVehicle (not automatic): kept when absent, removed on null
+        ok(bridge.invoke("saveVehicle", Some(json!({ "config": keep_config(&base, "h265", Some(keep.clone())) })), None));
+        ok(bridge.invoke("saveVehicle", Some(json!({ "config": keep_config(&base, "av1", None) })), None));
+        assert_eq!((saved(&bridge)[0]["codec"].clone(), saved(&bridge)[0]["keepRecent"].clone()), (json!("av1"), keep.clone()));
+        ok(bridge.invoke("saveVehicle", Some(json!({ "config": keep_config(&base, "av1", Some(Value::Null)) })), None));
+        assert!(saved(&bridge)[0].get("keepRecent").is_none());
+        // setAuto: kept when absent, removed on null
+        let stored = |b: &Arc<Bridge>| b.extras().auto.unwrap().get_state()["settings"]["configs"][0].clone();
+        ok(bridge.invoke("setAuto", Some(set_auto_payload(keep_config(&base, "h265", Some(keep.clone())))), None));
+        ok(bridge.invoke("setAuto", Some(set_auto_payload(keep_config(&base, "av1", None))), None));
+        assert_eq!((stored(&bridge)["codec"].clone(), stored(&bridge)["keepRecent"].clone()), (json!("av1"), keep));
+        ok(bridge.invoke("setAuto", Some(set_auto_payload(keep_config(&base, "av1", Some(Value::Null)))), None));
+        assert!(stored(&bridge).get("keepRecent").is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn manual_start_with_null_keep_recent_makes_a_job_without_it() {
+        let (bridge, base, fake) = keep_recent_bridge("start");
+        let a = bridge.invoke("start", Some(keep_config(&base, "h265", Some(Value::Null))), None);
+        assert_eq!(a["ok"], true, "{a}");
+        let jobs = ServiceApi::list(fake.as_ref()).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0]["config"].as_object().unwrap().get("keepRecent").is_none());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
