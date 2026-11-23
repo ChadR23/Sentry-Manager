@@ -353,7 +353,8 @@ pub struct Options {
     pub job_clip_limit: usize,
     pub discovery_batch_size: usize,
     pub discovery_flush_ms: i64,
-    /// skipDiscovered(config, discovered): clips the host holds back
+    /// skipDiscovered(config, discovered): clips the host holds back; rechecked
+    /// before each automatic item starts so queued work follows current rules.
     pub skip_discovered: Option<Arc<dyn Fn(&Value, &Value) -> bool + Send + Sync>>,
     /// for tests: called with each encode's arguments before it starts
     pub on_spawn: Option<Arc<dyn Fn(&[String]) + Send + Sync>>,

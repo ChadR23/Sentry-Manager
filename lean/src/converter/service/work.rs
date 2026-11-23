@@ -870,6 +870,14 @@ impl Service {
                 if item_state(&item) != ItemState::Queued {
                     continue;
                 }
+                let config = rt.manifest().config().clone();
+                if config["autoConvert"] == true && self.0.o.skip_discovered.as_ref().is_some_and(|skip| skip(&config, &item)) {
+                    // Recheck after queueing/pausing: a setup edit may now keep
+                    // this original. Never encode, copy or remember a deferral.
+                    self.item_patch(rt, &next, vec![("state", Some(ItemState::Skipped.into())),
+                        ("eligibleVideo", Some(json!(false))), ("resultCode", Some(json!("auto-deferred")))], vec![])?;
+                    continue;
+                }
                 Self::begin_item(rt, &item);
                 let outcome = if item["kind"] == "asset" {
                     self.process_asset(rt, &item, ("asset-retained", "copied"))

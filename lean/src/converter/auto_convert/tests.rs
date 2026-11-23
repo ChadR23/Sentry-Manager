@@ -15,6 +15,7 @@ struct FakeService {
     lanes: Mutex<Vec<(String, Value)>>,
     fixed_id: Option<String>,
     start_error: Mutex<Option<String>>,
+    preview_active: AtomicBool,
     start_attempts: std::sync::atomic::AtomicUsize,
 }
 
@@ -41,6 +42,9 @@ impl AutoService for FakeService {
         Ok(json!({}))
     }
     fn resume(&self, id: &str) -> SResult<Value> {
+        if self.preview_active.load(Ordering::SeqCst) {
+            return Err(Fail::code("JOB_ACTIVE"));
+        }
         self.resumed.lock().unwrap().push(id.into());
         Ok(json!({}))
     }
@@ -441,7 +445,10 @@ fn young_clip_is_deferred_then_converted_once_old() {
     now.store(at_ms(2026, 11, 21), std::sync::atomic::Ordering::SeqCst);
     assert!(auto.is_known(&c, &young_d()));
     assert_eq!(auto.sweep(&c).unwrap(), 0);
-    assert!(auto.lock().indexes.get(&setup_key(&c)).is_none_or(|ix| !ix.files.contains_key(YOUNG_CLIP) && !ix.gave_up.contains_key(YOUNG_CLIP)));
+    let s = auto.lock();
+    let ix = s.indexes.get(&setup_key(&c)).expect("sweep loaded the index");
+    assert!(!ix.files.contains_key(YOUNG_CLIP) && !ix.gave_up.contains_key(YOUNG_CLIP));
+    drop(s);
     now.store(at_ms(2026, 11, 28), std::sync::atomic::Ordering::SeqCst);
     assert!(!auto.is_known(&c, &young_d()));
     assert_eq!(auto.sweep(&c).unwrap(), 1);
@@ -467,6 +474,125 @@ fn unknown_date_is_left_alone() {
     let mut plain = c.clone();
     plain.as_object_mut().unwrap().remove("keepRecent");
     assert!(!auto.is_known(&plain, &no_key));
+}
+
+#[test]
+fn configured_young_clip_does_not_become_pending_or_start_a_job() {
+    let d = tempdir().unwrap();
+    let service = Arc::new(FakeService::default());
+    let scanner: Arc<Scanner> = Arc::new(|_, _, out| { out(young_d()); Ok(()) });
+    let mut o = opts(service.clone(), scanner, d.path());
+    o.now = Arc::new(|| at_ms(2026, 11, 21));
+    let auto = Auto::new(o);
+    let mut c = car("/cars/a", "h265");
+    c["keepRecent"] = json!({ "days": 30, "zone": "UTC" });
+    auto.configure(&shared(json!({ "enabled": true, "config": c, "catchUp": true }))).unwrap();
+    wait_ticks(&auto);
+    auto.tick();
+    let state = auto.get_state();
+    assert!(state["settings"]["configs"][0].get("autoConvert").is_none());
+    assert_eq!(state["status"]["sources"]["/cars/a"]["lastNewFiles"], 0);
+    assert!(state["status"]["pending"].get("/cars/a").is_none());
+    assert!(state["status"].get("catchUp").is_none());
+    assert!(service.started().is_empty());
+    let s = auto.lock();
+    let ix = s.indexes.get(&setup_key(&c)).unwrap();
+    assert!(ix.files.is_empty() && ix.gave_up.is_empty());
+}
+
+#[test]
+fn discovery_uses_current_vehicle_rules_for_an_older_auto_job() {
+    for group_off in [false, true] {
+        let t = cars();
+        let mut c = car("/cars/a", "h265");
+        t.auto.configure(&shared(json!({ "enabled": true, "config": c }))).unwrap();
+        wait_ticks(&t.auto);
+        let mut old = c.clone();
+        old["autoConvert"] = json!(true);
+        let mut clip = young_d();
+        clip["group"] = json!("RecentClips");
+        // An unknown date is protected by any keep window, independent of the wall clock.
+        clip.as_object_mut().unwrap().remove("timestampKey");
+        assert!(!t.auto.is_known(&old, &clip));
+        if group_off { c["includedGroups"] = json!(["SavedClips"]); }
+        else { c["keepRecent"] = json!({ "days": 60, "zone": "UTC" }); }
+        t.auto.configure(&shared(json!({ "enabled": true, "config": c }))).unwrap();
+        wait_ticks(&t.auto);
+        assert!(t.auto.is_known(&old, &clip), "current rules must gate discovery; group_off={group_off}");
+        old.as_object_mut().unwrap().remove("autoConvert");
+        assert!(!t.auto.is_known(&old, &clip), "manual jobs ignore automatic eligibility");
+    }
+}
+
+#[test]
+fn preview_blocked_window_resume_is_retried_next_tick() {
+    let t = cars();
+    t.auto.configure(&shared(json!({ "enabled": true, "config": car("/cars/a", "h265") }))).unwrap();
+    wait_ticks(&t.auto);
+    t.auto.tick();
+    t.s.set("job-1", |j| j["state"] = json!("paused"));
+    t.auto.set_entry("/cars/a", "pausedForWindow", true);
+    t.s.preview_active.store(true, Ordering::SeqCst);
+    t.auto.tick();
+    assert_eq!(t.auto.get_state()["status"]["active"]["/cars/a"]["pausedForWindow"], true);
+    assert!(t.s.resumed.lock().unwrap().is_empty());
+    t.s.preview_active.store(false, Ordering::SeqCst);
+    t.auto.tick();
+    assert_eq!(t.auto.get_state()["status"]["active"]["/cars/a"]["pausedForWindow"], false);
+    assert_eq!(*t.s.resumed.lock().unwrap(), vec!["job-1"]);
+}
+
+#[test]
+fn preview_blocked_manual_resume_is_retried_next_tick() {
+    let t = cars();
+    t.s.jobs.lock().unwrap().insert("manual".into(), json!({ "id": "manual", "state": "paused", "config": {} }));
+    t.auto.lock().status["heldManual"] = json!(["manual"]);
+    t.s.preview_active.store(true, Ordering::SeqCst);
+    t.auto.tick();
+    assert_eq!(t.auto.get_state()["status"]["heldManual"], json!(["manual"]));
+    assert!(t.s.resumed.lock().unwrap().is_empty());
+    t.s.preview_active.store(false, Ordering::SeqCst);
+    t.auto.tick();
+    assert_eq!(t.auto.get_state()["status"]["heldManual"], json!([]));
+    assert_eq!(*t.s.resumed.lock().unwrap(), vec!["manual"]);
+}
+
+#[test]
+fn real_preview_lease_preserves_auto_and_manual_resume_ownership() {
+    use crate::converter::runtime::{Converter, RuntimeOptions};
+    for automatic in [true, false] {
+        let d = tempdir().unwrap();
+        let root = d.path().join("footage");
+        std::fs::create_dir(&root).unwrap();
+        let mut options = RuntimeOptions::new(d.path().into(), d.path().into(), "ffmpeg", "ffprobe");
+        options.auto_timer = false;
+        let c = Converter::open(options).unwrap();
+        let mut cfg = car(root.to_str().unwrap(), "h265");
+        if automatic { cfg["autoConvert"] = json!(true); }
+        let job = c.store.create(json!({"state":"paused", "items":[], "config":cfg, "discoveryComplete":true}).as_object().unwrap()).unwrap();
+        c.service.pause(job.id()).unwrap(); // load the real service's parked runtime
+        {
+            let mut s = c.auto.lock();
+            if automatic {
+                s.settings["enabled"] = json!(true);
+                s.settings["configs"] = json!([cfg]);
+                s.status["active"][root.to_str().unwrap()] = json!({"jobId":job.id(), "pausedForWindow":true});
+            } else { s.status["heldManual"] = json!([job.id()]); }
+        }
+        let lease = c.try_preview().unwrap().expect("a parked job permits a preview");
+        c.auto.tick();
+        assert_eq!(c.service.get(job.id()).unwrap()["state"], "paused");
+        let st = c.auto.get_state()["status"].clone();
+        if automatic { assert_eq!(st["active"][root.to_str().unwrap()]["pausedForWindow"], true); }
+        else { assert_eq!(st["heldManual"], json!([job.id()])); }
+        drop(lease);
+        c.auto.tick();
+        let st = c.auto.get_state()["status"].clone();
+        if automatic { assert_eq!(st["active"][root.to_str().unwrap()]["pausedForWindow"], false); }
+        else { assert_eq!(st["heldManual"], json!([])); }
+        assert_eq!(c.service.when_idle(job.id()).unwrap()["state"], "completed");
+        c.shutdown();
+    }
 }
 
 fn stored_config(t: &Cars, root: &str) -> Value {

@@ -541,10 +541,15 @@ impl Auto {
         if config.get("autoConvert") != Some(&json!(true)) {
             return false;
         }
-        if super::keep_recent::is_young(config, d, (self.o.now)()) {
+        let s = self.lock();
+        // A catch-up job can outlive several setup edits. Its unstarted clips
+        // must respect the vehicle's current keep window and included groups.
+        let current = Self::config_for(&s, config["sourceRoot"].as_str().unwrap_or(""));
+        let eligibility = current.as_ref().unwrap_or(config);
+        if super::keep_recent::is_young(eligibility, d, (self.o.now)())
+            || d["group"].as_str().is_some_and(|group| eligibility["includedGroups"].as_array().is_some_and(|groups| !groups.iter().any(|g| g == group))) {
             return true;
         }
-        let s = self.lock();
         s.indexes.get(&setup_key(config)).is_some_and(|ix| Self::known_in(ix, d, Some(config)))
     }
 
@@ -566,7 +571,7 @@ impl Auto {
         *self.sweep_abort.lock().unwrap() = Some(abort.clone());
         let mut new_files = 0;
         let r = (self.o.scanner)(config, &abort, &mut |d: Value| {
-            if config.get("autoConvert") == Some(&json!(true)) && super::keep_recent::is_young(config, &d, (self.o.now)()) {
+            if super::keep_recent::is_young(config, &d, (self.o.now)()) {
                 return true;
             }
             let known = self.lock().indexes.get(&key).is_some_and(|ix| Self::known_in(ix, &d, Some(config)));
@@ -604,6 +609,10 @@ impl Auto {
         for item in job["items"].as_array().into_iter().flatten() {
             let rel = item["relativePath"].as_str().unwrap_or("").to_string();
             let (state, code) = (item["state"].as_str().unwrap_or(""), item["resultCode"].as_str().unwrap_or(""));
+            // Deferred eligibility is temporary, not a handled or failed clip.
+            if state == "skipped" && code == "auto-deferred" {
+                continue;
+            }
             // (the stat outside the lock)
             let stat = if replace && state == "completed" {
                 Some(item["sourcePath"].as_str().and_then(|p| std::fs::metadata(p).ok()))
@@ -786,10 +795,14 @@ impl Auto {
                 self.save_state();
                 self.changed();
             } else if inside && paused_window {
-                self.set_entry(&root, "pausedForWindow", false);
                 if entry["pausedForDevices"] != true {
-                    self.resume_job(&id)?;
+                    match self.resume_job(&id) {
+                        Ok(()) => {},
+                        Err(e) if e == "JOB_ACTIVE" => continue,
+                        Err(e) => return Err(e),
+                    }
                 }
+                self.set_entry(&root, "pausedForWindow", false);
                 self.save_state();
                 self.changed();
             }
@@ -824,12 +837,10 @@ impl Auto {
             if held.is_empty() && handled.is_empty() {
                 return;
             }
-            for id in &held {
-                let _ = self.o.service.resume(id);
-            }
+            let still_held: Vec<_> = held.into_iter().filter(|id| self.resume_job(id).is_err()).collect();
             {
                 let mut s = self.lock();
-                s.status["heldManual"] = json!([]);
+                s.status["heldManual"] = json!(still_held);
                 s.status["handledManual"] = json!([]);
             }
             self.save_state();

@@ -618,6 +618,96 @@ fn until(mut f: impl FnMut() -> bool, ms: u64) -> bool {
     false
 }
 
+fn running_job_obeys_changed_auto_rules(group_off: bool, automatic: bool) {
+    use std::sync::{Mutex, atomic::{AtomicUsize, Ordering}, mpsc};
+    use std::time::Duration;
+    let temp = super::super::testutil::tempdir().unwrap();
+    let base = temp.path();
+    let date = (chrono::Utc::now().date_naive() - chrono::Duration::days(45)).format("%Y-%m-%d").to_string();
+    let folder = base.join("footage/TeslaCam/RecentClips");
+    fs::create_dir_all(&folder).unwrap();
+    for dir in ["data", "temp", "out"] { fs::create_dir_all(base.join(dir)).unwrap(); }
+    let first = folder.join(format!("{date}_10-00-00-front.mp4"));
+    let second = folder.join(format!("{date}_10-01-00-front.mp4"));
+    let made = Command::new("ffmpeg").args(["-v", "error", "-nostdin", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=12:duration=2",
+        "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast", "-crf", "15"]).arg(&first).output().unwrap();
+    assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+    fs::copy(&first, &second).unwrap();
+    let before = sha(&second);
+    let (entered, reached) = mpsc::channel();
+    let (release, resume) = mpsc::channel();
+    let resume = Mutex::new(resume);
+    let encodes = Arc::new(AtomicUsize::new(0));
+    let seen = encodes.clone();
+    let mut options = RuntimeOptions::new(base.join("data"), base.join("temp"), fixtures().ffmpeg.to_str().unwrap(), "ffprobe");
+    options.auto_timer = false;
+    options.tune = Some(Box::new(move |o| {
+        o.on_spawn = Some(Arc::new(move |_| {
+            if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                entered.send(()).unwrap();
+                resume.lock().unwrap().recv_timeout(Duration::from_secs(30)).unwrap();
+            }
+        }));
+    }));
+    let c = Converter::open(options).unwrap();
+    c.start().unwrap();
+    let mut cfg = config(base, "replace", "direct", 1);
+    cfg["keepRecent"] = json!({ "days": 30, "zone": "UTC" });
+    let settings = |cfg: &Value| json!({ "enabled": true, "config": cfg, "intervalMinutes": 60, "window": null, "holdManual": false, "catchUp": false });
+    // A manual job uses the same config but must ignore automatic keep/group changes.
+    let mut job_config = cfg.clone();
+    if automatic { job_config["autoConvert"] = json!(true); }
+    let manual_id = if automatic { c.auto.configure(&settings(&cfg)).unwrap(); None }
+        else { Some(c.service.start(&job_config).unwrap()) };
+    reached.recv_timeout(Duration::from_secs(30)).unwrap();
+    let id = manual_id.unwrap_or_else(|| c.service.list().unwrap()[0]["id"].as_str().unwrap().to_string());
+    assert!(until(|| c.service.get(&id).unwrap()["discoveryComplete"] == true, 10_000));
+    assert_eq!(c.service.get(&id).unwrap()["items"].as_array().unwrap().len(), 2);
+    c.auto.configure(&settings(&cfg)).unwrap();
+    if group_off { cfg["includedGroups"] = json!(["SavedClips", "SentryClips"]); }
+    else { cfg["keepRecent"]["days"] = json!(60); }
+    c.auto.configure(&settings(&cfg)).unwrap();
+    release.send(()).unwrap();
+    let job = c.service.when_idle(&id).unwrap();
+    assert_eq!(job["state"], "completed", "{job}");
+    c.auto.tick();
+    let item = job["items"].as_array().unwrap().iter().find(|i| i["sourcePath"] == second.to_str().unwrap()).unwrap();
+    if automatic {
+        assert_eq!(item["state"], "skipped", "the queued clip must not be encoded: {item}");
+        assert_eq!(item["resultCode"], "auto-deferred");
+        assert_eq!(sha(&second), before, "the original bytes must survive");
+        assert_eq!(encodes.load(Ordering::SeqCst), 1);
+        // Make it eligible again. The completed job must not have remembered the deferral.
+        cfg["keepRecent"]["days"] = json!(30);
+        cfg["includedGroups"] = json!(["RecentClips", "SavedClips", "SentryClips"]);
+        let mut scheduled = settings(&cfg);
+        scheduled["schedule"] = json!({"kind":"daily", "hour":2, "zone":"UTC"});
+        c.auto.configure(&scheduled).unwrap();
+        assert!(!c.auto.is_known(&job_config, item), "a later check must reconsider this clip");
+        let indexes: Vec<_> = fs::read_dir(base.join("data/converter-auto")).unwrap().map(|e| e.unwrap().path())
+            .filter(|p| p.file_name().unwrap().to_str().unwrap().starts_with("index-")).collect();
+        assert!(!indexes.is_empty(), "the finished automatic job's index was loaded and saved");
+        for path in indexes {
+            let index: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            for key in ["files", "gaveUp", "failures"] { assert!(index[key].get(item["relativePath"].as_str().unwrap()).is_none()); }
+        }
+    } else {
+        assert_eq!(item["state"], "completed", "manual jobs are unaffected: {item}");
+        assert_ne!(sha(&second), before);
+        assert_eq!(encodes.load(Ordering::SeqCst), 2);
+    }
+    c.shutdown();
+}
+
+#[test]
+fn running_auto_job_defers_queued_clip_after_keep_window_grows() { running_job_obeys_changed_auto_rules(false, true); }
+
+#[test]
+fn running_auto_job_defers_queued_clip_after_group_is_disabled() { running_job_obeys_changed_auto_rules(true, true); }
+
+#[test]
+fn running_manual_job_ignores_changed_auto_rules() { running_job_obeys_changed_auto_rules(true, false); }
+
 #[test]
 fn stopped_between_two_clips_the_job_carries_on_after_the_restart() {
     if !available() {

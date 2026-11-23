@@ -28,6 +28,8 @@ pub fn cutoff_ms(days: i64, zone: &str, now_ms: i64) -> i64 {
 /// True when the config keeps recent footage and this clip is inside the window. A clip whose
 /// date cannot be read counts as inside: unknown dates are left alone.
 pub fn is_young(config: &Value, d: &Value, now_ms: i64) -> bool {
+    // Event metadata and thumbnails have no clip date and still accompany copies.
+    if d["kind"] == "asset" { return false; }
     let Some(k) = config.get("keepRecent").filter(|k| valid(k)) else { return false };
     let (days, zone) = (k["days"].as_i64().unwrap_or(0), k["zone"].as_str().unwrap_or("UTC"));
     let t = d.get("timestampKey").and_then(Value::as_str).map_or(f64::NAN, |s| crate::viewer::recording_place::utc_of(s, zone));
@@ -77,5 +79,14 @@ mod tests {
         assert_eq!(cutoff_ms(7, "America/New_York", ms(2026, 11, 3, 15)), ms(2026, 10, 28, 4));
         assert_eq!(cutoff_ms(2, "America/New_York", ms(2026, 11, 2, 15)), ms(2026, 11, 1, 4));
         assert_eq!(cutoff_ms(2, "America/New_York", ms(2026, 11, 3, 15)), ms(2026, 11, 2, 5));
+    }
+
+    #[test]
+    fn assets_without_timestamps_remain_eligible_for_copying() {
+        let c = json!({ "keepRecent": { "days": 30, "zone": "UTC" } });
+        for name in ["event.json", "thumb.png"] {
+            assert!(!is_young(&c, &json!({ "kind": "asset", "relativePath": name }), ms(2026, 11, 21, 12)));
+        }
+        assert!(is_young(&c, &json!({ "kind": "video" }), ms(2026, 11, 21, 12)));
     }
 }
