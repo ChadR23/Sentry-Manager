@@ -765,6 +765,23 @@ body.converter-mode #driveList {
     color: var(--error-color);
 }
 
+/* why a clip was refused: under its row, in plain words, then the check's own words */
+.converter-row-why {
+    grid-column: 1 / -1;
+    color: var(--text-secondary);
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
+.converter-row-why-detail {
+    display: block;
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+    font-variant-ligatures: none;
+}
+
 .converter-summary {
     margin-top: 18px;
     padding: 18px;

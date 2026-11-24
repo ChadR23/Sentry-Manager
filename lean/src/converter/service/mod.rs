@@ -21,6 +21,8 @@ mod tests;
 pub mod lanes_tests;
 #[cfg(test)]
 mod node_tests;
+#[cfg(test)]
+mod refusal_tests;
 
 pub use encode::{parse_progress_line, Progress};
 
@@ -99,6 +101,30 @@ impl From<staging::TxError> for Fail {
 static FAILURE_DETAILS: Mutex<Option<HashMap<(String, String), String>>> = Mutex::new(None);
 const MAX_FAILURE_DETAILS: usize = 4096;
 pub const UNSAFE_OWNED_PATH_RESULT: &str = "unsafe-owned-path";
+/// The detail of a stored unsafe-owned-path failure whose reason this
+/// process never saw (the details are kept in memory only).
+pub const DETAIL_NOT_KNOWN: &str = "not known: this clip failed before the server last restarted. Retry failed to see why";
+/// The detail of a refusal that named no check (no such refusal is known).
+pub const DETAIL_NOT_RECORDED: &str = "not recorded: the refusal named no check";
+
+/// One line on the app's stderr (the container log). Tests see the lines.
+pub(crate) fn log_line(line: String) {
+    eprintln!("{line}");
+    #[cfg(test)]
+    LOGGED.lock().unwrap_or_else(|p| p.into_inner()).push(line);
+}
+#[cfg(test)]
+pub(crate) static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// A clip that ends with unsafe-owned-path: one log line naming the clip
+/// (its relative path), the check and the values that did not match, and the
+/// detail kept for the job snapshot. Returns the detail recorded.
+pub fn note_clip_refusal(job: &str, item: &str, relative_path: &str, e: &Fail) -> String {
+    let detail = e.detail.clone().filter(|d| !d.is_empty()).unwrap_or_else(|| DETAIL_NOT_RECORDED.to_string());
+    log_line(format!("[CONVERTER] UNSAFE_OWNED_PATH clip {relative_path:?} ({job} {item}) failed: {detail}"));
+    set_failure_detail(job, item, Some(&detail));
+    detail
+}
 
 /// Record (or, with None, forget) the refusal detail of a clip's failure.
 pub fn set_failure_detail(job: &str, item: &str, detail: Option<&str>) {
@@ -108,7 +134,10 @@ pub fn set_failure_detail(job: &str, item: &str, detail: Option<&str>) {
     match detail {
         Some(d) => {
             if map.len() >= MAX_FAILURE_DETAILS && !map.contains_key(&key) {
-                map.clear();
+                // (one forgotten, not all: a forgotten one shows DETAIL_NOT_KNOWN)
+                if let Some(k) = map.keys().next().cloned() {
+                    map.remove(&k);
+                }
             }
             map.insert(key, d.to_string());
         }
@@ -123,12 +152,13 @@ pub fn failure_detail(job: &str, item: &str) -> Option<String> {
     g.as_ref().and_then(|m| m.get(&(job.to_string(), item.to_string())).cloned())
 }
 
-/// A failed clip's snapshot with its refusal detail, if it has one.
+/// A failed clip's snapshot with its refusal detail; one this process never
+/// saw (the clip failed before a restart) says so.
 fn with_failure_detail(job: &str, v: &Value) -> Option<Value> {
     if v.get("failure").and_then(|f| f.get("code")).and_then(Value::as_str) != Some(UNSAFE_OWNED_PATH_RESULT) {
         return None;
     }
-    let d = failure_detail(job, v.get("id")?.as_str()?)?;
+    let d = failure_detail(job, v.get("id")?.as_str()?).unwrap_or_else(|| DETAIL_NOT_KNOWN.to_string());
     let mut c = v.clone();
     c["failure"]["detail"] = Value::String(d);
     Some(c)
@@ -1150,6 +1180,7 @@ impl Service {
             }
             for item in m.items.iter().filter(|i| i.state() == ItemState::Failed) {
                 if !self.reconcile_item_ownership(&rt, item.id(), Some(ownership_of(item.value())), false)? {
+                    log_line(format!("[CONVERTER] Retry failed refused: the files clip {:?} ({id} {}) kept from its failed run could not be cleaned up, so no clip ran again", item.str("relativePath").unwrap_or(""), item.id()));
                     return Err(service_error("RECOVERY_REQUIRED"));
                 }
             }
@@ -1390,9 +1421,9 @@ mod failure_detail_tests {
         assert!(m.items[0].value()["failure"].get("detail").is_none());
         let stored = std::fs::read_to_string(root.join(&job).join("job.json")).unwrap_or_default() + &std::fs::read_to_string(root.join(&job).join("job.journal")).unwrap_or_default();
         assert!(stored.contains("unsafe-owned-path") && !stored.contains("nlink"), "{stored}");
-        // retried and failed with no detail: the old one is forgotten
+        // forgotten (a restart): the snapshot says the reason is not known
         set_failure_detail(&job, "item-000001", None);
-        assert!(public_snapshot(&m)["items"][0]["failure"].get("detail").is_none());
+        assert_eq!(public_snapshot(&m)["items"][0]["failure"]["detail"], DETAIL_NOT_KNOWN);
         let _ = std::fs::remove_dir_all(&root);
     }
 
