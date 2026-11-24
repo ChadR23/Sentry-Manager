@@ -204,7 +204,7 @@ pub fn note_backup_cleanup(job: &str, rel_dir: &str, name: &str, o: &super::left
     }
     let c = map.entry(job.to_string()).or_default();
     match o {
-        Outcome::Removed | Outcome::RemovedCopy(_) => c.removed += 1,
+        Outcome::Removed | Outcome::RemovedCopy(_) | Outcome::RemovedExtra(_) => c.removed += 1,
         Outcome::Restored => c.restored += 1,
         Outcome::Binned { .. } => c.binned += 1,
         Outcome::Kept(why) => {

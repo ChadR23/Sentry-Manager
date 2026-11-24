@@ -26,7 +26,7 @@ export function backupCleanupWords(c) {
         .filter((k) => k && typeof k.path === 'string' && typeof k.why === 'string')
         .map((k) => ({ path: k.path, why: k.why }));
     return {
-        summary: `Leftover backups from an earlier replace: ${parts.join(', ')}.`,
+        summary: `Leftover files from an earlier replace: ${parts.join(', ')}.`,
         kept,
         more: Math.max(0, n('kept') - kept.length),
     };

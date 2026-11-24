@@ -24,10 +24,10 @@ const CASES = [
 test('the words say what was tidied, put back, moved and kept', async () => {
   const { backupCleanupWords } = await shared();
   const w = backupCleanupWords(CASES[0]);
-  assert.equal(w.summary, 'Leftover backups from an earlier replace: 2 tidied, 1 original put back, 1 moved to the Recycle Bin, 1 kept.');
+  assert.equal(w.summary, 'Leftover files from an earlier replace: 2 tidied, 1 original put back, 1 moved to the Recycle Bin, 1 kept.');
   assert.deepEqual(w.kept, CASES[0].keptWhy);
   assert.equal(w.more, 0);
-  assert.equal(backupCleanupWords(CASES[2]).summary, 'Leftover backups from an earlier replace: 2 originals put back.');
+  assert.equal(backupCleanupWords(CASES[2]).summary, 'Leftover files from an earlier replace: 2 originals put back.');
   assert.equal(backupCleanupWords(CASES[3]).more, 3, 'the server sends the first 20');
   assert.equal(backupCleanupWords(CASES[4]), null, 'nothing done: nothing shown');
   assert.equal(backupCleanupWords(undefined), null);
@@ -37,7 +37,7 @@ test('the HTML escapes names and lists the kept ones under a details', async () 
   const { backupCleanupHtml } = await shared();
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
   const html = backupCleanupHtml({ removed: 0, restored: 0, binned: 0, kept: 1, keptWhy: [{ path: 'a/BACKUP-<b>.mp4', why: 'x & y' }] }, esc, 'note backup-cleanup');
-  assert.match(html, /^<div class="note backup-cleanup" role="status"><span>Leftover backups from an earlier replace: 1 kept\.<\/span><details><summary>Kept as they are, and why<\/summary><ul><li><code>a\/BACKUP-&#60;b&#62;\.mp4<\/code> x &#38; y<\/li><\/ul><\/details><\/div>$/);
+  assert.match(html, /^<div class="note backup-cleanup" role="status"><span>Leftover files from an earlier replace: 1 kept\.<\/span><details><summary>Kept as they are, and why<\/summary><ul><li><code>a\/BACKUP-&#60;b&#62;\.mp4<\/code> x &#38; y<\/li><\/ul><\/details><\/div>$/);
   assert.equal(backupCleanupHtml(null, esc), '');
 });
 

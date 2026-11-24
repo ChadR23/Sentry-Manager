@@ -101,7 +101,7 @@ pub fn should_skip_dir(name: &str) -> bool {
 
 /// Files the converter owns while it works: never listed.
 pub fn is_converter_artifact(name: &str) -> bool {
-    if name.starts_with("TEMP-H265-") || name.starts_with("TEMP-AV1-") || name.starts_with("BACKUP-") || name.starts_with(".sentry-owned-remove-") {
+    if name.starts_with("TEMP-H265-") || name.starts_with("TEMP-AV1-") || name.starts_with("BACKUP-") || name.starts_with(".sentry-owned-remove-") || name.starts_with(".sentry-tidy-") {
         return true;
     }
     if let Some(at) = name.find(".sentry-six-") {

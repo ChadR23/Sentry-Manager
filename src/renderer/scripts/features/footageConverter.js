@@ -300,7 +300,7 @@ function backupCleanupWords(c, message = (_key, fallback, params) => String(fall
         .filter((k) => k && typeof k.path === 'string' && typeof k.why === 'string')
         .map((k) => ({ path: k.path, why: k.why }));
     return {
-        summary: message('backupCleanup', 'Leftover backups from an earlier replace: {parts}.', { parts: parts.join(', ') }),
+        summary: message('backupCleanup', 'Leftover files from an earlier replace: {parts}.', { parts: parts.join(', ') }),
         kept,
         more: Math.max(0, n('kept') - kept.length)
     };

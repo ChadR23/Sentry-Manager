@@ -20,6 +20,9 @@
 //!   while it is there): removed once X is there, the copy is a whole H.265 /
 //!   AV1 file and X is another file. It is never an original.
 //!
+//! - the tidy's own quarantine name `.sentry-tidy-<hex>-L` (a tidy stopped mid-removal):
+//!   one more name of L's file goes; with L gone it is settled exactly as L would be.
+//!
 //! Anything else is kept and reported. Every step works in the folder opened
 //! from the share's real root without following a link (safe_fs), with
 //! fstatat(AT_SYMLINK_NOFOLLOW), renameat2(RENAME_NOREPLACE) (link + unlink
@@ -38,11 +41,23 @@ use std::path::{Path, PathBuf};
 pub const PREFIX: &str = "BACKUP-";
 /// The unfinished copies' prefixes, and the codec each must hold.
 pub const COPY_PREFIXES: [(&str, &str); 2] = [("TEMP-H265-", "h265"), ("TEMP-AV1-", "av1")];
+/// The tidy's own quarantine name for a leftover name L it removes:
+/// `.sentry-tidy-<16 hex>-L`. A server stopped between the rename and the unlink leaves
+/// it (a hidden second name of the clip, or a copy); the next tidy settles it as L.
+pub const QUARANTINE: &str = ".sentry-tidy-";
 
-/// A name the tidy looks at (any letter case: other cases are reported, never touched).
+/// The leftover name L that a tidy quarantine name stands for.
+pub fn quarantined_name(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix(QUARANTINE)?;
+    let (h, l) = (rest.get(..16)?, rest.get(16..)?.strip_prefix('-')?);
+    (h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) && !l.is_empty()).then_some(l)
+}
+
+/// A name the tidy looks at (any letter case: other cases are reported, never touched),
+/// and the tidy's own quarantine names.
 pub fn is_leftover_name(name: &str) -> bool {
     let up = |p: &str| name.len() >= p.len() && name.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes());
-    up(PREFIX) || COPY_PREFIXES.iter().any(|(p, _)| up(p))
+    up(PREFIX) || COPY_PREFIXES.iter().any(|(p, _)| up(p)) || quarantined_name(name).is_some()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +79,8 @@ pub struct Found {
 pub enum Outcome {
     /// case a: the second name removed, the clip kept at its name
     Removed,
+    /// a quarantine name the tidy left that was one more name of this leftover name's file
+    RemovedExtra(String),
     /// an unfinished copy removed (its codec), the clip kept at its name
     RemovedCopy(String),
     /// case b: the original put back at its name
@@ -96,6 +113,8 @@ pub struct Owners {
     pub roots: Vec<(PathBuf, String)>,
     /// the clips the calling job has not finished
     pub mine: HashSet<PathBuf>,
+    /// folders already made real (see `keys`)
+    pub canon: HashMap<PathBuf, Option<PathBuf>>,
 }
 
 fn res(p: &str) -> PathBuf {
@@ -107,20 +126,98 @@ fn non_empty(v: Option<&Value>) -> bool {
 }
 
 impl Owners {
+    fn real(&mut self, dir: &Path) -> Option<PathBuf> {
+        if let Some(r) = self.canon.get(dir) {
+            return r.clone();
+        }
+        let r = std::fs::canonicalize(dir).ok();
+        self.canon.insert(dir.to_path_buf(), r.clone());
+        r
+    }
+
+    /// A record's path as it is written and with its folder made real, the way the
+    /// in-process holds key it (staging::hold_keys): a record that names a file through
+    /// another spelling of its folder (a link to it) still owns that file.
+    fn keys(&mut self, p: &str) -> Vec<PathBuf> {
+        let l = res(p);
+        let mut out = vec![l.clone()];
+        if let (Some(parent), Some(name)) = (l.parent(), l.file_name()) {
+            if let Some(r) = self.real(parent).map(|r| r.join(name)) {
+                if r != l {
+                    out.push(r);
+                }
+            }
+        }
+        out
+    }
+
+    /// A source folder as written and made real.
+    fn root_keys(&mut self, p: &str) -> Vec<PathBuf> {
+        let l = res(p);
+        let mut out = vec![l.clone()];
+        if let Some(r) = self.real(&l) {
+            if r != l {
+                out.push(r);
+            }
+        }
+        out
+    }
+
+    fn own(&mut self, p: &str, id: &str) {
+        for k in self.keys(p) {
+            self.paths.insert(k, id.to_string());
+        }
+    }
+
     fn collect(&mut self, holder: &Value, id: &str) {
         for v in holder.get("ownedPaths").and_then(Value::as_object).into_iter().flat_map(|o| o.values()) {
             if let Some(p) = v.as_str() {
-                self.paths.insert(res(p), id.to_string());
+                self.own(p, id);
             }
         }
         for v in holder.get("ownedArtifacts").and_then(Value::as_object).into_iter().flat_map(|o| o.values()) {
             if let Some(p) = v.get("path").and_then(Value::as_str) {
-                self.paths.insert(res(p), id.to_string());
+                self.own(p, id);
             }
         }
         if let Some(p) = holder.get("publicationArtifact").and_then(|a| a.get("path")).and_then(Value::as_str) {
-            self.paths.insert(res(p), id.to_string());
+            self.own(p, id);
         }
+    }
+
+    /// A job whose record could not be replayed (its journal is damaged; the job is
+    /// listed nowhere): every path anywhere in what can be read of it is owned, and its
+    /// whole source folder is kept. Err when not even its source folder can be read.
+    pub fn add_damaged(&mut self, id: &str, parts: &[Value]) -> Result<(), String> {
+        fn walk(v: &Value, key: Option<&str>, paths: &mut Vec<String>, roots: &mut Vec<String>) {
+            match v {
+                Value::String(s) if s.starts_with('/') => {
+                    if key == Some("sourceRoot") {
+                        roots.push(s.clone());
+                    }
+                    paths.push(s.clone());
+                }
+                Value::Array(a) => a.iter().for_each(|x| walk(x, key, paths, roots)),
+                Value::Object(o) => o.iter().for_each(|(k, x)| walk(x, Some(k), paths, roots)),
+                _ => {}
+            }
+        }
+        let (mut paths, mut roots) = (Vec::new(), Vec::new());
+        for v in parts {
+            walk(v, None, &mut paths, &mut roots);
+        }
+        if roots.is_empty() {
+            return Err(format!("job {id}'s record is damaged and names no source folder"));
+        }
+        for p in paths {
+            self.own(&p, id);
+        }
+        for r in roots {
+            for k in self.root_keys(&r) {
+                self.roots.push((k, id.to_string()));
+            }
+        }
+        Ok(())
     }
 
     /// One job's record (the runtime's copy when it has one). `calling`: the job whose
@@ -141,15 +238,21 @@ impl Owners {
             let active = top.get("replacementPhase").is_some_and(|p| !p.is_null()) && top.get("activeItemId").and_then(Value::as_str) == Some(it.id());
             let started = v.get("replacementPhase").is_some_and(|p| !p.is_null()) || owns || state == ItemState::Processing || active;
             if replace && started {
-                self.sources.insert(res(src), id.clone());
+                for k in self.keys(src) {
+                    self.sources.insert(k, id.clone());
+                }
             }
             if calling && !state.is_terminal() {
-                self.mine.insert(res(src));
+                for k in self.keys(src) {
+                    self.mine.insert(k);
+                }
             }
         }
         if !calling && unsettled {
             if let Some(root) = m.config().get("sourceRoot").and_then(Value::as_str) {
-                self.roots.push((res(root), id));
+                for k in self.root_keys(root) {
+                    self.roots.push((k, id.clone()));
+                }
             }
         }
     }
@@ -340,15 +443,24 @@ pub enum Role {
 
 /// The clip name X of a leftover name this module may act on and what the name is to it,
 /// or why it is only reported.
+/// A tidy quarantine name answers for the leftover name it stands for.
 pub fn clip_of(f: &Found) -> Result<(&str, Role), String> {
-    let (rest, role) = match f.name.strip_prefix(PREFIX) {
+    match quarantined_name(&f.name) {
+        Some(l) if quarantined_name(l).is_some() => Err("a leftover name of a leftover name".into()),
+        Some(l) => clip_of_name(l, f.kind),
+        None => clip_of_name(&f.name, f.kind),
+    }
+}
+
+fn clip_of_name(name: &str, kind: Kind) -> Result<(&str, Role), String> {
+    let (rest, role) = match name.strip_prefix(PREFIX) {
         Some(r) => (r, Role::Backup),
-        None => match COPY_PREFIXES.iter().find_map(|(p, c)| f.name.strip_prefix(p).map(|r| (r, Role::Copy(c)))) {
+        None => match COPY_PREFIXES.iter().find_map(|(p, c)| name.strip_prefix(p).map(|r| (r, Role::Copy(c)))) {
             Some(x) => x,
             None => return Err("not the Encoder's name for it (other letter case)".into()),
         },
     };
-    match f.kind {
+    match kind {
         Kind::File => {}
         Kind::Link => return Err("a symbolic link (never followed)".into()),
         Kind::Dir => return Err("a folder, not a backup".into()),
@@ -387,7 +499,12 @@ pub fn tidy_folder(t: &Tidy, f: &Folder) -> Vec<(String, Outcome)> {
     let mut work: Vec<(&Found, &str, Role, super::staging::Held)> = Vec::new();
     let s = |p: PathBuf| p.to_string_lossy().into_owned();
     let mut order: Vec<&Found> = f.found.iter().collect();
-    order.sort_by_key(|fd| !matches!(clip_of(fd), Ok((_, Role::Backup))));
+    // (the tidy's own quarantine names first: one may be just one more name of a leftover name)
+    order.sort_by_key(|fd| match (quarantined_name(&fd.name), clip_of(fd)) {
+        (Some(_), _) => 0,
+        (None, Ok((_, Role::Backup))) => 1,
+        _ => 2,
+    });
     for found in order {
         let (clip, role) = match clip_of(found) {
             Ok(c) => c,
@@ -396,7 +513,8 @@ pub fn tidy_folder(t: &Tidy, f: &Folder) -> Vec<(String, Outcome)> {
                 continue;
             }
         };
-        let names = [s(f.dir.join(clip)), s(f.dir.join(&found.name)), s(f.real_dir.join(clip)), s(f.real_dir.join(&found.name))];
+        let label = quarantined_name(&found.name).unwrap_or(&found.name);
+        let names = [s(f.dir.join(clip)), s(f.dir.join(&found.name)), s(f.dir.join(label)), s(f.real_dir.join(clip)), s(f.real_dir.join(&found.name)), s(f.real_dir.join(label))];
         match t.tx.try_hold(&names.iter().map(String::as_str).collect::<Vec<_>>()) {
             Some(h) => work.push((found, clip, role, h)),
             None => out.push((found.name.clone(), Outcome::Kept("in use by a conversion right now".into()))),
@@ -423,13 +541,18 @@ pub fn tidy_folder(t: &Tidy, f: &Folder) -> Vec<(String, Outcome)> {
     };
     for (found, clip, role, held) in work {
         let originals = [super::owned::resolve(&f.dir.join(clip)), super::owned::resolve(&f.real_dir.join(clip))];
-        let names = [super::owned::resolve(&f.dir.join(&found.name)), super::owned::resolve(&f.real_dir.join(&found.name))];
+        let label = quarantined_name(&found.name);
+        let mut names = vec![super::owned::resolve(&f.dir.join(&found.name)), super::owned::resolve(&f.real_dir.join(&found.name))];
+        if let Some(l) = label {
+            names.extend([super::owned::resolve(&f.dir.join(l)), super::owned::resolve(&f.real_dir.join(l))]);
+        }
         let outcome = match owners.why(&originals, &names) {
             Some(why) => Outcome::Kept(why),
             None => {
-                let r = match role {
-                    Role::Backup => act(t, &dir, f.real_dir, clip, &found.name),
-                    Role::Copy(codec) => unfinished_copy(&dir, clip, &found.name, codec),
+                let r = match (label, role) {
+                    (Some(l), _) => quarantined(t, &dir, f.real_dir, clip, l, &found.name, role),
+                    (None, Role::Backup) => act(t, &dir, f.real_dir, clip, &found.name),
+                    (None, Role::Copy(codec)) => unfinished_copy(&dir, clip, &found.name, codec),
                 };
                 r.unwrap_or_else(|e| Outcome::Kept(format!("{} ({})", e, super::owned::errno_code(&e))))
             }
@@ -440,10 +563,20 @@ pub fn tidy_folder(t: &Tidy, f: &Folder) -> Vec<(String, Outcome)> {
     out
 }
 
-/// Remove a name through the private quarantine name, only while it and `keep` (when
-/// given) are still the files checked; put back on any mismatch.
+/// Remove a name through the tidy's quarantine name for it (a name that is one already is
+/// removed as it is), only while it and `keep` (when given) are still the files checked;
+/// put back on any mismatch.
 fn remove_checked(dir: &OwnedFd, name: &str, st: &St, keep: Option<(&str, &St)>) -> io::Result<Option<String>> {
-    let q = format!(".sentry-owned-remove-{}", random_hex(8));
+    if quarantined_name(name).is_some() {
+        let now = stat_at(dir, name).ok();
+        let kept_ok = keep.is_none_or(|(k, want)| stat_at(dir, k).ok().is_some_and(|n| n.regular && n.same(want)));
+        if !now.is_some_and(|n| n.regular && n.same(st) && n.nlink == st.nlink) || !kept_ok {
+            return Ok(Some("it changed while it was tidied".into()));
+        }
+        unlink_at(dir, name)?;
+        return Ok(None);
+    }
+    let q = format!("{QUARANTINE}{}-{name}", random_hex(8));
     rename_noreplace_at(dir, name, &q)?;
     hook("quarantined", name, &q)?;
     let qs = stat_at(dir, &q).ok();
@@ -500,6 +633,45 @@ fn kept(why: impl Into<String>) -> io::Result<Outcome> {
     Ok(Outcome::Kept(why.into()))
 }
 
+/// `q`: the tidy's quarantine name for the leftover name `label` (a tidy stopped between
+/// its rename and its unlink, or between the link and the unlink of a rename without
+/// renameat2). When `label` is still there as the same file, `q` is only one more name of
+/// it and goes (label is then settled on its own); when `label` is gone, `q` is settled
+/// exactly as `label` would be.
+fn quarantined(t: &Tidy, dir: &OwnedFd, real_dir: &Path, clip: &str, label: &str, q: &str, role: Role) -> io::Result<Outcome> {
+    let qs = match stat_at(dir, q) {
+        Ok(s) => s,
+        Err(e) if missing(&e) => return kept("no longer there"),
+        Err(e) => return Err(e),
+    };
+    if !qs.regular {
+        return kept(if qs.link { "a symbolic link (never followed)" } else { "not a regular file" });
+    }
+    let ls = match stat_at(dir, label) {
+        Ok(s) => Some(s),
+        Err(e) if missing(&e) => None,
+        Err(e) => return Err(e),
+    };
+    match ls {
+        Some(l) if l.regular && l.same(&qs) => {
+            let x_too = matches!(stat_at(dir, clip), Ok(x) if x.regular && x.same(&qs));
+            let here = 2 + u64::from(x_too);
+            if qs.nlink != here {
+                return kept(format!("the same file as \"{label}\" but with {} names (this folder has {here} of them)", qs.nlink));
+            }
+            Ok(match remove_checked(dir, q, &qs, Some((label, &l)))? {
+                None => Outcome::RemovedExtra(label.to_string()),
+                Some(why) => Outcome::Kept(why),
+            })
+        }
+        Some(_) => kept(format!("\"{label}\" is there again and is another file")),
+        None => match role {
+            Role::Backup => act(t, dir, real_dir, clip, q),
+            Role::Copy(codec) => unfinished_copy(dir, clip, q, codec),
+        },
+    }
+}
+
 fn act(t: &Tidy, dir: &OwnedFd, real_dir: &Path, clip: &str, backup: &str) -> io::Result<Outcome> {
     let b = match stat_at(dir, backup) {
         Ok(b) => b,
@@ -526,7 +698,7 @@ fn act(t: &Tidy, dir: &OwnedFd, real_dir: &Path, clip: &str, backup: &str) -> io
 /// case a: BACKUP-X is a second name of X.
 fn second_name(dir: &OwnedFd, clip: &str, backup: &str, b: &St) -> io::Result<Outcome> {
     if b.nlink != 2 {
-        return kept(format!("the same file as \"{clip}\" but with {} names (only 2 is the Encoder's)", b.nlink));
+        return kept(format!("the same file as \"{clip}\" but with {} names (an Encoder backup has exactly 2)", b.nlink));
     }
     Ok(match remove_checked(dir, backup, b, Some((clip, b)))? {
         None => Outcome::Removed,
@@ -583,11 +755,15 @@ fn beside_copy(t: &Tidy, dir: &OwnedFd, real_dir: &Path, clip: &str, backup: &st
 
 /// The log line for one name (rel_dir: the folder below the source, "" for the source itself).
 pub fn log_line(rel_dir: &str, name: &str, o: &Outcome) -> String {
-    let clip = name.strip_prefix(PREFIX).unwrap_or(name);
+    let clip = match clip_of_name(quarantined_name(name).unwrap_or(name), Kind::File) {
+        Ok((c, _)) => c,
+        Err(_) => name.strip_prefix(PREFIX).unwrap_or(name),
+    };
     let at = if rel_dir.is_empty() { String::new() } else { format!(" in \"{rel_dir}/\"") };
     match o {
         Outcome::Removed => format!("[CONVERTER] BACKUP cleanup: removed the second name \"{name}\"{at} (the same file as \"{clip}\", 2 names; the clip is kept)"),
-        Outcome::RemovedCopy(c) => format!("[CONVERTER] BACKUP cleanup: removed the unfinished copy \"{name}\"{at} ({}; the clip \"{}\" is kept)", codec_word(c), name.splitn(3, '-').nth(2).unwrap_or(name)),
+        Outcome::RemovedCopy(c) => format!("[CONVERTER] BACKUP cleanup: removed the unfinished copy \"{name}\"{at} ({}; the clip \"{clip}\" is kept)", codec_word(c)),
+        Outcome::RemovedExtra(l) => format!("[CONVERTER] BACKUP cleanup: removed \"{name}\"{at}, a name an earlier tidy left (one more name of \"{l}\")"),
         Outcome::Restored => format!("[CONVERTER] BACKUP cleanup: put the original back: \"{name}\" -> \"{clip}\"{at} (\"{clip}\" was missing)"),
         Outcome::Binned { item, codec: Some(c) } => format!("[CONVERTER] BACKUP cleanup: moved \"{name}\"{at} to the Recycle Bin as the original of \"{clip}\" (item {item}; \"{clip}\" is the converted {} copy)", codec_word(c)),
         Outcome::Binned { item, codec: None } => format!("[CONVERTER] BACKUP cleanup: moved \"{name}\"{at} to the Recycle Bin as the original of \"{clip}\" (item {item}; \"{clip}\" itself is in the Recycle Bin)"),

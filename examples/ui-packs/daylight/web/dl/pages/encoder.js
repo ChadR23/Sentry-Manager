@@ -467,9 +467,9 @@ async function overview(ctx) {
     if (!slot) return;
     const focused = slot.contains(document.activeElement) ? document.activeElement : null;
     const key = focused && (focused.dataset.cmd ? `[data-cmd="${focused.dataset.cmd}"]` : focused.dataset.step ? `[data-step="${focused.dataset.step}"][data-d="${focused.dataset.d}"]` : focused.dataset.lane ? `[data-lane="${CSS.escape(focused.dataset.lane)}"][data-d="${focused.dataset.d}"]` : focused.dataset.nodeGroup ? `[data-node-group="${CSS.escape(focused.dataset.nodeGroup)}"]` : null);
-    const openDetails = slot.querySelector('details')?.open;
+    const open = openDetails(slot);
     slot.innerHTML = jobCard();
-    if (openDetails) slot.querySelector('details').open = true;
+    reopenDetails(slot, open);
     wireJob();
     if (key) slot.querySelector(key)?.focus({ preventScroll: true });
   }
@@ -490,12 +490,17 @@ async function overview(ctx) {
     await readPower();
     // the times (working for, time left) move on between updates
     const slot = view.querySelector('#job-slot');
-    if (slot && snap && ACTIVE.has(snap.state) && !slot.contains(document.activeElement)) liveDraw(slot, () => { const o = slot.querySelector('details')?.open; slot.innerHTML = jobCard(); if (o) slot.querySelector('details').open = true; wireJob(); }, 'dl:job-slot');
+    if (slot && snap && ACTIVE.has(snap.state) && !slot.contains(document.activeElement)) liveDraw(slot, () => { const o = openDetails(slot); slot.innerHTML = jobCard(); reopenDetails(slot, o); wireJob(); }, 'dl:job-slot');
     if (auto && auto.settings?.enabled) { const a = await invoke('getAuto').catch(() => null); if (a && JSON.stringify(a.status) !== JSON.stringify(auto.status)) { auto = a; const card = view.querySelector('#auto'); if (card && !card.contains(document.activeElement)) liveDraw(view.firstElementChild || view, () => ctx.alive() && draw(), 'dl:encoder'); } }
   });
   ctx.on('vehicle', draw);
   ctx.on('vehicles', () => { if (!view.contains(document.activeElement)) liveDraw(view.firstElementChild || view, () => ctx.alive() && draw(), 'dl:encoder'); });
 }
+
+// The job card's open details by their headings (More details, the kept leftover files),
+// so a redraw keeps each one as it was
+const openDetails = (el) => [...el.querySelectorAll('details')].filter((d) => d.open).map((d) => d.querySelector('summary')?.textContent ?? '');
+const reopenDetails = (el, open) => el.querySelectorAll('details').forEach((d) => { if (open.includes(d.querySelector('summary')?.textContent ?? '')) d.open = true; });
 
 // The picked vehicle's saved settings (Encoding per vehicle) in one line;
 // "Load these" makes them the guided flow's choices and opens it.

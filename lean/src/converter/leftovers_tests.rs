@@ -326,8 +326,12 @@ fn job(store: &JobStore, root: &Path, state: &str, items: Vec<Value>, top: Vec<(
 
 fn owners_of(store: &JobStore, calling: Option<&str>) -> Result<Owners, String> {
     let mut o = Owners::default();
-    for m in store.list_strict()? {
+    let s = store.list_strict()?;
+    for m in s.manifests {
         o.add_manifest(&m, Some(m.id()) == calling);
+    }
+    for d in s.damaged {
+        o.add_damaged(&d.id, &d.parts)?;
     }
     Ok(o)
 }
@@ -346,7 +350,7 @@ fn a_name_a_job_record_owns_or_could_recover_is_kept() {
     // a job that was replacing this clip when it stopped (needs recovery): its record names the backup
     let stopped = job(&store, &e.root, "paused", vec![clip_item(1, &x, &rel, "processing")], vec![("activeItemId", json!("item-000001")), ("replacementPhase", json!("original-backed-up")), ("recovery", json!({ "fromState": "replacing", "phase": "original-backed-up", "action": "manual-intervention" })), ("ownedPaths", json!({ "replacementBackup": backup.to_string_lossy() }))]);
     let o = owners_of(&store, None).unwrap();
-    let r = run_with(&e, None, &|| Ok(Owners { paths: o.paths.clone(), sources: o.sources.clone(), roots: o.roots.clone(), mine: o.mine.clone() }));
+    let r = run_with(&e, None, &|| Ok(Owners { paths: o.paths.clone(), sources: o.sources.clone(), roots: o.roots.clone(), mine: o.mine.clone(), ..Default::default() }));
     assert_eq!(kept_why(&r, &format!("BACKUP-{A}")), format!("job {stopped} still names it in its record"));
     // the same without the recorded name: recovery would derive it
     let mut o2 = owners_of(&store, None).unwrap();
@@ -413,4 +417,154 @@ fn an_unfinished_copy_beside_its_clip_goes() {
     want.sort();
     assert_eq!(names(&e.dir), want);
     assert_eq!(log_line("", &format!("TEMP-H265-{A}"), &Outcome::RemovedCopy("h265".into())), format!("[CONVERTER] BACKUP cleanup: removed the unfinished copy \"TEMP-H265-{A}\" (H.265; the clip \"{A}\" is kept)"));
+}
+
+#[test]
+fn a_record_that_names_the_backup_through_a_link_to_its_folder_owns_it() {
+    let e = env();
+    let jobs = e.root.parent().unwrap().join("jobs");
+    fs::create_dir_all(&jobs).unwrap();
+    let store = JobStore::new(&jobs).unwrap();
+    let alias = e.root.parent().unwrap().join("alias");
+    std::os::unix::fs::symlink(&e.root, &alias).unwrap();
+    let x = e.dir.join(A);
+    fs::write(&x, h264()).unwrap();
+    let backup = e.dir.join(format!("BACKUP-{A}"));
+    fs::hard_link(&x, &backup).unwrap();
+    let via = alias.join("SentryClips/2026-08-30_20-53-04");
+    let rel = format!("SentryClips/2026-08-30_20-53-04/{A}");
+    // a paused job that needs recovery, its record written through the link (a finished
+    // job's folder elsewhere, so only its recorded names keep this one)
+    let stopped = job(&store, &e.root.join("RecentClips"), "paused", vec![clip_item(1, &via.join(A), &rel, "processing")], vec![("activeItemId", json!("item-000001")), ("replacementPhase", json!("original-backed-up")), ("recovery", json!({ "fromState": "replacing", "phase": "original-backed-up", "action": "manual-intervention" })), ("ownedPaths", json!({ "replacementBackup": via.join(format!("BACKUP-{A}")).to_string_lossy() }))]);
+    let r = run_with(&e, None, &|| owners_of(&store, None));
+    assert_eq!(kept_why(&r, &format!("BACKUP-{A}")), format!("job {stopped} still names it in its record"));
+    // the clip alone, and the job's source folder alone, through the link
+    let mut o = owners_of(&store, None).unwrap();
+    o.paths.clear();
+    assert_eq!(o.why(&[super::super::owned::resolve(&x)], &[]), Some(format!("job {stopped} can still recover this clip from it")));
+    assert_eq!(fs::metadata(&x).unwrap().nlink(), 2, "untouched");
+    assert!(store.discard(&stopped).unwrap());
+    let other = job(&store, &alias, "paused", vec![], vec![]);
+    let r = run_with(&e, None, &|| owners_of(&store, None));
+    assert_eq!(kept_why(&r, &format!("BACKUP-{A}")), format!("job {other} still has files to settle in this folder"));
+    assert_eq!(fs::metadata(&x).unwrap().nlink(), 2, "untouched");
+}
+
+#[test]
+fn a_damaged_record_keeps_its_source_folder() {
+    let e = env();
+    let jobs = e.root.parent().unwrap().join("jobs");
+    fs::create_dir_all(&jobs).unwrap();
+    let store = JobStore::new(&jobs).unwrap();
+    let x = e.dir.join(A);
+    fs::write(&x, h264()).unwrap();
+    fs::hard_link(&x, e.dir.join(format!("BACKUP-{A}"))).unwrap();
+    let id = job(&store, &e.root, "completed", vec![], vec![]);
+    // a journal that does not replay: the job is listed nowhere, its job file is still there
+    fs::write(jobs.join(&id).join("job.journal"), b"{\"add\":\"not a list\"}\n").unwrap();
+    assert!(store.list().unwrap().is_empty());
+    let r = run_with(&e, None, &|| owners_of(&store, None));
+    assert_eq!(kept_why(&r, &format!("BACKUP-{A}")), format!("job {id} still has files to settle in this folder"));
+    // its job file unreadable as well: nothing is touched anywhere
+    fs::write(jobs.join(&id).join("job.json"), b"{not json").unwrap();
+    let r = run_with(&e, None, &|| owners_of(&store, None));
+    assert!(kept_why(&r, &format!("BACKUP-{A}")).contains("is damaged"), "{r:?}");
+    assert_eq!(fs::metadata(&x).unwrap().nlink(), 2, "untouched");
+    // once the job folder is gone, the name is tidied
+    fs::remove_dir_all(jobs.join(&id)).unwrap();
+    assert_eq!(outcome(&run_with(&e, None, &|| owners_of(&store, None)), &format!("BACKUP-{A}")), &Outcome::Removed);
+}
+
+fn quarantine_names(dir: &Path) -> Vec<String> {
+    names(dir).into_iter().filter(|n| n.starts_with(QUARANTINE)).collect()
+}
+
+#[test]
+fn a_tidy_stopped_after_its_quarantine_rename_is_settled_next_time() {
+    let e = env();
+    let clip = "2026-08-30_20-53-04-stop_after_rename.mp4";
+    let copy_clip = "2026-08-30_20-53-04-stop_copy.mp4";
+    let x = e.dir.join(clip);
+    fs::write(&x, b"original").unwrap();
+    fs::hard_link(&x, e.dir.join(format!("BACKUP-{clip}"))).unwrap();
+    fs::write(e.dir.join(copy_clip), h264()).unwrap();
+    fs::write(e.dir.join(format!("TEMP-H265-{copy_clip}")), h265()).unwrap();
+    let (c1, c2) = (format!("BACKUP-{clip}"), format!("TEMP-H265-{copy_clip}"));
+    *TEST_HOOK.write().unwrap() = Some(Arc::new(move |ev: &str, from: &str, _to: &str| {
+        if ev == "quarantined" && (from == c1 || from == c2) {
+            // the server stops here
+            return Err(io::Error::from_raw_os_error(libc::EINTR));
+        }
+        Ok(())
+    }));
+    let r = run(&e, None);
+    *TEST_HOOK.write().unwrap() = None;
+    assert!(matches!(outcome(&r, &format!("BACKUP-{clip}")), Outcome::Kept(_)), "{r:?}");
+    let q = quarantine_names(&e.dir);
+    assert_eq!(q.len(), 2, "{:?}", names(&e.dir));
+    assert!(q.iter().any(|n| n.ends_with(&format!("-BACKUP-{clip}"))) && q.iter().any(|n| n.ends_with(&format!("-TEMP-H265-{copy_clip}"))), "{q:?}");
+    assert_eq!(fs::metadata(&x).unwrap().nlink(), 2, "a hidden second name");
+    // the next tidy settles both as the names they stand for
+    let r = run(&e, None);
+    let qb = q.iter().find(|n| n.contains("-BACKUP-")).unwrap();
+    let qc = q.iter().find(|n| n.contains("-TEMP-H265-")).unwrap();
+    assert_eq!(outcome(&r, qb), &Outcome::Removed);
+    assert_eq!(outcome(&r, qc), &Outcome::RemovedCopy("h265".into()));
+    assert!(quarantine_names(&e.dir).is_empty());
+    assert_eq!(fs::metadata(&x).unwrap().nlink(), 1);
+    assert_eq!(fs::read(&x).unwrap(), b"original");
+    assert_eq!(fs::read(e.dir.join(copy_clip)).unwrap(), h264());
+    assert_eq!(log_line("", qb, &Outcome::Removed), format!("[CONVERTER] BACKUP cleanup: removed the second name \"{qb}\" (the same file as \"{clip}\", 2 names; the clip is kept)"));
+}
+
+#[test]
+fn a_rename_stopped_between_its_link_and_unlink_is_settled() {
+    let e = env();
+    // (without renameat2, a stop between link and unlink leaves three names of one file)
+    let x = e.dir.join(A);
+    fs::write(&x, h264()).unwrap();
+    let q = format!("{QUARANTINE}0123456789abcdef-BACKUP-{A}");
+    fs::hard_link(&x, e.dir.join(format!("BACKUP-{A}"))).unwrap();
+    fs::hard_link(&x, e.dir.join(&q)).unwrap();
+    // and a TEMP copy with its quarantine name beside it
+    fs::write(e.dir.join(B), h264()).unwrap();
+    let qc = format!("{QUARANTINE}fedcba9876543210-TEMP-H265-{B}");
+    fs::write(e.dir.join(format!("TEMP-H265-{B}")), h265()).unwrap();
+    fs::hard_link(e.dir.join(format!("TEMP-H265-{B}")), e.dir.join(&qc)).unwrap();
+    // a quarantine name of a file with a name elsewhere too is kept
+    let qs = format!("{QUARANTINE}00000000000000aa-BACKUP-{C}");
+    fs::write(e.dir.join(C), b"c").unwrap();
+    fs::hard_link(e.dir.join(C), e.dir.join(format!("BACKUP-{C}"))).unwrap();
+    fs::hard_link(e.dir.join(C), e.dir.join(&qs)).unwrap();
+    fs::hard_link(e.dir.join(C), e.root.join("elsewhere")).unwrap();
+    let r = run(&e, None);
+    assert_eq!(outcome(&r, &q), &Outcome::RemovedExtra(format!("BACKUP-{A}")));
+    assert_eq!(outcome(&r, &format!("BACKUP-{A}")), &Outcome::Removed);
+    assert_eq!(outcome(&r, &qc), &Outcome::RemovedExtra(format!("TEMP-H265-{B}")));
+    assert_eq!(outcome(&r, &format!("TEMP-H265-{B}")), &Outcome::RemovedCopy("h265".into()));
+    assert!(kept_why(&r, &qs).contains("with 4 names (this folder has 3 of them)"), "{r:?}");
+    assert_eq!(fs::metadata(&x).unwrap().nlink(), 1);
+    assert_eq!(fs::read(&x).unwrap(), h264());
+    assert_eq!(fs::metadata(e.dir.join(C)).unwrap().nlink(), 4, "untouched");
+    let mut want = vec![A.to_string(), B.to_string(), C.to_string(), format!("BACKUP-{C}"), qs.clone()];
+    want.sort();
+    assert_eq!(names(&e.dir), want);
+    assert!(log_line("", &q, &Outcome::RemovedExtra(format!("BACKUP-{A}"))).contains("a name an earlier tidy left (one more name of \"BACKUP-"));
+}
+
+#[test]
+fn a_quarantined_original_whose_clip_is_missing_is_put_back() {
+    let e = env();
+    let q = format!("{QUARANTINE}0123456789abcdef-BACKUP-{A}");
+    fs::write(e.dir.join(&q), h264()).unwrap();
+    // not the tidy's names: other hex, no name after it, a quarantine of a quarantine
+    for n in [format!("{QUARANTINE}0123456789ABCDEF-BACKUP-{B}"), format!("{QUARANTINE}0123456789abcdef-"), format!("{QUARANTINE}0123456789abcdef-{QUARANTINE}0123456789abcdef-BACKUP-{B}")] {
+        fs::write(e.dir.join(n), b"x").unwrap();
+    }
+    let r = run(&e, None);
+    assert_eq!(outcome(&r, &q), &Outcome::Restored);
+    assert_eq!(fs::read(e.dir.join(A)).unwrap(), h264());
+    assert!(kept_why(&r, &format!("{QUARANTINE}0123456789abcdef-{QUARANTINE}0123456789abcdef-BACKUP-{B}")).contains("a leftover name of a leftover name"), "{r:?}");
+    assert_eq!(r.len(), 2, "{r:?}");
+    assert!(!is_leftover_name(&format!("{QUARANTINE}0123456789ABCDEF-BACKUP-{B}")) && !is_leftover_name(&format!("{QUARANTINE}0123456789abcdef-")));
 }

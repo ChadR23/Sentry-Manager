@@ -168,7 +168,7 @@ fn leftovers(base: &Path) -> Vec<String> {
     let mut found = vec![];
     for e in fs::read_dir(base.join("footage").join(EVENT)).unwrap() {
         let n = e.unwrap().file_name().to_string_lossy().to_string();
-        if n.starts_with("TEMP-") || n.starts_with("BACKUP-") || n.starts_with(".sentry-owned-remove-") || n.ends_with(".partial") {
+        if n.starts_with("TEMP-") || n.starts_with("BACKUP-") || n.starts_with(".sentry-owned-remove-") || n.starts_with(".sentry-tidy-") || n.ends_with(".partial") {
             found.push(n);
         }
     }

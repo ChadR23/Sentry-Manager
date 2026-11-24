@@ -643,10 +643,13 @@ impl Service {
             }
             o.add_manifest(&m, m.id() == me);
         }
-        for m in &stored {
+        for m in &stored.manifests {
             if !seen.contains(m.id()) {
                 o.add_manifest(m, m.id() == me);
             }
+        }
+        for d in &stored.damaged {
+            o.add_damaged(&d.id, &d.parts)?;
         }
         Ok(o)
     }
