@@ -122,6 +122,32 @@ pub fn rename_inside(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Rename within one share, following no symlink, never replacing what is at `to`
+/// (renameat2 RENAME_NOREPLACE; link + unlink where the file system has no such rename).
+pub fn rename_inside_noreplace(root: &Path, from: &Path, to: &Path) -> io::Result<()> {
+    let (fp, fname) = parent_and_name(from)?;
+    let (tp, tname) = parent_and_name(to)?;
+    let fd = open_dir_inside(root, &fp, false)?;
+    let td = open_dir_inside(root, &tp, false)?;
+    let (a, b) = (cstr(&fname)?, cstr(&tname)?);
+    // SAFETY: two open folder fds and two NUL-terminated names
+    let r = unsafe { libc::syscall(libc::SYS_renameat2, fd.as_raw_fd(), a.as_ptr(), td.as_raw_fd(), b.as_ptr(), libc::RENAME_NOREPLACE) };
+    if r == 0 {
+        return Ok(());
+    }
+    let e = errno();
+    if !matches!(e.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP)) {
+        return Err(e);
+    }
+    if unsafe { libc::linkat(fd.as_raw_fd(), a.as_ptr(), td.as_raw_fd(), b.as_ptr(), 0) } != 0 {
+        return Err(errno());
+    }
+    if unsafe { libc::unlinkat(fd.as_raw_fd(), a.as_ptr(), 0) } != 0 {
+        return Err(errno());
+    }
+    Ok(())
+}
+
 /// Unlink a file within a share, following no symlink.
 pub fn unlink_inside(root: &Path, target: &Path) -> io::Result<()> {
     let (p, name) = parent_and_name(target)?;
@@ -236,6 +262,17 @@ mod tests {
         rmrf_inside(&root, &root.join("link")).unwrap();
         assert!(outside.join("keep").exists());
         assert!(safe_join(&root, "../x").is_err());
+        // a no-replace rename never replaces, and refuses a link out as well
+        std::fs::write(root.join("a/one"), b"1").unwrap();
+        std::fs::write(root.join("a/two"), b"2").unwrap();
+        let e = rename_inside_noreplace(&root, &root.join("a/one"), &root.join("a/two")).unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(libc::EEXIST));
+        assert_eq!(std::fs::read(root.join("a/two")).unwrap(), b"2");
+        std::os::unix::fs::symlink(&outside, root.join("link2")).unwrap();
+        assert!(is_escape(&rename_inside_noreplace(&root, &root.join("a/one"), &root.join("link2/one")).unwrap_err()));
+        assert!(!outside.join("one").exists());
+        rename_inside_noreplace(&root, &root.join("a/one"), &root.join("a/three")).unwrap();
+        assert_eq!(std::fs::read(root.join("a/three")).unwrap(), b"1");
         assert_eq!(safe_join(&root, "a/./b").unwrap(), root.join("a/b"));
     }
 }

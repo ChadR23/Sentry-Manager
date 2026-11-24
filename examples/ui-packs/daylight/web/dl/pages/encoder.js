@@ -4,6 +4,7 @@
 
 import '/web/vehicleEncoding.js';
 import { clipFailureWhy } from '/web/clipFailure.js';
+import { backupCleanupHtml } from '/web/backupCleanup.js';
 import { api, esc, enc, icon, bytes, plural, pct, duration, meter, chip, emptyState, details, kv, confirmDialog, modal, toast, fail, busy, invoke, store, ago, fin, liveDraw, hourOpts, clockPref } from '../core.js';
 import { state, vehicle, setVehicle, vehiclePicker, vehicleById } from '../state.js';
 import { go } from '../app.js';
@@ -178,6 +179,7 @@ async function overview(ctx) {
       </div>
       ${snap.state === 'paused_network' ? `<div class="note note-warn">${icon('network')}<span>The footage share dropped off the network. Converting carries on by itself once it’s back.</span></div>` : ''}
       ${snap.cleanupPendingCount ? `<div class="note note-warn">${icon('info')}<span>${plural(snap.cleanupPendingCount, 'file')} still need a cleanup step. They are safe; the space comes back once it’s done.</span></div>` : ''}
+      ${backupCleanupHtml(snap.backupCleanup, esc, 'note note-info backup-cleanup')}
       ${active ? liveParallel(snap) : ''}
       <div class="row">
         ${active ? (paused ? `<button class="btn btn-primary" type="button" data-cmd="resume">${icon('play')} Resume</button>` : `<button class="btn btn-primary" type="button" data-cmd="pause">${icon('pause')} Pause</button>`)

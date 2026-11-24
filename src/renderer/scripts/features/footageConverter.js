@@ -284,6 +284,62 @@ function refusalWhy(failure, message = (_key, fallback) => fallback) {
     return { plain, detail: hit?.[1] === 'refusalNotKnown' ? '' : detail };
 }
 
+// What a replace job did with leftover files of an earlier replace
+// (snapshot.backupCleanup; web/backupCleanup.js has the same words for the
+// other interfaces, tools/backupCleanup.test.js keeps them the same).
+function backupCleanupWords(c, message = (_key, fallback, params) => String(fallback).replace(/\{(\w+)\}/g, (match, name) => params?.[name] ?? match)) {
+    if (!c || typeof c !== 'object') return null;
+    const n = (k) => (Number.isFinite(c[k]) && c[k] > 0 ? c[k] : 0);
+    const parts = [];
+    if (n('removed')) parts.push(message('backupCleanupRemoved', '{count} tidied', { count: n('removed') }));
+    if (n('restored')) parts.push(n('restored') === 1 ? message('backupCleanupRestoredOne', '1 original put back') : message('backupCleanupRestored', '{count} originals put back', { count: n('restored') }));
+    if (n('binned')) parts.push(message('backupCleanupBinned', '{count} moved to the Recycle Bin', { count: n('binned') }));
+    if (n('kept')) parts.push(message('backupCleanupKept', '{count} kept', { count: n('kept') }));
+    if (!parts.length) return null;
+    const kept = (Array.isArray(c.keptWhy) ? c.keptWhy : [])
+        .filter((k) => k && typeof k.path === 'string' && typeof k.why === 'string')
+        .map((k) => ({ path: k.path, why: k.why }));
+    return {
+        summary: message('backupCleanup', 'Leftover backups from an earlier replace: {parts}.', { parts: parts.join(', ') }),
+        kept,
+        more: Math.max(0, n('kept') - kept.length)
+    };
+}
+
+function renderBackupCleanup(container, c, message) {
+    const words = backupCleanupWords(c, message);
+    setHidden(container, !words);
+    const documentApi = container?.ownerDocument;
+    if (!words || !documentApi?.createElement) return;
+    const text = JSON.stringify(words);
+    if (container.dataset?.rendered === text) return;
+    container.replaceChildren?.();
+    const summary = documentApi.createElement('span');
+    summary.textContent = words.summary;
+    container.append(summary);
+    if (words.kept.length) {
+        const details = documentApi.createElement('details');
+        const heading = documentApi.createElement('summary');
+        heading.textContent = message('backupCleanupKeptHeading', 'Kept as they are, and why');
+        const list = documentApi.createElement('ul');
+        for (const k of words.kept) {
+            const li = documentApi.createElement('li');
+            const code = documentApi.createElement('code');
+            code.textContent = k.path;
+            li.append(code, ` ${k.why}`);
+            list.append(li);
+        }
+        if (words.more) {
+            const li = documentApi.createElement('li');
+            li.textContent = message('backupCleanupMore', 'and {count} more (see the server log)', { count: words.more });
+            list.append(li);
+        }
+        details.append(heading, list);
+        container.append(details);
+    }
+    if (container.dataset) container.dataset.rendered = text;
+}
+
 function createRow(container, primary, secondary = '', why = null) {
     const documentApi = container?.ownerDocument;
     if (!container || !documentApi?.createElement) return null;
@@ -437,6 +493,7 @@ function collectElements(root) {
         timingRows: byId('converterTimingRows'),
         reconnectBanner: byId('converterReconnectBanner'),
         cleanupBanner: byId('converterCleanupBanner'),
+        backupCleanup: byId('converterBackupCleanup'),
         scanNotice: byId('converterScanNotice'),
         errorRows: byId('converterErrorRows'),
         offTargetRows: byId('converterOffTargetRows'),
@@ -1408,6 +1465,7 @@ function createFootageConverterController(options = {}) {
                 file: message(cleanupPendingCount === 1 ? 'cleanupFileSingular' : 'cleanupFilePlural', cleanupPendingCount === 1 ? 'file' : 'files')
             }));
         }
+        renderBackupCleanup(elements.backupCleanup, snapshot?.backupCleanup, message);
         renderRows(elements.errorRows, failedItems.map((item) => [item.relativePath || item.id, item.failure?.code || 'operation-failed', refusalWhy(item.failure, message)]));
         setHidden(elements.errorRows, failedItems.length === 0);
         // clips kept off their size target (the option under Compression profile)
@@ -2462,6 +2520,7 @@ function initFootageConverter(options = {}) {
 }
 
 export {
+    backupCleanupWords,
     createFootageConverterController,
     createSidebarPanelSwitcher,
     formatBytes,

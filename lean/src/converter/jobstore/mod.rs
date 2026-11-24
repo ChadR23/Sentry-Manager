@@ -919,6 +919,30 @@ impl JobStore {
         Ok(out)
     }
 
+    /// list(), refusing instead of skipping: every job folder's record must be read (one
+    /// that cannot be, or that has a journal or a half-written record but no job file, is
+    /// an error naming it). A corrupt record is set aside as list() does and is no job.
+    /// For the leftover-backup tidy, which touches a file only when no job can own it.
+    pub fn list_strict(&self) -> Result<Vec<Manifest>, String> {
+        let mut out = Vec::new();
+        let names = self.job_folders().map_err(|e| format!("the job folders could not be listed ({})", e.code))?;
+        for name in names {
+            match self.exclusive(&name, || self.read_manifest(&name)) {
+                Ok(Some(m)) => out.push(m),
+                Ok(None) => {
+                    let Ok(paths) = self.job_paths(&name) else { return Err(format!("job {name} could not be read")) };
+                    let left = [&paths.journal, &paths.temporary].into_iter().find(|p| fs::symlink_metadata(p).is_ok());
+                    if let Some(p) = left {
+                        return Err(format!("job {name} has {} but no readable job file", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+                    }
+                }
+                Err(e) if e.code == "CORRUPT_MANIFEST" => {}
+                Err(e) => return Err(format!("job {name} could not be read ({})", e.code)),
+            }
+        }
+        Ok(out)
+    }
+
     fn stamp_of(&self, id: &str) -> R<String> {
         let paths = self.job_paths(id)?;
         let part = |p: &Path| match fs::metadata(p) {

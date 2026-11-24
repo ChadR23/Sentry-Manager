@@ -174,6 +174,63 @@ fn with_failure_detail(job: &str, v: &Value) -> Option<Value> {
     Some(c)
 }
 
+// ---- leftover BACKUP- names ---------------------------------------------------------
+
+/// What a replace job's discovery did with leftover BACKUP- names (leftovers.rs), by job
+/// id. In memory only, as FAILURE_DETAILS: the snapshot shows it as `backupCleanup`; the
+/// job file and its journal keep their format.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BackupCleanup {
+    pub removed: u64,
+    pub restored: u64,
+    pub binned: u64,
+    pub kept: u64,
+    pub kept_why: Vec<(String, String)>,
+}
+static BACKUP_CLEANUP: Mutex<Option<HashMap<String, BackupCleanup>>> = Mutex::new(None);
+const MAX_BACKUP_CLEANUP_JOBS: usize = 256;
+pub const MAX_KEPT_WHY: usize = 20;
+
+/// Count one name's outcome for the job, with its log line.
+pub fn note_backup_cleanup(job: &str, rel_dir: &str, name: &str, o: &super::leftovers::Outcome) {
+    use super::leftovers::Outcome;
+    log_line(super::leftovers::log_line(rel_dir, name, o));
+    let mut g = BACKUP_CLEANUP.lock().unwrap_or_else(|p| p.into_inner());
+    let map = g.get_or_insert_with(HashMap::new);
+    if map.len() >= MAX_BACKUP_CLEANUP_JOBS && !map.contains_key(job) {
+        if let Some(k) = map.keys().next().cloned() {
+            map.remove(&k);
+        }
+    }
+    let c = map.entry(job.to_string()).or_default();
+    match o {
+        Outcome::Removed | Outcome::RemovedCopy(_) => c.removed += 1,
+        Outcome::Restored => c.restored += 1,
+        Outcome::Binned { .. } => c.binned += 1,
+        Outcome::Kept(why) => {
+            c.kept += 1;
+            if c.kept_why.len() < MAX_KEPT_WHY {
+                let rel = if rel_dir.is_empty() { name.to_string() } else { format!("{rel_dir}/{name}") };
+                c.kept_why.push((rel, why.clone()));
+            }
+        }
+    }
+}
+
+pub fn backup_cleanup(job: &str) -> Option<BackupCleanup> {
+    let g = BACKUP_CLEANUP.lock().unwrap_or_else(|p| p.into_inner());
+    g.as_ref().and_then(|m| m.get(job).cloned())
+}
+
+fn backup_cleanup_json(job: &str) -> Option<Value> {
+    let c = backup_cleanup(job)?;
+    if c == BackupCleanup::default() {
+        return None;
+    }
+    let why: Vec<Value> = c.kept_why.iter().map(|(p, w)| json!({ "path": p, "why": w })).collect();
+    Some(json!({ "removed": c.removed, "restored": c.restored, "binned": c.binned, "kept": c.kept, "keptWhy": why }))
+}
+
 impl std::fmt::Display for Fail {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.code.as_deref().unwrap_or("ERROR"))
@@ -351,6 +408,10 @@ pub fn public_snapshot(m: &Manifest) -> Value {
             Value::Object(c)
         })
         .collect();
+    // (only when this process tidied something for the job: every other snapshot is as before)
+    if let Some(c) = backup_cleanup_json(m.id()) {
+        out.insert("backupCleanup".into(), c);
+    }
     out.insert("items".into(), Value::Array(items));
     Value::Object(out)
 }
@@ -414,6 +475,8 @@ pub struct Options {
     pub compare_picture: Option<Arc<dyn Fn(&str, &str, &Arc<AtomicBool>, Option<f64>) -> Value + Send + Sync>>,
     /// decodeAccel(encoder, zeroCopy, device): GPU decode arguments (None: CPU decode)
     pub decode_accel: Option<Arc<dyn Fn(&str, bool, Option<&super::planner::Device>) -> Option<Vec<String>> + Send + Sync>>,
+    /// the Recycle Bin for an original left beside its converted copy (leftovers.rs)
+    pub originals_bin: Option<Arc<dyn super::leftovers::OriginalsBin>>,
 }
 
 impl Options {
@@ -441,6 +504,7 @@ impl Options {
             decode_accel: None,
             remote_nodes: None,
             compare_picture: None,
+            originals_bin: None,
         }
     }
 }

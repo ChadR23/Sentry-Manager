@@ -143,6 +143,18 @@ fn io_err(e: std::io::Error) -> CError {
     CError::from(e)
 }
 
+/// A folder with BACKUP- names (any case), shown to the replace job's tidy before any of
+/// its entries is yielded: the folder as walked, the same folder below the share's real
+/// root, its path below the source root, and the names. True: it changed (listed again).
+pub struct TidyDir<'a> {
+    pub dir: &'a Path,
+    pub real_root: &'a Path,
+    pub real_dir: PathBuf,
+    pub rel: String,
+    pub found: Vec<super::leftovers::Found>,
+}
+pub type Tidy<'a> = &'a dyn Fn(&TidyDir) -> bool;
+
 struct Walk<'a> {
     included: Vec<&'static str>,
     order: Vec<&'static str>,
@@ -153,6 +165,7 @@ struct Walk<'a> {
     dest_real_inside: bool,
     cancel: Option<&'a AtomicBool>,
     retry: Option<Retry<'a>>,
+    tidy: Option<Tidy<'a>>,
 }
 
 fn vanished(e: &std::io::Error) -> bool {
@@ -179,13 +192,11 @@ impl<'a> Walk<'a> {
             _ => js_cmp(a, b),
         }
     }
-    fn walk(&self, dir: &Path, rel: &[String], group: Option<&'static str>, group_rel: &[String], out: &mut dyn FnMut(Discovered) -> bool) -> CResult<bool> {
-        if self.aborted() {
-            return Err(cancelled());
-        }
+    /// The folder's entries in scan order; None: it vanished (not the source root).
+    fn listed(&self, dir: &Path) -> CResult<Option<Vec<(String, fs::FileType)>>> {
         let entries = match self.list(dir) {
             Ok(e) => e,
-            Err(e) if vanished(&e) && dir != self.source_root => return Ok(true),
+            Err(e) if vanished(&e) && dir != self.source_root => return Ok(None),
             Err(e) => return Err(io_err(e)),
         };
         let mut named: Vec<(String, fs::FileType)> = Vec::new();
@@ -195,6 +206,37 @@ impl<'a> Walk<'a> {
         }
         // (Array.prototype.sort is stable; equal group ranks keep the listing's order)
         named.sort_by(|a, b| self.entry_order(&a.0, &b.0));
+        Ok(Some(named))
+    }
+    fn walk(&self, dir: &Path, rel: &[String], group: Option<&'static str>, group_rel: &[String], out: &mut dyn FnMut(Discovered) -> bool) -> CResult<bool> {
+        if self.aborted() {
+            return Err(cancelled());
+        }
+        let mut named = match self.listed(dir)? {
+            Some(n) => n,
+            None => return Ok(true),
+        };
+        if let Some(tidy) = self.tidy {
+            let found: Vec<super::leftovers::Found> = named
+                .iter()
+                .filter(|(n, _)| super::leftovers::is_leftover_name(n))
+                .map(|(n, t)| super::leftovers::Found {
+                    name: n.clone(),
+                    kind: if t.is_symlink() { super::leftovers::Kind::Link } else if t.is_dir() { super::leftovers::Kind::Dir } else if t.is_file() { super::leftovers::Kind::File } else { super::leftovers::Kind::Other },
+                })
+                .collect();
+            if !found.is_empty() {
+                let real_dir = rel.iter().fold(self.source_real.clone(), |p, n| p.join(n));
+                let changed = tidy(&TidyDir { dir, real_root: &self.source_real, real_dir, rel: rel.join("/"), found });
+                if changed {
+                    // (an original put back at its name is found in this same run)
+                    named = match self.listed(dir)? {
+                        Some(n) => n,
+                        None => return Ok(true),
+                    };
+                }
+            }
+        }
         for (name, t) in named {
             if self.aborted() {
                 return Err(cancelled());
@@ -321,6 +363,11 @@ fn resolve_destination(dest: &str) -> CResult<(PathBuf, PathBuf)> {
 /// scanTeslaFootage(config): calls `out` for each clip in scan order until
 /// it returns false.
 pub fn scan(config: &Value, cancel: Option<&AtomicBool>, retry: Option<Retry>, out: &mut dyn FnMut(Discovered) -> bool) -> CResult<()> {
+    scan_tidy(config, cancel, retry, None, out)
+}
+
+/// scan, with `tidy` shown each folder's BACKUP- names first (replace jobs).
+pub fn scan_tidy(config: &Value, cancel: Option<&AtomicBool>, retry: Option<Retry>, tidy: Option<Tidy>, out: &mut dyn FnMut(Discovered) -> bool) -> CResult<()> {
     let Some(root) = config.get("sourceRoot").and_then(Value::as_str).filter(|s| !s.is_empty()) else { return Err(CError::type_error("sourceRoot is required")) };
     let included: Vec<&'static str> = match config.get("includedGroups") {
         None | Some(Value::Null) => GROUPS.to_vec(),
@@ -355,7 +402,7 @@ pub fn scan(config: &Value, cancel: Option<&AtomicBool>, retry: Option<Retry>, o
     }
     let dest_abs_inside = destination.as_ref().is_some_and(|(a, _)| same_or_descendant(&source_root, a));
     let dest_real_inside = destination.as_ref().is_some_and(|(_, r)| same_or_descendant(&source_real, r));
-    let w = Walk { included, order, source_root: source_root.clone(), source_real, destination, dest_abs_inside, dest_real_inside, cancel, retry };
+    let w = Walk { included, order, source_root: source_root.clone(), source_real, destination, dest_abs_inside, dest_real_inside, cancel, retry, tidy };
     w.walk(&source_root, &[], root_group, &[], out)?;
     Ok(())
 }
@@ -494,6 +541,51 @@ mod tests {
             }
             assert_eq!(Value::Array(compared), theirs["compared"], "config {n}");
         }
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_folders_leftover_names_are_shown_before_its_clips_and_a_change_lists_it_again() {
+        let base = std::env::temp_dir().join(format!("lean-scan-tidy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let root = base.join("TeslaCam");
+        let ev = root.join("SentryClips/2026-10-21_08-00-00");
+        fs::create_dir_all(&ev).unwrap();
+        fs::write(ev.join("2026-10-21_07-59-00-front.mp4"), b"x").unwrap();
+        fs::write(ev.join("BACKUP-2026-10-21_07-59-00-back.mp4"), b"y").unwrap();
+        fs::write(ev.join("TEMP-H265-2026-10-21_07-59-00-front.mp4"), b"z").unwrap();
+        fs::create_dir_all(root.join("RecentClips")).unwrap();
+        fs::write(root.join("RecentClips/2026-10-20_07-44-14-front.mp4"), b"r").unwrap();
+        let seen: std::cell::RefCell<Vec<String>> = Default::default();
+        let tidy = |d: &TidyDir| -> bool {
+            let names: Vec<String> = d.found.iter().map(|f| f.name.clone()).collect();
+            seen.borrow_mut().push(format!("tidy {} {:?} {}", d.rel, names, d.real_dir == fs::canonicalize(d.dir).unwrap()));
+            // an original put back at its name
+            fs::rename(d.dir.join("BACKUP-2026-10-21_07-59-00-back.mp4"), d.dir.join("2026-10-21_07-59-00-back.mp4")).is_ok()
+        };
+        let config = json!({ "sourceRoot": root, "groupOrder": ["SentryClips", "RecentClips", "SavedClips"] });
+        scan_tidy(&config, None, None, Some(&tidy), &mut |d| {
+            seen.borrow_mut().push(d.value["relativePath"].as_str().unwrap().to_string());
+            true
+        })
+        .unwrap();
+        assert_eq!(
+            seen.into_inner(),
+            vec![
+                "tidy SentryClips/2026-10-21_08-00-00 [\"BACKUP-2026-10-21_07-59-00-back.mp4\", \"TEMP-H265-2026-10-21_07-59-00-front.mp4\"] true".to_string(),
+                "SentryClips/2026-10-21_08-00-00/2026-10-21_07-59-00-back.mp4".into(),
+                "SentryClips/2026-10-21_08-00-00/2026-10-21_07-59-00-front.mp4".into(),
+                "RecentClips/2026-10-20_07-44-14-front.mp4".into(),
+            ]
+        );
+        // without a tidy (separate jobs), nothing is shown and the names stay hidden
+        let mut n = 0;
+        scan(&config, None, None, &mut |_| {
+            n += 1;
+            true
+        })
+        .unwrap();
+        assert_eq!(n, 3);
         fs::remove_dir_all(&base).unwrap();
     }
 }

@@ -751,3 +751,11 @@ label.sub-block { display: flex; gap: 8px; align-items: flex-start; }
 /* Sentry USB tab: the Car card (web/sentryUsbInfo.js) in Flux's panels with cyan and green */
 .sentry-sul { --sul-car-bg: var(--panel); --sul-car-tile: oklch(0.24 0.018 275); --sul-car-line: var(--line); --sul-car-radius: var(--r); --sul-car-tile-radius: var(--r); --sul-car-accent: var(--cyan); --sul-car-ok: var(--green); --sul-car-warn: var(--amber); --sul-car-bad: var(--red); --sul-car-body: var(--cyan); --sul-car-glass: var(--cyan-soft); }
 .sentry-sul .sul-car-chip b, .sentry-sul .sul-tire b { font-family: var(--mono); }
+
+/* leftover files of an earlier replace (snapshot.backupCleanup, web/backupCleanup.js) */
+.backup-cleanup { margin: 0 0 12px; padding: 8px 12px; border-left: 2px solid var(--accent, var(--muted)); background: var(--panel-2, rgba(127, 127, 127, 0.08)); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.backup-cleanup details { margin-top: 6px; }
+.backup-cleanup summary { cursor: pointer; }
+.backup-cleanup ul { margin: 6px 0 0; padding-left: 18px; }
+.backup-cleanup li { margin: 3px 0; }
+.backup-cleanup code { font: 11px/1.4 var(--mono); color: var(--muted); word-break: break-all; }

@@ -25,6 +25,7 @@ pub mod h265;
 pub mod host;
 pub mod ipc;
 pub mod jobstore;
+pub mod leftovers;
 pub mod lead_in;
 pub mod mp4_header;
 pub mod mp4w;
