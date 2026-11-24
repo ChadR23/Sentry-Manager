@@ -57,10 +57,27 @@ fn command(program: &str, args: &[String], cancel: &Arc<AtomicBool>) -> Result<P
     check(cancel)?;
     let r = BoundedRunner::host().run(program, args, &RunOptions { cancel: Some(cancel.clone()), ..Default::default() })?;
     check(cancel)?;
-    if r.status != Some(0) || r.error.is_some() || r.timed_out || r.output_limit_exceeded {
+    if r.error.is_some() { return Err("PREVIEW_TOOLS_UNAVAILABLE".into()); }
+    if r.status != Some(0) || r.timed_out || r.output_limit_exceeded {
         return Err(format!("PREVIEW_PROCESS_FAILED: {}", r.error.as_deref().unwrap_or(&r.stderr)));
     }
     Ok(r)
+}
+
+/// Fail before selection can mistake an unavailable decoder for unsuitable footage.
+/// Both tools must start successfully; bounded checks also catch broken installations.
+pub fn check_tools(ffmpeg: &str, ffprobe: &str, cancel: &Arc<AtomicBool>) -> Result<()> {
+    let runner = BoundedRunner { timeout_ms: 10_000, max_output_bytes: 64 * 1024, grace_ms: 200 };
+    for tool in [ffmpeg, ffprobe] {
+        check(cancel)?;
+        let result = runner.run(tool, &words(&["-version"]), &RunOptions { cancel: Some(cancel.clone()), ..Default::default() });
+        check(cancel)?;
+        let r = result.map_err(|_| "PREVIEW_TOOLS_UNAVAILABLE")?;
+        if r.status != Some(0) || r.error.is_some() || r.timed_out || r.output_limit_exceeded || r.aborted {
+            return Err("PREVIEW_TOOLS_UNAVAILABLE".into());
+        }
+    }
+    Ok(())
 }
 
 fn remove(path: &Path) -> Result<()> {
@@ -123,6 +140,7 @@ fn run(clip: &PreviewClip, levels: &[(&str, Value)], work: &Path, cancel: &Arc<A
     let modified = md.modified().map_err(err)?;
     let ffmpeg = std::env::var("FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".into());
     let ffprobe = std::env::var("FFPROBE_PATH").unwrap_or_else(|_| "ffprobe".into());
+    check_tools(&ffmpeg, &ffprobe, cancel)?;
     let tools = RealTools::new(&ffmpeg, &ffprobe, Arc::new(Registry::new(work.clone())));
     let src = source.to_str().ok_or("INVALID_SOURCE_PATH")?;
     let inspected = tools.inspect_video(src, cancel).map_err(err)?;
@@ -255,6 +273,14 @@ mod tests {
         [("std", "balanced"), ("med", "aggressive"), ("high", "smallest")].into_iter()
             .map(|(l, p)| (l, json!({"codec":"h265", "profileId":p, "keepOffTarget":true}))).collect()
     }
+    #[test]
+    fn preview_missing_ffprobe_is_a_tool_error() {
+        let dir = crate::converter::testutil::tempdir().unwrap();
+        let missing = dir.path().join("missing-ffprobe");
+        let result = frames::probe(missing.to_str().unwrap(), &dir.path().join("synthetic.mp4"), false, &Arc::new(AtomicBool::new(false)));
+        assert_eq!(result.err().as_deref(), Some("PREVIEW_TOOLS_UNAVAILABLE"));
+    }
+
     fn probe(path: &Path) -> Value {
         let r = Command::new("ffprobe").args(["-v", "error", "-select_streams", "v:0", "-count_frames",
             "-show_entries", "stream=width,height,nb_read_frames:format=duration", "-of", "json"]).arg(path).output().unwrap();

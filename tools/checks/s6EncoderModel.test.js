@@ -458,3 +458,11 @@ test('planSentence respects group inclusion, date choices, and optional vehicle 
     order: ['RecentClips', 'SavedClips', 'SentryClips'] })),
   'Keeping the last 30 days as recorded, shrinking older footage by about half, Recent clips first, on day 28 of each month at 23:00.');
 });
+
+
+test('preview tool failures point to Health and retain their error code', () => {
+  assert.deepEqual(model.previewFailure('PREVIEW_TOOLS_UNAVAILABLE'), {
+    message: 'The video tools on the server are not working, so no preview can be made. Check Health.',
+    detail: 'PREVIEW_TOOLS_UNAVAILABLE',
+  });
+});

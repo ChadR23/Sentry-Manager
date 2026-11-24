@@ -55,7 +55,8 @@ export function previewClipLabel(clip, zone) {
 export function previewFailure(error) {
   const detail = String(error?.code || error?.message || error || '').match(/\b[A-Z][A-Z_]{3,}\b/)?.[0] || '';
   let message = 'Could not prepare a comparison. Try another clip.';
-  if (/FRAME|TIMING|BOUNDARY|VERIFY|TIMESTAMP/.test(detail)) message = 'The picture check failed on this clip, so no comparison is shown. Try another clip.';
+  if (detail === 'PREVIEW_TOOLS_UNAVAILABLE') message = 'The video tools on the server are not working, so no preview can be made. Check Health.';
+  else if (/FRAME|TIMING|BOUNDARY|VERIFY|TIMESTAMP/.test(detail)) message = 'The picture check failed on this clip, so no comparison is shown. Try another clip.';
   else if (detail === 'PREVIEW_ACTIVE' || detail === 'PREVIEW_BUSY') message = 'Another preview or shrinking job is using the encoder. Try again when it finishes.';
   else if (detail === 'PREVIEW_RESUME_FAILED') message = 'The preview finished, but shrinking could not resume. Open Expert to resume it.';
   else if (detail === 'PREVIEW_PAUSE_FAILED') message = 'Shrinking could not be paused. Wait for it to finish, then try the preview again.';

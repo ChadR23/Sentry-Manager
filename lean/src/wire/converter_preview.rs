@@ -19,14 +19,16 @@ pub struct Inventory<'a> {
     pub state: &'a VehicleState,
     pub speed_index: Option<&'a SpeedIndex>,
     pub ffmpeg: &'a str,
+    pub ffprobe: &'a str,
 }
 
 /// Saved first, then Sentry, filling from the other kind when needed. A Recent
 /// clip is a last resort, never a second pick beside an event. Event ids are
 /// Recording::event_id; Recent drives use Recording::id (they have no event id).
 /// The preview runner, not this selector, decides the actual six-second window.
-pub fn pick_clips(inv: &Inventory<'_>, vehicle_tz: &str, exclude: &[String], want: usize, cancel: &Arc<AtomicBool>) -> Vec<PreviewClip> {
-    pick_clips_with(inv, vehicle_tz, exclude, want, cancel, &|path, at| frame_lumas(inv.ffmpeg, path, at, cancel))
+pub fn pick_clips(inv: &Inventory<'_>, vehicle_tz: &str, exclude: &[String], want: usize, cancel: &Arc<AtomicBool>) -> PreviewResult<Vec<PreviewClip>> {
+    crate::converter::preview::check_tools(inv.ffmpeg, inv.ffprobe, cancel)?;
+    Ok(pick_clips_with(inv, vehicle_tz, exclude, want, cancel, &|path, at| frame_lumas(inv.ffmpeg, path, at, cancel)))
 }
 
 type Decode<'a> = dyn Fn(&Path, [i64; 3]) -> Option<[f64; 3]> + 'a;
@@ -234,9 +236,25 @@ mod tests {
     }
     fn bright(_: &Path, _: [i64; 3]) -> Option<[f64; 3]> { Some([60.0; 3]) }
     fn select(v: &Vehicle, state: &VehicleState, speed_index: Option<&SpeedIndex>, exclude: &[String], want: usize) -> Vec<PreviewClip> {
-        pick_clips_with(&Inventory { vehicle: v, state, speed_index, ffmpeg: "ffmpeg" }, &v.timezone, exclude, want, &AtomicBool::new(false), &bright)
+        pick_clips_with(&Inventory { vehicle: v, state, speed_index, ffmpeg: "ffmpeg", ffprobe: "ffprobe" }, &v.timezone, exclude, want, &AtomicBool::new(false), &bright)
     }
     fn ids(picks: &[PreviewClip]) -> Vec<&str> { picks.iter().map(|p| p.event_id.as_str()).collect() }
+
+    #[test]
+    fn preview_missing_tools_is_an_error_not_empty_clips() {
+        let f = Fixture::new("preview-missing-decoder");
+        f.event("SavedClips", "2026-06-03", Some("2026-06-03T21:25:30"));
+        let (v, st) = f.snapshot();
+        let missing = f.0.root.join("missing-ffmpeg");
+        for (ffmpeg, ffprobe) in [(missing.to_str().unwrap(), "ffprobe"), ("ffmpeg", missing.to_str().unwrap())] {
+            let inv = Inventory { vehicle: &v, state: &st, speed_index: None, ffmpeg, ffprobe };
+            let result = pick_clips(&inv, &v.timezone, &[], 2, &Arc::new(AtomicBool::new(false)));
+            assert_eq!(result.err().as_deref(), Some("PREVIEW_TOOLS_UNAVAILABLE"));
+        }
+        let inv = Inventory { vehicle: &v, state: &st, speed_index: None, ffmpeg: "ffmpeg", ffprobe: "ffprobe" };
+        assert!(pick_clips(&inv, &v.timezone, &[], 0, &Arc::new(AtomicBool::new(false))).unwrap().is_empty());
+        assert_eq!(pick_clips(&inv, &v.timezone, &[], 2, &Arc::new(AtomicBool::new(true))).err().as_deref(), Some("CANCELLED"));
+    }
 
     #[test]
     fn picks_one_saved_one_sentry() {
@@ -368,7 +386,7 @@ mod tests {
         let dark = f.event("SavedClips", "2026-06-03", Some("2026-06-03T21:25:30"));
         let dim = f.event("SavedClips", "2026-06-02", Some("2026-06-02T21:25:30"));
         let (v, st) = f.snapshot();
-        let inv = Inventory { vehicle: &v, state: &st, speed_index: None, ffmpeg: "ffmpeg" };
+        let inv = Inventory { vehicle: &v, state: &st, speed_index: None, ffmpeg: "ffmpeg", ffprobe: "ffprobe" };
         let picks = pick_clips_with(&inv, &v.timezone, &[], 2, &AtomicBool::new(false), &|p, at| {
             assert_eq!(at, [29000, 30000, 31000]);
             Some(if p.to_str().unwrap().contains(&dark) { [15.9; 3] } else { [16.0; 3] })
@@ -387,7 +405,7 @@ mod tests {
             }
         }
         let (v, st) = f.snapshot();
-        let inv = Inventory { vehicle: &v, state: &st, speed_index: None, ffmpeg: "ffmpeg" };
+        let inv = Inventory { vehicle: &v, state: &st, speed_index: None, ffmpeg: "ffmpeg", ffprobe: "ffprobe" };
         let mut counts = std::collections::HashMap::new();
         let counts = std::cell::RefCell::new(&mut counts);
         assert!(pick_clips_with(&inv, &v.timezone, &[], 2, &AtomicBool::new(false), &|path, _| {
@@ -407,7 +425,7 @@ mod tests {
             f.event("SavedClips", &date, Some(&format!("{date}T21:25:30")));
         }
         let (v, st) = f.snapshot();
-        let inv = Inventory { vehicle: &v, state: &st, speed_index: None, ffmpeg: "ffmpeg" };
+        let inv = Inventory { vehicle: &v, state: &st, speed_index: None, ffmpeg: "ffmpeg", ffprobe: "ffprobe" };
         let cancel = AtomicBool::new(true);
         let count = std::cell::Cell::new(0);
         let decode = |_: &Path, _: [i64; 3]| {
@@ -836,8 +854,8 @@ impl PreviewBackend for HostPreview {
         self.ctx.resolve_path(&vehicle.root.to_string_lossy(), true).ok_or("PATH_NOT_ALLOWED")?;
         let Some(state) = srv.app().state_of(&vehicle.id) else { return Ok(vec![]) };
         let speed_index = srv.viewer().map(|v| v.speed_index.as_ref());
-        let inv = Inventory { vehicle: &vehicle, state: &state, speed_index, ffmpeg: &srv.state.config.ffmpeg };
-        Ok(pick_clips(&inv, &vehicle.timezone, exclude, want, cancel))
+        let inv = Inventory { vehicle: &vehicle, state: &state, speed_index, ffmpeg: &srv.state.config.ffmpeg, ffprobe: &srv.state.config.ffprobe };
+        pick_clips(&inv, &vehicle.timezone, exclude, want, cancel)
     }
     fn run(&self, clip: &PreviewClip, levels: &[(&str, Value)], work: &Path, cancel: &AtomicBool,
         cached_only: bool, progress: &dyn Fn(Value)) -> PreviewResult<Option<Vec<LevelResult>>> {
