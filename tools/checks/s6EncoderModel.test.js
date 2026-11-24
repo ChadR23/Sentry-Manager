@@ -19,6 +19,57 @@ const groups = ['SavedClips', 'SentryClips', 'RecentClips'];
 const simple = { codec: 'h265', outputMode: 'replace', profileId: 'aggressive' };
 const choice = (patch = {}) => ({ ...structuredClone(model.DEFAULTS), ...patch });
 
+test('preview progress counts verified steps for the current clip, never invented encode percents', () => {
+  const picking = model.previewProgress(null, 'saved', 'UTC');
+  assert.equal(picking.done, 0);
+  assert.equal(picking.steps.length, 5);
+  assert.match(picking.steps[0].text, /Picking.*Saved/);
+  const extracting = model.previewProgress({phase:'extracting', kind:'sentry', when:'2026-11-03T19:43:00', window:[1_000_000, 6_250_000]}, 'saved', 'UTC');
+  assert.equal(extracting.done, 1);
+  assert.match(extracting.steps[0].text, /Sentry clip, Nov 3, 19:43/);
+  assert.match(extracting.steps[1].text, /5.25 seconds/);
+  const encoding = model.previewProgress({phase:'encoding', level:'med', device:'Test GPU', results:{orig:{}, std:{saved_percent:-2.4}}}, 'saved', 'UTC');
+  assert.equal(encoding.done, 3);
+  assert.equal(encoding.steps[2].text, 'Standard 2% larger');
+  assert.equal(encoding.steps[3].text, 'Shrinking at Medium on Test GPU');
+  assert.equal(encoding.steps[3].active, true);
+  assert.equal(model.previewProgress({phase:'cached'}, 'saved', 'UTC').done, 5);
+});
+
+test('preview failures give plain guidance separately from technical codes', () => {
+  const error = model.previewFailure('PREVIEW_FRAME_TIMING_MISMATCH');
+  assert.match(error.message, /picture check failed/i);
+  assert.doesNotMatch(error.message, /PREVIEW_/);
+  assert.equal(error.detail, 'PREVIEW_FRAME_TIMING_MISMATCH');
+  assert.match(model.previewFailure('PREVIEW_ACTIVE').message, /another preview/i);
+  assert.doesNotMatch(model.previewFailure('UNRECOGNIZED_CODE').message, /UNRECOGNIZED_CODE/);
+});
+
+test('calendar heat scales to visible footage sizes and estimates only guided levels', () => {
+  assert.equal(model.dayHeat(0, 100), 0.25);
+  assert.equal(model.dayHeat(100, 100), 0.95);
+  assert.equal(model.dayHeat(200, 100), 0.95);
+  assert.equal(model.dayHeat(0, 0), 0.25);
+  const days = [{day:'2026-11-24', clips:2, encoded:0, bytes:100}, {day:'2026-10-01',clips:2,encoded:0,bytes:400}, {day:'2026-09-01',clips:2,encoded:2,bytes:80}];
+  assert.deepEqual(model.footageEstimate(days, 30, 'UTC', 'med', '2026-11-24'), {kept:100, shrink:400, saved:200, after:200});
+  assert.equal(model.footageEstimate(days, 30, 'UTC', 'custom', '2026-11-24').saved, null);
+});
+
+test('Coming up uses a real unshrunk day and calendar arithmetic across DST', () => {
+  const days = [{day:'2026-10-15',clips:1,encoded:0},{day:'2026-10-14',clips:1,encoded:1}];
+  assert.deepEqual(model.nextAgingDay(days, 30, 'America/New_York', '2026-11-01'), {day:'2026-10-15', agesOn:'2026-11-14'});
+  assert.equal(model.nextAgingDay(days, null, 'UTC', '2026-11-01'), null);
+  assert.equal(model.nextAgingDay(days, 3, 'UTC', '2026-11-01'), null);
+});
+
+test('catch-up bytes require the whole item list; trimmed snapshots use real clip counts', () => {
+  const counts = {total:2, done:1};
+  const items = [{state:'completed', sourceBytes:30}, {state:'queued',sourceBytes:70}];
+  assert.deepEqual(model.catchUpProgress({items, itemCount:2}, counts), {unit:'bytes', done:30, total:100, percent:30});
+  assert.deepEqual(model.catchUpProgress({items:items.slice(0, 1), itemCount:2}, counts), {unit:'clips', done:1, total:2, percent:50});
+  assert.equal(model.catchUpProgress({}, {total:0, done:0}), null);
+});
+
 test('guided saves preserve the schedule zone until step 3 is changed', () => {
   for (const kind of ['daily', 'weekly', 'monthly']) {
     const settings = { schedule: {kind, hour:2, weekday:3, day:12, zone:'America/New_York'} };
@@ -36,6 +87,14 @@ test('Coming up formats the actual check in the browser zone, including DST and 
   assert.equal(model.nextCheckText(now - 1, 'America/New_York', now), 'A check is due. It will start when the server is ready.');
   assert.equal(model.nextCheckText(Date.parse('2026-11-01T06:00:00Z'), 'America/New_York', now), 'Sun, Nov 1, 01:00 EST');
   assert.equal(model.nextCheckText(Date.parse('2026-11-01T06:00:00Z'), 'Asia/Tokyo', now), 'Sun, Nov 1, 15:00 GMT+9');
+});
+
+test('status check tile uses the reported instant, including tomorrow across DST', () => {
+  const now = Date.parse('2026-10-31T22:00:00Z');
+  assert.equal(model.nextCheckLabel(null, 'America/New_York', now), null);
+  assert.equal(model.nextCheckLabel(now - 1, 'America/New_York', now), 'Due now');
+  assert.equal(model.nextCheckLabel(now + 3600000, 'America/New_York', now), 'Today 19:00');
+  assert.equal(model.nextCheckLabel(Date.parse('2026-11-01T07:00:00Z'), 'America/New_York', now), 'Tomorrow 02:00');
 });
 
 test('schedule text shares exact timing with the plan and does not invent an Expert schedule', () => {

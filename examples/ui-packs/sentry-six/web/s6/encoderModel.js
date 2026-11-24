@@ -36,16 +36,84 @@ export function previewMeasured(results) {
 }
 
 export function previewSource(clip, result, zone) {
+  const moment = clip.kind === 'saved' ? 'the moment it was saved' : clip.kind === 'sentry' ? 'the moment Sentry was triggered' : 'the selected moment';
+  const device = result.device === 'CPU' ? 'on the CPU' : `on your ${result.device}`;
+  return `From your footage: ${previewClipLabel(clip, zone)} · ${previewSeconds(result)} seconds around ${moment}, shrunk just now ${device} with the same settings a real run uses. Your clip is only read.`;
+}
+
+export function previewClipLabel(clip, zone) {
   // Unzoned event timestamps are already vehicle-local; do not reinterpret them in the browser zone.
   const zoned = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(clip.when);
   const date = new Date(clip.when + (zoned ? '' : 'Z'));
   const when = Number.isNaN(date.getTime()) ? clip.when : new Intl.DateTimeFormat('en-US', {
     timeZone: zoned ? zone : 'UTC', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   }).format(date);
-  const kind = clip.kind === 'saved' ? 'Saved' : 'Sentry';
-  const moment = clip.kind === 'saved' ? 'the moment it was saved' : 'the moment Sentry was triggered';
-  const device = result.device === 'CPU' ? 'on the CPU' : `on your ${result.device}`;
-  return `From your footage: ${kind} clip, ${when} · Front camera · ${previewSeconds(result)} seconds around ${moment}, shrunk just now ${device} with the same settings a real run uses. Your clip is only read.`;
+  const kind = {saved:'Saved', sentry:'Sentry', recent:'Recent'}[clip.kind] || 'Selected';
+  return `${kind} clip, ${when} · Front camera`;
+}
+
+export function previewFailure(error) {
+  const detail = String(error?.code || error?.message || error || '').match(/\b[A-Z][A-Z_]{3,}\b/)?.[0] || '';
+  let message = 'Could not prepare a comparison. Try another clip.';
+  if (/FRAME|TIMING|BOUNDARY|VERIFY|TIMESTAMP/.test(detail)) message = 'The picture check failed on this clip, so no comparison is shown. Try another clip.';
+  else if (detail === 'PREVIEW_ACTIVE' || detail === 'PREVIEW_BUSY') message = 'Another preview or shrinking job is using the encoder. Try again when it finishes.';
+  else if (detail === 'PREVIEW_RESUME_FAILED') message = 'The preview finished, but shrinking could not resume. Open Expert to resume it.';
+  else if (detail === 'PREVIEW_PAUSE_FAILED') message = 'Shrinking could not be paused. Wait for it to finish, then try the preview again.';
+  else if (detail === 'PREVIEW_NOT_FOUND') message = 'This preview has expired. Prepare a new comparison.';
+  else if (/SOURCE|REQUIRES_H264|EVENT_OUTSIDE_WINDOW/.test(detail)) message = 'This clip cannot be used for a comparison. Try another clip.';
+  return {message, detail};
+}
+
+/** Five server-observed stages per clip; elapsed time is tracked separately by the page. */
+export function previewProgress(progress, kind, zone) {
+  const p = progress || {}, results = p.results || {};
+  const cached = p.phase === 'cached';
+  const picked = !!p.phase;
+  const cut = cached || !!results.orig || ['encoding', 'level'].includes(p.phase);
+  const duration = Array.isArray(p.window) && p.window[1] > p.window[0] ? (p.window[1] - p.window[0]) / 1e6 : null;
+  const steps = [
+    {done:picked, active:!picked, text:p.kind && p.when ? previewClipLabel(p, zone) : picked ? 'Clip selected from your footage' : `Picking a clip from your ${kind === 'sentry' ? 'Sentry' : 'Saved'} footage`},
+    {done:cut, active:p.phase === 'extracting', text:duration ? `Cutting ${Number(duration.toFixed(3))} seconds around the moment` : 'Cutting a short sample around the moment'},
+    ...LEVELS.map(({id, name}) => ({done:cached || !!results[id], active:p.phase === 'encoding' && p.level === id,
+      text:results[id] ? `${name} ${previewPercent(results[id].saved_percent)}` : cached ? `${name} comparison ready` : p.phase === 'encoding' && p.level === id ? `Shrinking at ${name}${p.device ? ` on ${p.device}` : ''}` : name})),
+  ];
+  return {steps, done:steps.filter((s) => s.done).length};
+}
+
+export function dayHeat(bytes, cap) {
+  return cap > 0 ? 0.25 + Math.min(Math.max(Number(bytes) || 0, 0), cap) / cap * 0.7 : 0.25;
+}
+
+export function footageEstimate(days, keep, zone, level, today = new Date()) {
+  const states = dayStates(days, keep, zone, today), sums = {kept:0, shrink:0};
+  for (const day of days) if (states.get(day.day) in sums) sums[states.get(day.day)] += Number(day.bytes) || 0;
+  const pct = LEVELS.find((entry) => entry.id === level)?.pct;
+  const saved = pct == null ? null : sums.shrink * pct / 100;
+  return {...sums, saved, after:saved == null ? null : sums.shrink - saved};
+}
+
+export function nextAgingDay(days, keep, zone, today = new Date()) {
+  if (keep == null) return null;
+  const now = localDay(today, zone);
+  return days.filter((d) => d.clips > d.encoded).map(({day}) => {
+    const date = new Date(day + 'T00:00:00Z');
+    date.setUTCDate(date.getUTCDate() + keep);
+    return {day, agesOn:date.toISOString().slice(0, 10)};
+  }).filter((d) => d.agesOn > now).sort((a, b) => a.agesOn.localeCompare(b.agesOn))[0] || null;
+}
+
+export function catchUpProgress(snapshot, counts) {
+  if (!counts?.total) return null;
+  const items = snapshot.items || [];
+  let unit = 'clips', done = counts.done, total = counts.total;
+  if (items.length === total && items.every((i) => Number.isFinite(i.sourceBytes) && i.sourceBytes >= 0)) {
+    const bytes = items.reduce((sum, i) => sum + i.sourceBytes, 0);
+    if (bytes > 0) {
+      unit = 'bytes'; total = bytes;
+      done = items.filter((i) => ['completed', 'skipped', 'failed'].includes(i.state)).reduce((sum, i) => sum + i.sourceBytes, 0);
+    }
+  }
+  return {unit, done, total, percent:Math.round(100 * done / total)};
 }
 export const DEFAULTS = {
   keep: 30,
@@ -253,6 +321,16 @@ export function nextCheckText(at, zone, now = Date.now()) {
   if (!Number.isFinite(at) || at <= 0) return "The next check time is not available yet.";
   if (at <= now) return "A check is due. It will start when the server is ready.";
   return new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short" }).format(new Date(at));
+}
+
+export function nextCheckLabel(at, zone, now = Date.now()) {
+  if (!Number.isFinite(at) || at <= 0) return null;
+  if (at <= now) return 'Due now';
+  const day = localDay(at, zone), today = localDay(now, zone);
+  const tomorrow = new Date(today + 'T00:00:00Z');
+  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+  const label = day === today ? 'Today' : day === tomorrow.toISOString().slice(0, 10) ? 'Tomorrow' : new Intl.DateTimeFormat('en-US', {timeZone:zone, month:'short', day:'numeric'}).format(at);
+  return `${label} ${new Intl.DateTimeFormat('en-US', {timeZone:zone, hour:'2-digit', minute:'2-digit', hourCycle:'h23'}).format(at)}`;
 }
 
 export function expertSummary(config) {

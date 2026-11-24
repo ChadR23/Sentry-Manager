@@ -736,12 +736,24 @@ impl Previews {
 
     fn event(&self, id: &str, clip: &PreviewClip, e: Value) {
         if self.jobs.0.lock().unwrap().entries[id].cancel.load(Ordering::SeqCst) { return; }
-        let mut out = json!({"type":"preview", "id":id, "eventId":clip.event_id});
+        let mut out = json!({"type":"preview", "id":id, "eventId":clip.event_id, "kind":clip.kind, "when":clip.when});
         for k in ["phase", "level", "profile", "encoder", "device", "window", "durationUs", "bitrate", "maxrate", "crop"] {
             if let Some(v) = e.get(k) { out[k] = v.clone(); }
         }
         if let Some(r) = e.get("result").and_then(|r| serde_json::from_value::<LevelResult>(r.clone()).ok()) { out["result"] = self.level(id, &clip.event_id, &r); }
-        (self.progress)(out);
+        // Retain one clip's public progress for late subscribers and polling.
+        // Never expose source/cache paths or carry measured levels into another clip.
+        let progress = {
+            let mut jobs = self.jobs.0.lock().unwrap(); let job = jobs.entries.get_mut(id).unwrap();
+            if job.cancel.load(Ordering::SeqCst) { return; }
+            let mut progress = if job.answer["progress"]["eventId"] == clip.event_id { job.answer["progress"].clone() }
+                else { json!({"results":{}}) };
+            progress.as_object_mut().unwrap().extend(out.as_object().unwrap().clone());
+            if let Some(level) = out["result"]["level"].as_str() { progress["results"][level] = out["result"].clone(); }
+            job.answer["progress"] = progress.clone();
+            progress
+        };
+        (self.progress)(progress);
     }
 
     fn finish(&self, id: &str, result: PreviewResult<()>) {
@@ -751,7 +763,7 @@ impl Previews {
             job.created = Instant::now(); // terminal result retention starts after the wait/work
             job.answer["state"] = json!(state); job.answer.as_object_mut().unwrap().remove("waitingFor");
             if let Err(e) = result { if state != "cancelled" { job.answer["error"] = json!(public_error(&e)); } }
-            if state != "done" { job.assets.clear(); job.answer["clips"] = json!([]); }
+            if state != "done" { job.assets.clear(); job.answer["clips"] = json!([]); job.answer.as_object_mut().unwrap().remove("progress"); }
             job.finished = true;
             let answer = job.answer.clone();
             if jobs.active.as_deref() == Some(id) { jobs.active = None; }
@@ -775,7 +787,7 @@ impl Previews {
                 let release = job.answer["state"] == "waiting" && job.waiting_only;
                 job.cancel.store(true, Ordering::SeqCst); job.answer["state"] = json!("cancelled");
                 job.created = Instant::now();
-                job.answer.as_object_mut().unwrap().remove("waitingFor"); job.answer["clips"] = json!([]); job.assets.clear();
+                job.answer.as_object_mut().unwrap().remove("waitingFor"); job.answer.as_object_mut().unwrap().remove("progress"); job.answer["clips"] = json!([]); job.assets.clear();
                 if release && jobs.active.as_deref() == Some(id) { jobs.active = None; }
                 true
             } else { false }
@@ -967,7 +979,9 @@ mod channel_tests {
                     LevelResult { level: level.into(), profile, before_bytes: 100, after_bytes: 60, saved_percent: 40.0,
                         device: "CPU".into(), frame, zoom, crop: serde_json::from_value(json!({"x":12,"y":16,"width":72,"height":54})).ok(), window_start_us: 0, window_end_us: 6_000_000, duration_us: 6_000_000 }
                 }).collect::<Vec<_>>();
-            progress(json!({"phase": if cached_only { "cached" } else { "level" }, "result": results[0]}));
+            for result in &results {
+                progress(json!({"phase": if cached_only { "cached" } else { "level" }, "result": result}));
+            }
             Ok(Some(results))
         }
         fn blocker(&self) -> PreviewResult<Option<Blocker>> { Ok(self.busy.lock().unwrap().clone()) }
@@ -1001,6 +1015,23 @@ mod channel_tests {
             }
         }
     }
+    #[test]
+    fn preview_progress_can_be_recovered_by_polling() {
+        let h = Harness::new();
+        let id = h.start(false);
+        h.backend.release.store(true, Ordering::SeqCst);
+        let answer = h.until(&id, "done");
+        let progress = &answer["progress"];
+        assert_eq!(progress["eventId"], "sentry");
+        assert_eq!(progress["kind"], "sentry");
+        assert_eq!(progress["when"], "2026-06-01T00:00:03.500Z");
+        assert_eq!(progress["results"].as_object().unwrap().len(), 4);
+        assert_eq!(progress["results"]["med"]["saved_percent"], 40.0);
+        assert!(!progress.to_string().contains("/synthetic"));
+        assert!(!progress.to_string().contains(h._dir.path().to_str().unwrap()));
+        assert!(h.events.lock().unwrap().iter().any(|e| e["kind"] == "saved" && e["results"]["high"]["level"] == "high"));
+    }
+
     #[test]
     fn start_get_cancel_flow() {
         let h = Harness::new(); let id = h.start(false);

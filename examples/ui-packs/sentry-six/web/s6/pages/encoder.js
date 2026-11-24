@@ -1,8 +1,8 @@
 import { esc, invoke as previewInvoke, api as previewApi, clientId, scope } from '../core.js';
 import { icon } from '../icons.js';
 import { size } from '../format.js';
-import { KEEP_CHIPS, LEVELS, fromSaved, toVehicleConfig, toAutoSettings, planSentence, scheduleText, nextCheckText, expertSummary, dayStates, levelOf, levelDevice, previewPercent, previewMeasured, previewSource, previewMegabytes } from '../encoderModel.js';
-import { onPreview, streamReady, follow, counts, ACTIVE, PAUSED, describe, applySnapshot } from '../convert.js';
+import { KEEP_CHIPS, LEVELS, fromSaved, toVehicleConfig, toAutoSettings, planSentence, scheduleText, nextCheckLabel, expertSummary, dayStates, levelOf, levelDevice, previewPercent, previewMeasured, previewSource, previewMegabytes, previewProgress, previewFailure, dayHeat, footageEstimate, nextAgingDay, catchUpProgress } from '../encoderModel.js';
+import { onPreview, streamReady, follow, counts, ACTIVE, PAUSED, describe, applySnapshot, hardwareLabel } from '../convert.js';
 import { describeJob } from '../jobs.js';
 
 const GROUPS = {
@@ -10,8 +10,8 @@ const GROUPS = {
   SentryClips: { name: 'Sentry clips', description: 'Recorded while parked, when something moved near the car', color: 'sentry' },
   RecentClips: { name: 'Recent clips', description: 'Everything else the car records while driving', color: 'driving' },
 };
-const DAY_LABELS = { kept: 'Kept as recorded', shrink: 'Will be shrunk', done: 'Already shrunk', none: 'No footage' };
-const STEPS = ['Keep', 'Space', 'Schedule', 'Review'];
+const DAY_LABELS = { kept: 'Stays as recorded', shrink: 'Will be shrunk', done: 'Already shrunk', none: 'No footage' };
+const STEPS = ['Newest footage', 'Space saving', 'Schedule', 'Review'];
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const SCHEDULES = { night: 'Every night', week: 'Once a week', month: 'Once a month', asap: 'As clips age' };
 const browserZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -43,8 +43,8 @@ async function renderStatus(mount, ctx, initial, show) {
   const { api, confirmDialog } = ctx.scope;
   const invoke = setupInvoke(ctx.scope);
   const vehicle = ctx.current(), root = rootOf(vehicle), zone = browserZone();
-  let auto = initial, saved = null, jobs = [], snapshot = null, nodeWaiting = null;
-  let readError = '', commandError = '', busy = false, loading = false, stopped = false;
+  let auto = initial, saved = null, jobs = [], days = [], encoder = null, snapshot = null, nodeWaiting = null;
+  let readError = '', commandError = '', busy = false, loading = false, loaded = false, stopped = false;
   let share = vehicle.share;
   const valid = () => !stopped && ctx.alive();
   const activeJob = () => snapshot && snapshot.config?.sourceRoot === root && ACTIVE.has(snapshot.state) &&
@@ -52,13 +52,13 @@ async function renderStatus(mount, ctx, initial, show) {
   mount.innerHTML = `<div class="encoder-status-screen" data-encoder-screen="status">
     <section class="card"><div class="encoder-status">
       <span class="encoder-status-icon" aria-hidden="true">${icon('check_circle')}</span>
-      <div class="encoder-status-copy"><div class="encoder-eyebrow">Automatic shrinking is on</div><h2 tabindex="-1">${esc(vehicle.name)} is set up.</h2><p data-plan></p></div>
-      <div class="encoder-status-actions"><button type="button" data-change>Change setup</button><button type="button" data-off>Turn off</button></div>
+      <div class="encoder-status-copy"><div class="encoder-on-pill">Automatic shrinking is on</div><h2 tabindex="-1">${esc(vehicle.name)} is set. You can forget about it.</h2><p data-plan></p></div>
+      <div class="encoder-status-actions"><button type="button" data-change>Change setup</button><button type="button" class="ghost" data-off>Turn off</button></div>
     </div><div data-custom-status hidden></div><p data-separate-output hidden>Copies go to a separate folder, so this doesn't free space on the drive.</p><div class="encoder-summary" data-status-numbers></div>
       <p class="encoder-estimate-note" data-savings-note hidden>Recorded savings for this vehicle since its savings counter was last reset.</p>
     </section>
-    <section class="card encoder-catchup" data-catchup hidden aria-labelledby="encoder-catchup-heading"><div class="row"><h3 id="encoder-catchup-heading" class="grow">Catching up on older footage</h3><button type="button" data-job-command hidden>Pause</button></div><div data-catchup-progress></div><p>Pause holds until you press Resume.</p></section>
-    <section class="card"><h3>Coming up</h3><p data-next-check></p><p data-next-work></p><small>Times shown in ${esc(zone)}.</small></section>
+    <section class="card encoder-catchup" data-catchup hidden aria-labelledby="encoder-catchup-heading"><div class="encoder-catchup-header"><h3 id="encoder-catchup-heading">Catching up on older footage</h3><button type="button" data-job-command hidden>Pause</button></div><div data-catchup-progress></div><small>Pause holds until you press Resume.</small></section>
+    <section class="card"><h3>Coming up</h3><div class="encoder-review" data-coming-up></div><p class="encoder-estimate-note" data-next-work></p><small>Check times shown in ${esc(zone)}. Footage dates use ${esc(vehicle.timezone)}.</small></section>
     <section class="card encoder-problems" data-problems hidden aria-labelledby="encoder-problems-heading"><h3 id="encoder-problems-heading">Needs attention</h3><div data-problem-list role="status"></div><div class="form-actions"><button type="button" data-refresh>Check again</button><a class="btn" href="#/activity">Activity</a><button type="button" data-problem-expert>Open Expert</button></div></section>
   </div>`;
   const update = (selector, html) => {
@@ -79,23 +79,28 @@ async function renderStatus(mount, ctx, initial, show) {
     const separate = config.outputMode === 'separate';
     mount.querySelector('[data-separate-output]').hidden = !separate;
     if (Number.isFinite(saved?.bytes)) numbers.push([size(saved.bytes), separate ? 'size saved by the copies' : 'space saved so far']);
-    if (Number.isFinite(saved?.clips)) numbers.push([saved.clips.toLocaleString(), 'clips shrunk']);
+    if (Number.isFinite(saved?.clips)) numbers.push([saved.clips.toLocaleString(), 'clips shrunk since counter reset']);
+    if (Number.isFinite(status.nextCheckAt) && status.nextCheckAt > 0) numbers.push([nextCheckLabel(status.nextCheckAt, zone), 'next check']);
     const pending = status.pending?.[root];
     const waiting = c ? c.queued + c.inFlight : Number.isFinite(pending) ? pending : null;
-    if (waiting !== null) numbers.push([`${c ? '' : 'About '}${waiting.toLocaleString()}`, c ? 'clips waiting or in progress' : 'files waiting · last-check estimate']);
-    update('[data-status-numbers]', numbers.map(([value, label]) => `<div class="encoder-stat"><b>${esc(value)}</b><span>${label}</span></div>`).join(''));
     mount.querySelector('[data-savings-note]').hidden = !Number.isFinite(saved?.bytes) && !Number.isFinite(saved?.clips);
     mount.querySelector('[data-catchup]').hidden = !status.catchUp?.[root];
     const paused = active && PAUSED.has(active.state);
-    update('[data-catchup-progress]', c?.total
-      ? `<progress max="${c.total}" value="${c.done}" aria-label="Catch-up progress for the current job"></progress><p>${c.done.toLocaleString()} of ${c.total.toLocaleString()} clips processed in this job · ${paused ? 'Paused' : 'In progress'}${active.discoveryComplete === false ? ' · Still looking for clips; the total may grow.' : ''}</p>`
+    const progress = active && catchUpProgress(active, c), device = active && encoder ? hardwareLabel(active, encoder) : '';
+    update('[data-catchup-progress]', progress
+      ? `<progress max="${progress.total}" value="${progress.done}" aria-label="Catch-up progress for the current job"></progress><div class="encoder-progress-caption"><span>${progress.percent}% · ${progress.unit === 'bytes' ? `${size(progress.done)} of ${size(progress.total)}` : `${progress.done.toLocaleString()} of ${progress.total.toLocaleString()} clips`} processed in this job · ${paused ? 'Paused' : 'In progress'}</span>${device ? `<span>${esc(device)}</span>` : ''}</div>${active.discoveryComplete === false ? '<small>Still looking for clips; the total may grow.</small>' : ''}`
       : `<progress aria-label="Preparing catch-up"></progress><p>${active ? paused ? 'Paused.' : 'Looking for eligible clips…' : status.active?.[root] ? 'Reading catch-up progress…' : 'Waiting for the server to start the catch-up job.'}</p>`);
     const jobButton = mount.querySelector('[data-job-command]');
     jobButton.hidden = !active; jobButton.disabled = busy;
     jobButton.textContent = paused ? 'Resume' : 'Pause';
     mount.querySelector('[data-change]').disabled = busy;
     mount.querySelector('[data-off]').disabled = busy;
-    update('[data-next-check]', esc(nextCheckText(status.nextCheckAt, zone)));
+    const aging = nextAgingDay(days, choice.keep, vehicle.timezone);
+    const dateLabel = (day) => new Date(day + 'T00:00:00Z').toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric', timeZone:'UTC'});
+    const last = jobs.filter((j) => j.vehicleId === vehicle.id && ['conversion', 'convert'].includes(j.type) && ['done', 'failed', 'interrupted', 'cancelled'].includes(j.status))
+      .sort((a, b) => (b.finishedAt || b.updatedAt || b.createdAt || 0) - (a.finishedAt || a.updatedAt || a.createdAt || 0))[0];
+    update('[data-coming-up]', (aging ? `<div class="encoder-review-row"><span class="encoder-review-icon">${icon('calendar_month')}</span><div><b>${esc(dateLabel(aging.day))} footage ages past ${choice.keep} days on ${esc(dateLabel(aging.agesOn))}</b><small>Included clips get shrunk on the first check after that.</small></div></div>` : '') +
+      (last ? `<div class="encoder-review-row"><span class="encoder-review-icon">${icon('task')}</span><div><b>Last run: ${esc(describeJob(last).title)}</b><small>${esc(describeJob(last).outcome || describeJob(last).statusText)}</small></div><a class="btn ghost" href="#/activity">Activity</a></div>` : ''));
     update('[data-next-work]', esc(waiting > 0
       ? `${c ? `${waiting.toLocaleString()} clips waiting or in progress.` : `About ${waiting.toLocaleString()} files waiting at the last check; eligible clips are counted when the job starts.`} Later checks look for included clips ${choice.keep == null ? 'that have not been shrunk yet' : `older than the ${choice.keep}-day keep window`}.`
       : `The next check looks for included clips ${choice.keep == null ? 'that have not been shrunk yet' : `that have aged past the ${choice.keep}-day keep window`}. The amount will be known when it checks.`));
@@ -114,6 +119,8 @@ async function renderStatus(mount, ctx, initial, show) {
     else if (pending > 0 && Object.entries(status.active || {}).some(([source]) => source !== root))
       problems.push('Waiting for another vehicle’s shrinking run to free an encoding device.');
     if (status.active?.[root]?.pausedForWindow) problems.push('Waiting for the next cheap electricity period.');
+    if (loaded && !readError) numbers.push([new Set(problems).size.toLocaleString(), 'problems']);
+    update('[data-status-numbers]', numbers.map(([value, label], i) => `<div class="encoder-stat${i === 0 && Number.isFinite(saved?.bytes) ? ' encoder-stat-saved' : ''}"><b>${esc(value)}</b><span>${label}</span></div>`).join(''));
     mount.querySelector('[data-problems]').hidden = !problems.length;
     update('[data-problem-list]', [...new Set(problems)].map((message) => `<p>${esc(message)}</p>`).join(''));
   }
@@ -121,15 +128,16 @@ async function renderStatus(mount, ctx, initial, show) {
     if (!valid() || loading || busy) return;
     loading = true;
     try {
-      const [current, vehicles, history] = await Promise.all([
+      const [current, vehicles, history, footage, stats] = await Promise.all([
         invoke('getAuto'), api('/api/vehicles'), api(`/api/jobs?vehicle=${encodeURIComponent(vehicle.id)}`),
+        api(`/api/vehicles/${encodeURIComponent(vehicle.id)}/days?limit=400`), api('/api/stats'),
       ]);
       if (!valid()) return;
       auto = current;
       if (!auto.settings?.configs?.some((c) => c.sourceRoot === root)) { await show(auto); return; }
       const currentVehicle = vehicles.vehicles?.find((v) => v.id === vehicle.id);
       saved = currentVehicle?.saved; share = currentVehicle?.share;
-      jobs = history.jobs || []; readError = '';
+      jobs = history.jobs || []; days = footage.days || []; encoder = stats.encoder; readError = ''; loaded = true;
     } catch (error) { if (valid()) readError = `Could not refresh status. ${errorText(error)}`; }
     finally { loading = false; draw(); }
   }
@@ -232,6 +240,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
   let customOpen = choice.keep != null && !KEEP_CHIPS.includes(choice.keep);
   const noKeep = choice.keep == null;
   const byDay = new Map(days.map((day) => [day.day, day]));
+  const phoneCalendar = window.matchMedia('(max-width: 600px)');
 
   mount.innerHTML = `<div data-encoder-screen="wizard">
     <ol class="encoder-stepper" aria-label="Encoder setup steps">
@@ -254,12 +263,12 @@ async function renderWizard(mount, ctx, auto, editing, show) {
       </div>
       <section class="encoder-footage" aria-label="Your footage calendar">
         <div class="encoder-calendar-header"><h3>Your footage</h3>
+          <ul class="encoder-legend" aria-label="Footage calendar legend">${Object.entries(DAY_LABELS).map(([state, label]) => `<li><i class="encoder-day-pattern ${state}" aria-hidden="true"></i>${label}</li>`).join('')}</ul>
           <div class="encoder-calendar-nav" role="group" aria-label="Browse footage months">
             <button type="button" data-month="-1" aria-label="Previous month">${icon('chevron_left')}</button>
             <button type="button" data-month="1" aria-label="Next month">${icon('chevron_right')}</button>
           </div>
         </div>
-        <ul class="encoder-legend" aria-label="Footage calendar legend">${Object.entries(DAY_LABELS).map(([state, label]) => `<li><i class="encoder-day-pattern ${state}" aria-hidden="true"></i>${label}</li>`).join('')}</ul>
         <div class="encoder-cal-wrap" data-calendar></div>
       </section>
       <div class="encoder-summary" data-summary aria-live="polite" aria-atomic="true"></div>
@@ -283,24 +292,23 @@ async function renderWizard(mount, ctx, auto, editing, show) {
         <div data-preview-status role="status" aria-live="polite"></div>
         <div id="encoder-preview-panel" role="tabpanel" tabindex="0" data-preview-body></div>
       </section>
+      <div class="encoder-estimate" data-space-estimate></div>
     </section>
     <section data-encoder-step="3" hidden aria-labelledby="encoder-step-3-heading">
       <div class="encoder-eyebrow">Step 3 of 4</div><h2 id="encoder-step-3-heading" tabindex="-1">When should it shrink footage?</h2>
       <p class="encoder-lead">It runs by itself in the background. A scheduled check starts work; it doesn't promise to finish by a set time.</p>
       <div class="encoder-when" data-schedules role="group" aria-label="When to check"></div>
-      <div class="encoder-picker" data-picker></div>
-      <p><span data-schedule-zone></span> One schedule for every vehicle that shrinks automatically.</p>
+      <div class="encoder-schedule-line"><div class="encoder-picker" data-picker></div><small><span data-schedule-zone></span> One schedule for every vehicle that shrinks automatically.</small></div>
       ${otherVehicles.length ? `<p class="encoder-callout">Changing this also changes the schedule for ${esc(otherVehicles.join(', '))}.</p>` : ''}
-      <label class="encoder-switch"><input class="toggle-switch" type="checkbox" role="switch" data-off-peak><span><b>Only when electricity is cheapest</b><small>Uses the off-peak hours of your plan in Settings › Electricity price.</small></span></label>
-      <p class="encoder-estimate-note" data-schedule-help></p>
-      <label class="encoder-switch"><input class="toggle-switch" type="checkbox" role="switch" data-catch-up><span><b>Finish the first catch-up run as soon as possible</b><small>The first run shrinks everything already older than your cut-off. With this on, it starts as soon as setup finishes and keeps going until done, ignoring the schedule and electricity hours. After that, only clips that age past the cut-off get shrunk, at the scheduled times.</small></span></label>
-      <p class="encoder-estimate-note">Turning a vehicle back on, shortening its keep window, including another kind of clip or changing the space level can start another catch-up run. Pause holds until you press Resume.</p>
+      <div class="encoder-switches"><label class="encoder-switch"><input class="toggle-switch" type="checkbox" role="switch" data-off-peak><span><b>Only when electricity is cheapest</b><small>Uses the off-peak hours of your plan in Settings › Electricity price. <span data-schedule-help></span></small></span></label>
+      <label class="encoder-switch"><input class="toggle-switch" type="checkbox" role="switch" data-catch-up><span><b>Finish the first catch-up run as soon as possible</b><small>The first run shrinks everything already older than your cut-off. With this on, it starts as soon as setup finishes and keeps going until done, ignoring the schedule and electricity hours. After that, only clips that age past the cut-off get shrunk, at the scheduled times.</small><small>Turning a vehicle back on, shortening its keep window, including another kind of clip or changing the space level can start another catch-up run. Pause holds until you press Resume.</small></span></label></div>
     </section>
     <section data-encoder-step="4" hidden aria-labelledby="encoder-step-4-heading">
       <div class="encoder-eyebrow">Step 4 of 4</div><h2 id="encoder-step-4-heading" tabindex="-1">Here's what will happen</h2>
       <p class="encoder-lead" data-plan></p><div class="encoder-review" data-review></div>
       <p class="encoder-callout" data-level-change hidden></p>
       <label class="encoder-switch encoder-ack"><input class="toggle-switch" type="checkbox" role="switch" data-ack required><span><b>Replace the originals with the smaller copies</b><small>Needed to free space. Each copy is checked against the original before the original is replaced.</small></span></label>
+      <p class="encoder-callout encoder-info">${icon('info')}<span>Footage settings are saved for ${esc(vehicle.name)} only. Other vehicles keep their own; the schedule is shared. You can change anything later, or flip Expert for every detail.</span></p>
       <div class="encoder-callout" data-replacement hidden></div>
       <p class="encoder-problem" data-save-error role="alert" hidden></p>
     </section>
@@ -335,13 +343,20 @@ async function renderWizard(mount, ctx, auto, editing, show) {
   function drawReview() {
     const expertOnly = choice.level === 'custom' && saved?.outputMode !== 'replace';
     mount.querySelector('[data-plan]').textContent = planSentence(choice);
+    const estimate = footageEstimate(days, choice.keep, vehicle.timezone, choice.level, today);
+    const level = LEVELS.find((l) => l.id === choice.level);
+    const order = choice.order.filter((g) => choice.included[g]);
+    const excludedNames = choice.order.filter((g) => !choice.included[g]).map((g) => GROUPS[g].name);
+    const codec = choice.level === 'custom' ? saved?.codec?.toUpperCase() : 'H.265';
+    const device = choice.level === 'custom' ? '' : devices ? levelDevice(devices, choice.level).replace(/^Uses /, '') : '';
     const rows = [
-      ['Keep', choice.keep == null ? 'No keep window' : `Newest ${choice.keep} ${choice.keep === 1 ? 'day' : 'days'} as recorded`, 1],
-      ['Order', choice.order.filter((g) => choice.included[g]).map((g) => GROUPS[g].name).join(' → '), 1],
-      ['Space', choice.level === 'custom' ? `Customized in Expert: ${expertSummary(saved)}` : `${LEVELS.find((l) => l.id === choice.level).name} · about ${LEVELS.find((l) => l.id === choice.level).pct}% smaller`, 2],
-      ['Schedule', `${scheduleText(choice)}. ${choice.catchUp ? 'Catch-up starts as soon as setup finishes.' : 'Catch-up follows the schedule and electricity hours.'}`, 3],
+      ['calendar_month', 'keep', choice.keep == null ? 'No keep window' : `Newest ${choice.keep} ${choice.keep === 1 ? 'day stays' : 'days stay'} as recorded`, `${size(estimate.kept)} right now · day-level estimate`, 1],
+      ['hard_drive', 'space', level ? `${level.name}: about ${level.pct}% smaller` : 'Customized in Expert', level ? `Gets back about ${size(estimate.saved)} from ${size(estimate.shrink)} of older footage · estimate across all clip kinds` : expertSummary(saved), 2],
+      ['conversion_path', 'order', `Order: ${order.map((g) => GROUPS[g].name.replace(' clips', '')).join(' → ')}`, excludedNames.length ? `${excludedNames.join(' and ')} stay as recorded` : order[0] === 'SavedClips' ? 'Saved clips are done first, so your important moments shrink first' : `${GROUPS[order[0]].name} are done first`, 1],
+      ['schedule', 'schedule', scheduleText(choice), choice.catchUp ? 'Catch-up starts as soon as setup finishes.' : 'Catch-up follows the schedule and electricity hours.', 3],
+      ['shield', '', 'Safe by default', `Telemetry kept · each copy checked before an original is replaced${codec ? ` · ${codec}` : ''}${device ? ` on ${device}` : ''}`, 0],
     ];
-    mount.querySelector('[data-review]').innerHTML = rows.map(([label, text, target]) => `<div class="encoder-review-row"><span>${label}</span><b>${esc(text)}</b><button type="button" data-edit="${target}" aria-label="Edit ${label.toLowerCase()}" ${saving ? 'disabled' : ''}>Edit</button></div>`).join('');
+    mount.querySelector('[data-review]').innerHTML = rows.map(([glyph, label, text, detail, target]) => `<div class="encoder-review-row"><span class="encoder-review-icon" aria-hidden="true">${icon(glyph)}</span><div><b>${esc(text)}</b><small>${esc(detail)}</small></div>${target ? `<button type="button" class="ghost" data-edit="${target}" aria-label="Edit ${label}" ${saving ? 'disabled' : ''}>Edit</button>` : ''}</div>`).join('');
     const change = mount.querySelector('[data-level-change]');
     change.hidden = !saved || levelOf(saved) !== 'custom' || choice.level === 'custom';
     change.textContent = `Picking a level changes your Expert encoding to H.265 with the selected space target, removes custom bitrate, quality and larger-result settings, and replaces the originals. Other settings, including device lanes and verification, stay as saved.`;
@@ -363,20 +378,28 @@ async function renderWizard(mount, ctx, auto, editing, show) {
   let previewId = null, previewOwner = null, previewTimer = null, previewGeneration = 0;
   let previewWasCancelled = false;
   let previewState = 'idle', waitingFor = null, previewError = '', previewKind = 'saved', requestedKind = null;
-  let previewClips = {}, progressLevels = new Set(), split = 50, pausePending = false;
-  let progressEvent = null;
+  let previewClips = {}, progress = null, split = 50, pausePending = false;
+  let previewStartedAt = null, elapsedTimer = null;
   const excluded = new Set();
   const previewBody = mount.querySelector('[data-preview-body]');
   const previewStatus = mount.querySelector('[data-preview-status]');
+  let previewStatusMarkup = '';
+  function drawElapsed() {
+    const elapsed = previewStatus.querySelector('[data-preview-elapsed]');
+    if (elapsed) elapsed.textContent = Math.floor((Date.now() - previewStartedAt) / 1000);
+  }
   function drawLevels() {
     mount.querySelector('[data-levels]').innerHTML = LEVELS.map((level) => `<button type="button" class="encoder-tile" data-level="${level.id}" aria-pressed="${choice.level === level.id}">
       <span class="encoder-tile-title">${level.name}${level.rec ? '<span class="encoder-recommended">Recommended</span>' : ''}</span>
       <span class="encoder-pct"><small>about</small> ${level.pct}% <small>smaller</small></span>
-      <span class="encoder-bars"><span>1 hour of driving: <b>10 GB → ${10 * (100 - level.pct) / 100} GB</b></span><span class="encoder-bar"><i style="width:100%"></i></span><span class="encoder-bar after"><i style="width:${100 - level.pct}%"></i></span></span>
+      <span class="encoder-bars"><span>Typical space used</span><span class="encoder-bar"><i style="width:100%"></i></span><span class="encoder-bar after"><i style="width:${100 - level.pct}%"></i></span><span>Original → about ${100 - level.pct}% of its size</span></span>
       <span class="encoder-quality" aria-label="Picture quality: ${QUALITY[level.id].dots} out of 5">Picture ${[1, 2, 3, 4, 5].map((n) => `<i class="${n <= QUALITY[level.id].dots ? 'filled' : ''}" aria-hidden="true"></i>`).join('')}</span>
       <span class="encoder-quality-note">${QUALITY[level.id].note}</span><span class="encoder-device">${esc(levelDevice(devices, level.id))}</span><small>Typical results, not a promise</small>
     </button>`).join('') + `<button type="button" class="encoder-tile" data-open-expert aria-pressed="${choice.level === 'custom'}"><span class="encoder-tile-title">Custom</span>${icon('tune')}<span>Pick the codec, quality or bitrate yourself</span><small>Opens Expert</small></button>`;
     mount.querySelector('[data-keep-expert]')?.setAttribute('aria-pressed', String(choice.level === 'custom'));
+    const estimate = footageEstimate(days, choice.keep, vehicle.timezone, choice.level, today);
+    const level = LEVELS.find((l) => l.id === choice.level);
+    mount.querySelector('[data-space-estimate]').innerHTML = level ? `<div class="encoder-stat encoder-stat-saved"><b>${size(estimate.saved)}</b><span>you get back · estimate</span></div><div><div class="encoder-estimate-labels"><span>Older footage now: <b>${size(estimate.shrink)}</b></span><span>After: <b>${size(estimate.after)}</b></span></div><div class="encoder-space-bar" role="img" aria-label="Estimated ${level.pct}% saved"><i style="width:${100 - level.pct}%"></i><i style="width:${level.pct}%"></i></div><small>Based on ${level.name}'s typical ${level.pct}% saving across all clip kinds${total > days.length ? ` in the ${days.length} loaded days` : ''}. Actual savings depend on the kinds included and the footage.</small></div>` : '<div><b>Custom</b><p>Choose a guided level to estimate the space you get back. Your Expert settings are kept.</p></div>';
   }
   function drawPreview() {
     mount.querySelector('[data-cmp]').dataset.state = previewState;
@@ -393,23 +416,33 @@ async function renderWizard(mount, ctx, auto, editing, show) {
     previewBody.setAttribute('aria-labelledby', `encoder-tab-${previewKind}`);
     mount.querySelector('[data-another]').disabled = busy || !clip;
     let status = '';
-    if (previewState === 'waiting') status = `<p>Waiting for ${waitingFor === 'benchmark' ? 'the benchmark' : 'conversion'} to finish.</p>${waitingFor === 'conversion' ? `<button type="button" data-pause-preview ${pausePending ? 'disabled' : ''}>${pausePending ? 'Pausing conversion…' : 'Pause conversion and preview now'}</button>` : ''}`;
-    else if (busy) status = `<p>${requestedKind ? `Picking another ${requestedKind === 'saved' ? 'Saved' : 'Sentry'} clip…` : 'Preparing a preview from your footage…'}</p><div class="encoder-preview-levels">${LEVELS.map((level) => `<span class="${progressLevels.has(level.id) ? 'done' : ''}">${progressLevels.has(level.id) ? '✓ ' : ''}${level.name}</span>`).join('')}</div>`;
-    else if (previewState === 'failed') status = `<p>${esc(previewError || 'Could not make this preview. Try again.')}</p><button type="button" data-retry-preview>Try preview again</button>`;
+    if (busy) {
+      const stages = previewProgress(progress, requestedKind || previewKind, vehicle.timezone);
+      const waiting = previewState === 'waiting';
+      status = `${waiting ? `<p>${waitingFor === 'benchmark' ? 'Waiting for the device benchmark to finish.' : waitingFor === 'conversion' ? 'Waiting for the current shrinking run to finish.' : 'Waiting for an encoder to become available.'}</p>` : ''}
+        <ol class="encoder-preview-steps">${stages.steps.map((s) => `<li class="${s.done ? 'done' : s.active && !waiting ? 'active' : ''}"><span class="encoder-preview-mark" aria-hidden="true">${s.done ? '✓' : '·'}</span>${esc(s.text)}</li>`).join('')}</ol>
+        <progress max="5" value="${stages.done}" aria-label="Preview steps completed for this clip"></progress><p class="encoder-estimate-note">${stages.done} of 5 steps for this clip · <span data-preview-elapsed></span> seconds elapsed</p>
+        ${waiting && waitingFor === 'conversion' ? `<button type="button" data-pause-preview ${pausePending ? 'disabled' : ''}>${pausePending ? 'Pausing conversion…' : 'Pause conversion and preview now'}</button>` : ''}`;
+    }
+    else if (previewState === 'failed') {
+      const error = previewFailure(previewError);
+      status = `<p>${esc(error.message)}</p>${error.detail ? `<small class="encoder-error-detail">Detail: ${esc(error.detail)}</small>` : ''}<button type="button" data-retry-preview>Try preview again</button>`;
+    }
     else if (previewState === 'cancelled') status = '<p>Preview cancelled.</p><button type="button" data-retry-preview>Try preview again</button>';
     else if (!Object.keys(previewClips).length) status = '<p>No Saved or Sentry clips to preview yet.</p>';
     // Avoid re-announcing unchanged status and replacing focused buttons on every poll.
-    if (previewStatus.innerHTML !== status) previewStatus.innerHTML = status;
+    if (previewStatusMarkup !== status) { previewStatusMarkup = status; previewStatus.innerHTML = status; }
+    drawElapsed();
     let body = '';
     if (clip && choice.level === 'custom') body = '<p>Your Expert settings are kept. Pick Standard, Medium or High to compare the guided levels; this preview does not measure your custom settings.</p>';
     else if (original && selected) {
-      body = `<p class="encoder-preview-source">${esc(previewSource(clip, selected, vehicle.timezone))}</p>
+      body = `<div class="encoder-preview-source"><span class="encoder-review-icon" aria-hidden="true">${icon('videocam')}</span><span>${esc(previewSource(clip, selected, vehicle.timezone))}</span></div>
         <div class="encoder-cmp-grid"><div class="encoder-cmp" data-cmpdrag style="--split:${split}%">
           <img src="${esc(original.frame)}" alt="Original frame" data-original-frame><img class="encoder-after" src="${esc(selected.frame)}" alt="${name} frame">
           <span class="encoder-zoom-box" hidden></span><span class="encoder-cmp-handle" aria-hidden="true"></span><span class="encoder-cmp-tag original">Original</span><span class="encoder-cmp-tag selected">${name}</span>
           <input class="encoder-cmp-range" type="range" min="0" max="100" value="${split}" aria-label="Compare original and shrunk frame" aria-valuetext="${split}% original">
         </div><div class="encoder-zooms">${[[original, 'Original'], [selected, name]].map(([result, label]) => `<figure class="encoder-zoom ${result.level === 'orig' ? '' : 'selected'}"><img src="${esc(result.zoom)}" alt="${label}, up close"><figcaption><b>${label}</b><span>${esc(previewMegabytes(result.after_bytes))}${result.level === 'orig' ? '' : ` · ${previewPercent(result.saved_percent)}`}</span></figcaption></figure>`).join('')}</div></div>
-        <p class="encoder-measured">${esc(previewMeasured(results))}</p>`;
+        <p class="encoder-measured">${esc(previewMeasured(results)).replace(/\d+%(?: larger)?/g, '<b>$&</b>')} The cards above show what to expect on average. Parked clips shrink more than driving ones.</p>`;
     } else if (!busy && Object.keys(previewClips).length) body = `<p>No ${previewKind === 'saved' ? 'Saved' : 'Sentry'} clips to preview${requestedKind === previewKind ? ' besides those already shown' : ''}.</p>`;
     const key = JSON.stringify([clip, choice.level, busy, requestedKind]);
     if (previewBody.dataset.key === key) return;
@@ -434,6 +467,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
     if (previewId || previewState === 'starting') previewWasCancelled = true;
     previewGeneration++;
     clearTimeout(previewTimer); previewTimer = null;
+    clearInterval(elapsedTimer); elapsedTimer = null;
     previewOwner?.abort(); previewOwner = null;
     const id = previewId; previewId = null;
     // The page scope is already aborted during navigation. Cleanup must still reach the server.
@@ -446,12 +480,17 @@ async function renderWizard(mount, ctx, auto, editing, show) {
       if (another && previewClips[previewKind]) excluded.add(previewClips[previewKind].eventId);
       requestedKind = another ? previewKind : null;
       if (another) delete previewClips[previewKind]; else previewClips = {};
-      progressLevels = new Set(); previewState = 'starting'; previewError = ''; pausePending = false;
+      progress = null; previewState = 'starting'; previewError = ''; pausePending = false; previewStartedAt = Date.now();
+      elapsedTimer = setInterval(drawElapsed, 1000);
       previewOwner = scope([], { signal: ctx.scope.signal });
       onPreview((event) => {
         if (event.id !== previewId || step !== 2) return;
-        if (event.eventId && event.eventId !== progressEvent) { progressEvent = event.eventId; progressLevels = new Set(); }
-        if (event.result?.level) progressLevels.add(event.result.level);
+        if (event.state) { previewState = event.state; waitingFor = event.waitingFor; }
+        if (event.phase) {
+          // Older servers send individual phases; newer ones also retain measured levels.
+          if (event.eventId !== progress?.eventId) progress = {results:{}};
+          progress = {...progress, ...event, results:{...progress?.results, ...event.results, ...(event.result ? {[event.result.level]:event.result} : {})}};
+        }
         drawPreview();
       }, previewOwner);
     } else {
@@ -487,7 +526,8 @@ async function renderWizard(mount, ctx, auto, editing, show) {
           const answer = await invoke('previewGet', { id });
           if (!valid()) return;
           previewState = answer.state; waitingFor = answer.waitingFor;
-          if (answer.error) previewError = `Could not make this preview (${answer.error}). Try again.`;
+          if (answer.progress) progress = answer.progress;
+          if (answer.error) previewError = answer.error;
           if (['failed', 'cancelled'].includes(previewState)) {
             // The server revokes this preview's image URLs on failure/cancellation.
             if (requestedKind) delete previewClips[requestedKind]; else previewClips = {};
@@ -523,6 +563,9 @@ async function renderWizard(mount, ctx, auto, editing, show) {
   }
   function drawFootage() {
     const states = dayStates(days, choice.keep, vehicle.timezone, today);
+    const previous = new Date(Date.UTC(month.getUTCFullYear(), month.getUTCMonth() - 1, 1)).toISOString().slice(0, 7);
+    const visibleMonths = [...(phoneCalendar.matches ? [] : [previous]), month.toISOString().slice(0, 7)];
+    const cap = Math.max(0, ...days.filter((d) => visibleMonths.includes(d.day.slice(0, 7))).map((d) => Number(d.bytes) || 0));
     mount.querySelector('[data-calendar]').innerHTML = [-1, 0].map((offset) => {
       const date = new Date(Date.UTC(month.getUTCFullYear(), month.getUTCMonth() + offset, 1));
       const label = date.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
@@ -535,22 +578,16 @@ async function renderWizard(mount, ctx, auto, editing, show) {
         const key = `${prefix}-${String(d).padStart(2, '0')}`;
         const state = states.get(key) || 'none';
         const description = `${key}${key === today ? ', Today' : ''}: ${DAY_LABELS[state]}${byDay.has(key) ? `, ${size(byDay.get(key).bytes)}` : ''}`;
-        return `<td><span class="encoder-day encoder-day-pattern ${state}${key > today ? ' future' : ''}" role="img" aria-label="${esc(description)}" title="${esc(description)}" ${key === today ? 'aria-current="date"' : ''}>${d}</span></td>`;
+        return `<td><span class="encoder-day encoder-day-pattern ${state}${key > today ? ' future' : ''}" style="--a:${dayHeat(byDay.get(key)?.bytes, cap)}" role="img" aria-label="${esc(description)}" title="${esc(description)}" ${key === today ? 'aria-current="date"' : ''}>${d}</span></td>`;
       });
       const rows = [];
       for (let i = 0; i < cells.length; i += 7) rows.push(`<tr>${cells.slice(i, i + 7).join('')}</tr>`);
       return `<table class="encoder-cal ${offset === -1 ? 'encoder-cal-previous' : ''}" aria-label="${label} footage"><caption>${label}</caption><thead><tr>${['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].map((day) => `<th scope="col" abbr="${day}">${day.slice(0, 1)}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`;
     }).join('');
     mount.querySelector('[data-month="1"]').disabled = month.toISOString().slice(0, 10) >= currentMonth;
-    const sums = { kept: 0, shrink: 0 };
-    for (const day of days) {
-      const state = states.get(day.day);
-      if (state in sums) sums[state] += Number(day.bytes) || 0;
-    }
-    const level = LEVELS.find((entry) => entry.id === choice.level);
-    mount.querySelector('[data-summary]').innerHTML = `<div class="encoder-stat"><b>${size(sums.kept)}</b><span>Kept as recorded</span></div>
-      <div class="encoder-stat encoder-stat-shrink"><b>${size(sums.shrink)}</b><span>Will be shrunk</span></div>
-      <div class="encoder-stat"><b>${level ? `About ${size(sums.shrink * level.pct / 100)}` : 'Not estimated'}</b><span>${level ? `freed at ${level.name}` : 'with Expert settings'} <small>· estimate</small></span></div>`;
+    const sums = footageEstimate(days, choice.keep, vehicle.timezone, choice.level, today);
+    mount.querySelector('[data-summary]').innerHTML = `<div class="encoder-stat"><b>${size(sums.kept)}</b><span>${choice.keep == null ? 'no keep window' : `from the last ${choice.keep} ${choice.keep === 1 ? 'day' : 'days'} stays as recorded`}</span></div>
+      <div class="encoder-stat encoder-stat-shrink"><b>${size(sums.shrink)}</b><span>older footage that will be shrunk</span></div>`;
   }
   function drawOrder() {
     const included = choice.order.filter((group) => choice.included[group]);
@@ -572,6 +609,8 @@ async function renderWizard(mount, ctx, auto, editing, show) {
     mount.querySelectorAll('.encoder-stepper li').forEach((item, i) => {
       if (i + 1 === step) item.setAttribute('aria-current', 'step');
       else item.removeAttribute('aria-current');
+      item.classList.toggle('complete', i + 1 < step);
+      item.querySelector('.encoder-step-number').textContent = i + 1 < step ? '✓' : i + 1;
     });
     mount.querySelector('[data-back]').disabled = step === 1 || saving;
     next.hidden = step === STEPS.length;
@@ -699,6 +738,8 @@ async function renderWizard(mount, ctx, auto, editing, show) {
     event.target.setAttribute('aria-valuetext', `${split}% original`);
   };
   const onPageHide = () => cancelPreview();
+  const resizeCalendar = () => { if (ctx.alive() && step === 1) drawFootage(); };
+  phoneCalendar.addEventListener('change', resizeCalendar);
   window.addEventListener('pagehide', onPageHide);
   ctx.scope.signal.addEventListener('abort', cancelPreview, { once: true });
   invoke('devices').then((answer) => {
@@ -719,6 +760,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
   if (editing) showStep();
   return () => {
     cancelPreview();
+    phoneCalendar.removeEventListener('change', resizeCalendar);
     window.removeEventListener('pagehide', onPageHide);
     ctx.scope.signal.removeEventListener('abort', cancelPreview);
   };
