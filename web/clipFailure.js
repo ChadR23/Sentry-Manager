@@ -27,8 +27,8 @@ const KEPT = 'The original was kept as it is, not replaced.';
 const SOURCE_CHANGED = [
     NOT_KNOWN,
     [/contents the same both times/, `The file changed after it was checked: its metadata time (ctime) changed, its contents did not. Something kept changing its permissions or attributes while it was read. ${KEPT} Run it again.`],
-    [/nlink \d+ != 1[^;]*the Encoder's backup name/, `The file changed after it was checked: it got a second name (a hard link), BACKUP-… beside it, left by an earlier Encoder replace that did not finish. ${KEPT}`],
-    [/nlink \d+ != 1/, `The file changed after it was checked: it got a second name (a hard link), often made by a backup or deduplication tool. ${KEPT}`],
+    [/nlink \d+ != 1[^;]*the Encoder's backup name/, `The file has a second name (a hard link), BACKUP-… beside it, left by an earlier Encoder replace that did not finish. ${KEPT}`],
+    [/nlink \d+ != 1/, `The file has a second name (a hard link), often made by a backup or deduplication tool. ${KEPT}`],
     [/ENOENT|moved or deleted/, `The file changed after it was checked: it was moved or deleted. ${KEPT}`],
     [/realpath|linked folder/i, `Its folder is reached through a linked folder (a symlink), so it was not replaced. ${KEPT}`],
     [/not a regular file/i, `It is not a plain file, so it was not replaced. ${KEPT}`],
