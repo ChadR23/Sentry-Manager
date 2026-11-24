@@ -410,10 +410,8 @@ pub fn build_encode_args(a: &EncodeArgs) -> Result<Vec<String>, String> {
         args.extend(v(&["-bf", "0"]));
     }
     args.extend(["-tag:v".into(), (if a.codec == "h265" { "hvc1" } else { "av01" }).into()]);
-    args.extend(v(&["-fps_mode", "passthrough"]));
-    if reorder {
-        args.extend(v(&["-enc_time_base", "demux"]));
-    }
+    // Keep source presentation times for every encoder, including VFR clips.
+    args.extend(v(&["-fps_mode", "passthrough", "-enc_time_base", "demux"]));
     args.extend(v(&["-start_at_zero"]));
     if !reorder {
         args.extend(v(&["-avoid_negative_ts", "make_zero"]));
@@ -858,6 +856,7 @@ mod tests {
     /// buildEncodeArgs / decodeAccelArgs of the Node planner
     /// (src/main/converter/encoderPlanner.js, removed), frozen in
     /// tests/fixtures/node-reference/planner-args.json with the script that asked it.
+    /// Encode answers add the shared demux time-base rule to that frozen baseline.
     #[test]
     fn arguments_match_node() {
         let node: Vec<Value> = serde_json::from_value(crate::reference::json("planner-args.json")["answers"].clone()).unwrap();
