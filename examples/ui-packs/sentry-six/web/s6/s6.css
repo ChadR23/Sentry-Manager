@@ -99,6 +99,8 @@ input {
 }
 button,
 .btn {
+  overflow-wrap: normal;
+  word-break: normal;
   cursor: pointer;
 }
 button:hover,
@@ -3257,7 +3259,7 @@ dialog {
 .encoder-estimate-labels b { color: #e6e9ef; }
 .encoder-space-bar { height: 22px; border-radius: 8px; display: flex; overflow: hidden; margin-bottom: 6px; }
 .encoder-space-bar i:first-child { background: oklch(0.72 0.14 285); }
-.encoder-space-bar i:last-child { background: repeating-linear-gradient(45deg,oklch(0.82 0.18 150 / .5) 0 6px,oklch(0.82 0.18 150 / .25) 6px 12px); }
+.encoder-space-bar i:last-child { background: repeating-linear-gradient(45deg, rgba(89, 231, 135, .5) 0px, rgba(89, 231, 135, .5) 6px, rgba(89, 231, 135, .25) 6px, rgba(89, 231, 135, .25) 12px); }
 .encoder-subhead {
   margin: 26px 0 10px;
 }
@@ -3353,7 +3355,7 @@ dialog {
   border-radius: 18px;
   text-align: left;
   white-space: normal;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
   background: rgba(255, 255, 255, 0.035);
 }
 .encoder-tile[aria-pressed='true'] {
@@ -3620,3 +3622,30 @@ dialog {
   border-color: #06100a;
   cursor: not-allowed;
 }
+
+/* Fixed phone navigation is outside document flow, including during Tab
+   navigation. Leave room for the focus outline above it. */
+@media (max-width: 760px) {
+  html { scroll-padding-bottom: calc(100px + env(safe-area-inset-bottom)); }
+  #page :focus { scroll-margin-block: 12px; }
+  .encoder-cal th, .encoder-recommended { font-size: 12px; }
+  body:has(.encoder-expert) #phone-nav :is(a, button) { font-size: 12px; }
+}
+.encoder-include { display: flex; align-items: center; justify-content: center; min-width: 40px; min-height: 44px; flex: none; cursor: pointer; }
+.encoder-review-row :is(button, a) { min-width: 40px; min-height: 44px; }
+.encoder-foot { flex-wrap: wrap; }
+.encoder-foot > button { flex: 0 1 auto; }
+.encoder-foot [data-back], .encoder-catchup-header [data-job-command] { flex: none; white-space: nowrap; }
+.encoder-foot [data-save] { margin-left: auto; }
+[data-preview-status] progress, .encoder-status-screen progress {
+  appearance: none;
+  height: 8px;
+  border: 0;
+  border-radius: 99px;
+  overflow: hidden;
+  background: #27332e;
+  color: var(--accent);
+}
+:is([data-preview-status], .encoder-status-screen) progress::-webkit-progress-bar { background: #27332e; border-radius: 99px; }
+:is([data-preview-status], .encoder-status-screen) progress::-webkit-progress-value { background: var(--accent); border-radius: 99px; }
+:is([data-preview-status], .encoder-status-screen) progress::-moz-progress-bar { background: var(--accent); border-radius: 99px; }

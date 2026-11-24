@@ -340,6 +340,10 @@ async function renderWizard(mount, ctx, auto, editing, show) {
       : choice.offPeak ? 'Checks start when the cheap period begins. A running job pauses when it ends and resumes in the next cheap period, even with a weekly or monthly schedule.'
       : 'Once a job starts, it runs until done. It does not pause at a set hour.';
   }
+  function nothingWaiting() {
+    return choice.keep == null ? 'No footage is waiting to be shrunk yet.'
+      : `Nothing older than the last ${choice.keep} ${choice.keep === 1 ? 'day' : 'days'} is waiting to be shrunk yet.`;
+  }
   function drawReview() {
     const expertOnly = choice.level === 'custom' && saved?.outputMode !== 'replace';
     mount.querySelector('[data-plan]').textContent = planSentence(choice);
@@ -351,7 +355,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
     const device = choice.level === 'custom' ? '' : devices ? levelDevice(devices, choice.level).replace(/^Uses /, '') : '';
     const rows = [
       ['calendar_month', 'keep', choice.keep == null ? 'No keep window' : `Newest ${choice.keep} ${choice.keep === 1 ? 'day stays' : 'days stay'} as recorded`, `${size(estimate.kept)} right now · day-level estimate`, 1],
-      ['hard_drive', 'space', level ? `${level.name}: about ${level.pct}% smaller` : 'Customized in Expert', level ? `Gets back about ${size(estimate.saved)} from ${size(estimate.shrink)} of older footage · estimate across all clip kinds` : expertSummary(saved), 2],
+      ['hard_drive', 'space', level ? `${level.name}: about ${level.pct}% smaller` : 'Customized in Expert', level ? estimate.shrink === 0 ? nothingWaiting() : `Gets back about ${size(estimate.saved)} from ${size(estimate.shrink)} of older footage · estimate across all clip kinds` : expertSummary(saved), 2],
       ['conversion_path', 'order', `Order: ${order.map((g) => GROUPS[g].name.replace(' clips', '')).join(' → ')}`, excludedNames.length ? `${excludedNames.join(' and ')} stay as recorded` : order[0] === 'SavedClips' ? 'Saved clips are done first, so your important moments shrink first' : `${GROUPS[order[0]].name} are done first`, 1],
       ['schedule', 'schedule', scheduleText(choice), choice.catchUp ? 'Catch-up starts as soon as setup finishes.' : 'Catch-up follows the schedule and electricity hours.', 3],
       ['shield', '', 'Safe by default', `Telemetry kept · each copy checked before an original is replaced${codec ? ` · ${codec}` : ''}${device ? ` on ${device}` : ''}`, 0],
@@ -361,9 +365,10 @@ async function renderWizard(mount, ctx, auto, editing, show) {
     change.hidden = !saved || levelOf(saved) !== 'custom' || choice.level === 'custom';
     change.textContent = `Picking a level changes your Expert encoding to H.265 with the selected space target, removes custom bitrate, quality and larger-result settings, and replaces the originals. Other settings, including device lanes and verification, stay as saved.`;
     const notice = mount.querySelector('[data-replacement]');
-    notice.hidden = !replacementUnavailable && !expertOnly;
+    notice.hidden = !replacementUnavailable && !expertOnly && acknowledged;
     notice.textContent = replacementUnavailable
       ? 'This storage cannot safely replace the originals. Automatic shrinking needs replacement to free space. Open Expert to set up separate copies instead.'
+      : !expertOnly ? 'Turn on replacing to free space; automatic shrinking needs it.'
       : 'Separate copies stay in Expert because they need a destination and do not free space on this share. Open Expert to keep these settings, or pick a space level to replace originals.';
     const ack = mount.querySelector('[data-ack]');
     ack.checked = acknowledged; ack.disabled = saving || replacementUnavailable || expertOnly;
@@ -399,7 +404,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
     mount.querySelector('[data-keep-expert]')?.setAttribute('aria-pressed', String(choice.level === 'custom'));
     const estimate = footageEstimate(days, choice.keep, vehicle.timezone, choice.level, today);
     const level = LEVELS.find((l) => l.id === choice.level);
-    mount.querySelector('[data-space-estimate]').innerHTML = level ? `<div class="encoder-stat encoder-stat-saved"><b>${size(estimate.saved)}</b><span>you get back · estimate</span></div><div><div class="encoder-estimate-labels"><span>Older footage now: <b>${size(estimate.shrink)}</b></span><span>After: <b>${size(estimate.after)}</b></span></div><div class="encoder-space-bar" role="img" aria-label="Estimated ${level.pct}% saved"><i style="width:${100 - level.pct}%"></i><i style="width:${level.pct}%"></i></div><small>Based on ${level.name}'s typical ${level.pct}% saving across all clip kinds${total > days.length ? ` in the ${days.length} loaded days` : ''}. Actual savings depend on the kinds included and the footage.</small></div>` : '<div><b>Custom</b><p>Choose a guided level to estimate the space you get back. Your Expert settings are kept.</p></div>';
+    mount.querySelector('[data-space-estimate]').innerHTML = estimate.shrink === 0 ? `<p>${esc(nothingWaiting())}</p>` : level ? `<div class="encoder-stat encoder-stat-saved"><b>${size(estimate.saved)}</b><span>you get back · estimate</span></div><div><div class="encoder-estimate-labels"><span>Older footage now: <b>${size(estimate.shrink)}</b></span><span>After: <b>${size(estimate.after)}</b></span></div><div class="encoder-space-bar" role="img" aria-label="Estimated ${level.pct}% saved"><i style="width:${100 - level.pct}%"></i><i style="width:${level.pct}%"></i></div><small>Based on ${level.name}'s typical ${level.pct}% saving across all clip kinds${total > days.length ? ` in the ${days.length} loaded days` : ''}. Actual savings depend on the kinds included and the footage.</small></div>` : '<div><b>Custom</b><p>Choose a guided level to estimate the space you get back. Your Expert settings are kept.</p></div>';
   }
   function drawPreview() {
     mount.querySelector('[data-cmp]').dataset.state = previewState;
@@ -597,7 +602,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
         <span class="encoder-pos" aria-hidden="true">${on ? included.indexOf(group) + 1 : '–'}</span><span class="encoder-group-dot ${info.color}" aria-hidden="true"></span>
         <div class="encoder-group-copy"><b>${info.name}</b><span>${on ? info.description : 'Kept as recorded, never shrunk'}</span></div>
         <div class="encoder-move"><button type="button" data-move="${group}" data-direction="-1" aria-label="Move ${info.name} up" ${i === 0 ? 'disabled' : ''}>${icon('expand_more')}</button><button type="button" data-move="${group}" data-direction="1" aria-label="Move ${info.name} down" ${i === choice.order.length - 1 ? 'disabled' : ''}>${icon('expand_more')}</button></div>
-        <input class="toggle-switch" type="checkbox" role="switch" data-include="${group}" aria-label="Shrink ${info.name}" aria-describedby="encoder-order-help" ${on ? 'checked' : ''} ${on && included.length === 1 ? 'disabled' : ''}>
+        <label class="encoder-include"><input class="toggle-switch" type="checkbox" role="switch" data-include="${group}" aria-label="Shrink ${info.name}" aria-describedby="encoder-order-help" ${on ? 'checked' : ''} ${on && included.length === 1 ? 'disabled' : ''}></label>
       </li>`;
     }).join('');
   }

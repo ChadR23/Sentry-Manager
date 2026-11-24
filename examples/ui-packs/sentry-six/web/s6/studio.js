@@ -49,6 +49,7 @@ export function showStudio(kind, vehicle, extra = {}, vehicleChanged = false) {
     frames[kind] = wrap;
     wrap.querySelector('iframe').onload = () => {
       wrap.querySelector('.studio-loading')?.remove();
+      if (kind === 'encoder') trackEncoderFooter(wrap.querySelector('iframe'));
       wrap
         .querySelector('iframe')
         .contentWindow?.postMessage({ type: wrap.hidden ? 'pause' : 'shown' }, location.origin);
@@ -60,4 +61,18 @@ export function showStudio(kind, vehicle, extra = {}, vehicleChanged = false) {
     .querySelector('iframe')
     .contentWindow?.postMessage({ type: 'shown' }, location.origin);
   fit();
+}
+
+// These adaptations belong to the Sentry Six embed, not the Original UI.
+function trackEncoderFooter(frame) {
+  const doc = frame.contentDocument;
+  if (!doc) return;
+  const footer = doc.querySelector('.converter-actions');
+  if (footer) {
+    const observer = new frame.contentWindow.ResizeObserver(() => {
+      doc.documentElement.style.setProperty('--s6-encoder-footer', `${footer.getBoundingClientRect().height}px`);
+    });
+    observer.observe(footer);
+    frame.contentWindow.addEventListener('pagehide', () => observer.disconnect(), { once: true });
+  }
 }

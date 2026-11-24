@@ -127,3 +127,19 @@ html:root {
     --accent-solid-hover: oklch(0.87 0.16 150);
     --accent-deep: oklch(0.62 0.16 150);
     }
+
+/* Encoder accessibility in this pack; Original and standalone Studio keep
+   their own layout. The measured footer height includes wrapping/safe areas. */
+html[data-embed="encoder"] #converterReplacementWarning { min-width: 0; overflow-wrap: anywhere; }
+html[data-embed="encoder"] button { overflow-wrap: normal; word-break: normal; }
+@media (max-width: 1100px) {
+  html[data-embed="encoder"] { scroll-padding-bottom: calc(var(--s6-encoder-footer, 96px) + 16px); }
+  html[data-embed="encoder"] :focus { scroll-margin-block: 12px; }
+  html[data-embed="encoder"] .converter-bay { padding-bottom: calc(var(--s6-encoder-footer, 96px) + 24px); }
+}
+@media (max-width: 760px) {
+  html[data-embed="encoder"] :is(.converter-stage-index, .converter-stage-name, .converter-field-label,
+    .converter-fieldset legend, .converter-current-label, .converter-timings h4,
+    .converter-current-progress, .converter-counters dt, .converter-summary-grid dt,
+    .converter-summary-kicker, .nd-hw-tiles span, .converter-benchmark-table th) { font-size: 12px; }
+}
