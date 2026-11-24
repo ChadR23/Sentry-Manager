@@ -85,6 +85,22 @@ pub fn with_valid_lanes(config: &Value) -> Value {
     Value::Object(r)
 }
 
+/// A sent config without `keepRecent` inherits the stored one for the same folder; `null` removes it
+/// (Original's page doesn't know the keep window, the guided page turns it off with null).
+fn inherit_keep_recent(sent: &mut serde_json::Map<String, Value>, stored: Option<&Value>) {
+    match sent.get("keepRecent") {
+        Some(Value::Null) => {
+            sent.shift_remove("keepRecent");
+        }
+        Some(_) => {}
+        None => {
+            if let Some(k) = stored.and_then(|c| c.get("keepRecent")) {
+                sent.insert("keepRecent".into(), k.clone());
+            }
+        }
+    }
+}
+
 fn is_config(c: &Value) -> bool {
     c.as_object().is_some_and(|m| m.get("sourceRoot").is_some_and(Value::is_string))
 }
@@ -121,23 +137,76 @@ pub fn normalize_settings(value: &Value) -> Result<Value, String> {
         return Err("INVALID_AUTO_SETTINGS".into());
     }
     let configs = normalize_configs(value);
-    let interval = value.get("intervalMinutes").and_then(Value::as_f64).filter(|f| INTERVAL_MINUTES.iter().any(|i| *i as f64 == *f)).map(|f| f as i64).unwrap_or(60);
+    let schedule = match value.get("schedule") {
+        None | Some(Value::Null) => Value::Null,
+        Some(v) => super::schedule::normalize(v)?,
+    };
+    // (while a calendar schedule is set, Original's dropdown reads "every 24 hours")
+    let interval = if schedule.is_null() { interval_of(value) } else { 1440 };
     let mut s = json!({
-        "enabled": !configs.is_empty(), "intervalMinutes": interval, "window": null,
+        "enabled": !configs.is_empty(), "intervalMinutes": interval, "window": normalize_window(value)?,
         "holdManual": value.get("holdManual") == Some(&json!(true)), "keepRunning": value.get("keepRunning") == Some(&json!(true)),
         "openAtLogin": value.get("openAtLogin") == Some(&json!(true)), "configs": configs
     });
-    let w = value.get("window").unwrap_or(&Value::Null);
-    if w.get("follow") == Some(&json!("off-peak")) {
-        s["window"] = json!({ "follow": "off-peak" });
-    } else if !w.is_null() {
-        let (a, b) = (w.get("startHour").unwrap_or(&Value::Null), w.get("endHour").unwrap_or(&Value::Null));
-        if !is_hour(a) || !is_hour(b) || a.as_i64() == b.as_i64() {
-            return Err("INVALID_AUTO_WINDOW".into());
-        }
-        s["window"] = json!({ "startHour": a.as_i64(), "endHour": b.as_i64() });
+    // `catchUp` means the same with a calendar schedule and with an interval: on, a vehicle's
+    // catch-up run (see `more_eligible`) ignores the window, and the schedule, until nothing
+    // eligible is left; off, its work follows both from the start. So a saved value carries
+    // over when an Original save clears the calendar. A calendar always stores it (a missing
+    // one reads as on). In interval mode only a value sent is stored: Node's settings have
+    // neither key, and a setup saved without one keeps Node's behaviour (no catch-up runs).
+    let catch_up = value.get("catchUp") != Some(&json!(false));
+    if !schedule.is_null() {
+        s["schedule"] = schedule;
+        s["catchUp"] = json!(catch_up);
+    } else if value.get("catchUp").is_some_and(Value::is_boolean) {
+        s["catchUp"] = json!(catch_up);
     }
     Ok(s)
+}
+
+fn interval_of(value: &Value) -> i64 {
+    value.get("intervalMinutes").and_then(Value::as_f64).filter(|f| INTERVAL_MINUTES.iter().any(|i| *i as f64 == *f)).map(|f| f as i64).unwrap_or(60)
+}
+
+fn normalize_window(value: &Value) -> Result<Value, String> {
+    let w = value.get("window").unwrap_or(&Value::Null);
+    if w.get("follow") == Some(&json!("off-peak")) {
+        return Ok(json!({ "follow": "off-peak" }));
+    }
+    if w.is_null() {
+        return Ok(Value::Null);
+    }
+    let (a, b) = (w.get("startHour").unwrap_or(&Value::Null), w.get("endHour").unwrap_or(&Value::Null));
+    if !is_hour(a) || !is_hour(b) || a.as_i64() == b.as_i64() {
+        return Err("INVALID_AUTO_WINDOW".into());
+    }
+    Ok(json!({ "startHour": a.as_i64(), "endHour": b.as_i64() }))
+}
+
+/// The calendar schedule of normalized settings, or None (interval mode).
+fn calendar_of(settings: &Value) -> Option<Value> {
+    settings.get("schedule").filter(|s| !s.is_null()).cloned()
+}
+
+/// Normalized settings with the catch-up switch on (see `normalize_settings`).
+fn catch_up_on(settings: &Value) -> bool {
+    settings.get("catchUp") == Some(&json!(true))
+}
+
+/// A vehicle's saved config `old` (None: a vehicle new to automatic shrinking) becoming `new`
+/// makes footage eligible that wasn't: a shorter keep window (none keeps nothing), a group
+/// switched on, or another space level. Each of these starts a catch-up run.
+fn more_eligible(old: Option<&Value>, new: &Value) -> bool {
+    let Some(old) = old else { return true };
+    let days = |c: &Value| c.get("keepRecent").filter(|k| super::keep_recent::valid(k)).and_then(|k| k["days"].as_i64()).unwrap_or(0);
+    let groups = |c: &Value| -> Vec<&'static str> {
+        match c.get("includedGroups") {
+            Some(Value::Array(a)) => a.iter().filter_map(|g| g.as_str().and_then(super::scanner::canonical_group)).collect(),
+            _ => super::scanner::GROUPS.to_vec(),
+        }
+    };
+    let had = groups(old);
+    days(new) < days(old) || groups(new).iter().any(|g| !had.contains(g)) || old.get("profileId") != new.get("profileId")
 }
 
 /// inWindow(window, hour): inside [start, end), wrapping past midnight
@@ -334,6 +403,17 @@ struct Inner {
     status: Value,
     indexes: std::collections::HashMap<String, Index>,
     timer: Option<Arc<AtomicBool>>,
+    /// A calendar schedule's check times as saved in state.json: [lastCheckAt, nextCheckAt].
+    /// While a round is under way the saved nextCheckAt is a time already passed, so a
+    /// restart before every vehicle has its job checks again at once.
+    calendar: [Value; 2],
+    /// A calendar round (or a job's next part) is still under way: some vehicle waits for
+    /// its job, or a job is still running and may have a next part
+    round_open: bool,
+    /// When the scheduled or asked-for check now under way began
+    round_at: Option<i64>,
+    /// Catch-up failures: [next retry at, the wait after the last failure].
+    catch_up_retry: std::collections::HashMap<String, [i64; 2]>,
 }
 
 pub struct Auto {
@@ -362,7 +442,7 @@ impl Auto {
             "activeSource": null, "round": [], "sources": {}, "pending": {}, "active": {},
             "heldManual": [], "handledManual": []
         });
-        Arc::new(Auto { o, st: Mutex::new(Inner { settings: default_settings(), saved: vec![], status, indexes: Default::default(), timer: None }), ticking: Mutex::new(()), sweep_abort: Mutex::new(None) })
+        Arc::new(Auto { o, st: Mutex::new(Inner { settings: default_settings(), saved: vec![], status, indexes: Default::default(), timer: None, calendar: [Value::Null, Value::Null], round_open: false, round_at: None, catch_up_retry: Default::default() }), ticking: Mutex::new(()), sweep_abort: Mutex::new(None) })
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -462,6 +542,14 @@ impl Auto {
             return false;
         }
         let s = self.lock();
+        // A catch-up job can outlive several setup edits. Its unstarted clips
+        // must respect the vehicle's current keep window and included groups.
+        let current = Self::config_for(&s, config["sourceRoot"].as_str().unwrap_or(""));
+        let eligibility = current.as_ref().unwrap_or(config);
+        if super::keep_recent::is_young(eligibility, d, (self.o.now)())
+            || d["group"].as_str().is_some_and(|group| eligibility["includedGroups"].as_array().is_some_and(|groups| !groups.iter().any(|g| g == group))) {
+            return true;
+        }
         s.indexes.get(&setup_key(config)).is_some_and(|ix| Self::known_in(ix, d, Some(config)))
     }
 
@@ -483,6 +571,9 @@ impl Auto {
         *self.sweep_abort.lock().unwrap() = Some(abort.clone());
         let mut new_files = 0;
         let r = (self.o.scanner)(config, &abort, &mut |d: Value| {
+            if super::keep_recent::is_young(config, &d, (self.o.now)()) {
+                return true;
+            }
             let known = self.lock().indexes.get(&key).is_some_and(|ix| Self::known_in(ix, &d, Some(config)));
             if known {
                 return true;
@@ -518,6 +609,10 @@ impl Auto {
         for item in job["items"].as_array().into_iter().flatten() {
             let rel = item["relativePath"].as_str().unwrap_or("").to_string();
             let (state, code) = (item["state"].as_str().unwrap_or(""), item["resultCode"].as_str().unwrap_or(""));
+            // Deferred eligibility is temporary, not a handled or failed clip.
+            if state == "skipped" && code == "auto-deferred" {
+                continue;
+            }
             // (the stat outside the lock)
             let stat = if replace && state == "completed" {
                 Some(item["sourcePath"].as_str().and_then(|p| std::fs::metadata(p).ok()))
@@ -578,9 +673,61 @@ impl Auto {
             let s = self.lock();
             let active = s.status["active"].as_object().cloned().unwrap_or_default();
             let pick = |k: &str| active.values().filter(|e| e[k] == true).map(|e| e["jobId"].clone()).collect::<Vec<_>>();
-            json!({ "pausedForWindowJobIds": pick("pausedForWindow"), "pausedForDevicesJobIds": pick("pausedForDevices"), "heldManual": s.status["heldManual"], "handledManual": s.status["handledManual"] })
+            let mut body = json!({ "pausedForWindowJobIds": pick("pausedForWindow"), "pausedForDevicesJobIds": pick("pausedForDevices"), "heldManual": s.status["heldManual"], "handledManual": s.status["handledManual"] });
+            // (Node's file has no check times: only a calendar schedule adds them)
+            if let Some(cal) = calendar_of(&s.settings) {
+                body["lastCheckAt"] = s.calendar[0].clone();
+                body["nextCheckAt"] = s.calendar[1].clone();
+                // (the times belong to this schedule: a later one ignores them)
+                body["schedule"] = cal;
+            }
+            // (only while some vehicle is catching up, so Node's file stays as it was)
+            if let Some(c) = s.status.get("catchUp") {
+                body["catchUp"] = c.clone();
+            }
+            body
         };
         let _ = self.write_json(STATE_FILE, &body);
+    }
+
+    /// The vehicles in their catch-up run: status `catchUp`, `{ "<sourceRoot>": { "since": ms } }`,
+    /// present only while one is.
+    fn catching(s: &Inner) -> Vec<String> {
+        s.status.get("catchUp").and_then(Value::as_object).map(|m| m.keys().cloned().collect()).unwrap_or_default()
+    }
+
+    fn start_catch_up(s: &mut Inner, root: &str, now: i64) {
+        if s.status.get("catchUp").is_none() {
+            s.status["catchUp"] = json!({});
+        }
+        // (a run already going keeps its start: more eligible footage makes it longer)
+        if s.status["catchUp"].get(root).is_none() {
+            s.status["catchUp"][root] = json!({ "since": now });
+        }
+    }
+
+    fn in_catch_up(s: &Inner, root: &str) -> bool {
+        s.status.get("catchUp").and_then(|m| m.get(root)).is_some()
+    }
+
+    /// Ends `root`'s catch-up run; true when it had one.
+    fn end_catch_up(s: &mut Inner, root: &str) -> bool {
+        s.catch_up_retry.remove(root);
+        let Some(m) = s.status.get_mut("catchUp").and_then(Value::as_object_mut) else { return false };
+        let had = m.shift_remove(root).is_some();
+        if m.is_empty() {
+            s.status.as_object_mut().unwrap().shift_remove("catchUp");
+        }
+        had
+    }
+
+    /// Queues each vehicle catching up that has no job, for a check now.
+    fn queue_catch_up(s: &mut Inner) {
+        for root in Self::catching(s) {
+            if s.status["active"].get(&root).is_none() && !s.status["round"].as_array().unwrap().iter().any(|r| r == root.as_str()) {
+                s.status["round"].as_array_mut().unwrap().push(json!(root));
+            }
+        }
     }
 
     fn resume_job(&self, id: &str) -> Result<(), String> {
@@ -592,7 +739,10 @@ impl Auto {
     }
 
     fn follow_active_jobs(&self, inside: bool) -> Result<(), String> {
-        let entries: Vec<(String, Value)> = self.lock().status["active"].as_object().cloned().unwrap_or_default().into_iter().collect();
+        let (entries, catching) = {
+            let s = self.lock();
+            (s.status["active"].as_object().cloned().unwrap_or_default().into_iter().collect::<Vec<(String, Value)>>(), Self::catching(&s))
+        };
         for (root, entry) in entries {
             let id = entry["jobId"].as_str().unwrap_or("").to_string();
             let job = self.o.service.get(&id).ok().filter(|j| !j.is_null());
@@ -604,8 +754,28 @@ impl Auto {
                     let mut s = self.lock();
                     s.status["active"].as_object_mut().unwrap().shift_remove(&root);
                     let more = job.as_ref().is_some_and(|j| j["state"] == "completed" && super::jobstore::normalize::truthy(&j["moreAfter"]));
+                    // A catch-up run ends once its job is done with nothing left after it, or
+                    // the user cancelled it. A failed job's run is retried (`retry_stranded`).
+                    // A job started before the vehicle's settings made more footage eligible
+                    // proves nothing about that footage: the vehicle is checked again instead.
+                    let state = job.as_ref().map(|j| j["state"].clone()).unwrap_or(Value::Null);
+                    let stale = Self::in_catch_up(&s, &root) && job.as_ref().zip(Self::config_for(&s, &root)).is_some_and(|(j, c)| more_eligible(Some(&j["config"]), &c));
+                    if state == "completed" {
+                        s.catch_up_retry.remove(&root);
+                    }
+                    if (state == "completed" && !more && !stale) || state == "cancelled" {
+                        Self::end_catch_up(&mut s, &root);
+                    } else if state != "completed" {
+                        self.defer_catch_up(&mut s, &root);
+                    }
+                    let more = more || (state == "completed" && stale);
                     if more && s.settings["enabled"] == true && !s.status["round"].as_array().unwrap().iter().any(|r| r == root.as_str()) {
                         s.status["round"].as_array_mut().unwrap().push(json!(root));
+                        // (a restart before the next part starts checks again, not at the next scheduled time)
+                        if calendar_of(&s.settings).is_some() {
+                            let now = (self.o.now)();
+                            Self::open_round(&mut s, now);
+                        }
                     }
                 }
                 self.save_state();
@@ -617,16 +787,22 @@ impl Auto {
                 continue;
             }
             let paused_window = entry["pausedForWindow"] == true;
+            // (a catch-up run ignores the window; a job the user paused stays paused either way)
+            let inside = inside || catching.contains(&root);
             if !inside && !paused_window && job["state"] != "paused" {
                 self.o.service.pause(job["id"].as_str().unwrap_or("")).map_err(|e| code_of(&e))?;
                 self.set_entry(&root, "pausedForWindow", true);
                 self.save_state();
                 self.changed();
             } else if inside && paused_window {
-                self.set_entry(&root, "pausedForWindow", false);
                 if entry["pausedForDevices"] != true {
-                    self.resume_job(&id)?;
+                    match self.resume_job(&id) {
+                        Ok(()) => {},
+                        Err(e) if e == "JOB_ACTIVE" => continue,
+                        Err(e) => return Err(e),
+                    }
                 }
+                self.set_entry(&root, "pausedForWindow", false);
                 self.save_state();
                 self.changed();
             }
@@ -661,12 +837,10 @@ impl Auto {
             if held.is_empty() && handled.is_empty() {
                 return;
             }
-            for id in &held {
-                let _ = self.o.service.resume(id);
-            }
+            let still_held: Vec<_> = held.into_iter().filter(|id| self.resume_job(id).is_err()).collect();
             {
                 let mut s = self.lock();
-                s.status["heldManual"] = json!([]);
+                s.status["heldManual"] = json!(still_held);
                 s.status["handledManual"] = json!([]);
             }
             self.save_state();
@@ -771,7 +945,8 @@ impl Auto {
         s.status["sources"][root] = cur;
     }
 
-    fn sweep_round(&self) {
+    /// Checks the vehicles in the round, in order; with `only`, just those (the rest stay queued).
+    fn sweep_round(&self, only: Option<&[String]>) {
         {
             let mut s = self.lock();
             s.status["checking"] = json!(true);
@@ -781,11 +956,13 @@ impl Auto {
         loop {
             let next = {
                 let mut s = self.lock();
-                if s.settings["enabled"] != true || s.status["round"].as_array().unwrap().is_empty() {
-                    None
-                } else {
-                    let r = s.status["round"].as_array_mut().unwrap().remove(0);
-                    Some(r.as_str().unwrap_or("").to_string())
+                let at = s.status["round"].as_array().unwrap().iter().position(|r| only.is_none_or(|o| o.iter().any(|x| r == x.as_str())));
+                match at {
+                    Some(i) if s.settings["enabled"] == true => {
+                        let r = s.status["round"].as_array_mut().unwrap().remove(i);
+                        Some(r.as_str().unwrap_or("").to_string())
+                    }
+                    _ => None,
                 }
             };
             let Some(root) = next else { break };
@@ -811,10 +988,19 @@ impl Auto {
                 s.status["error"] = json!(e);
             }
             Self::note_source(&mut s, &root, json!({ "lastCheckAt": now, "lastNewFiles": new_files, "error": error }));
+            if error.is_some() {
+                self.defer_catch_up(&mut s, &root);
+            }
             if new_files.unwrap_or(0) > 0 {
                 s.status["pending"][&root] = json!(new_files);
             } else {
                 s.status["pending"].as_object_mut().unwrap().shift_remove(&root);
+            }
+            // nothing eligible left: a catch-up run is over (a check that failed tries again later)
+            let ended = new_files == Some(0) && Self::end_catch_up(&mut s, &root);
+            drop(s);
+            if ended {
+                self.save_state();
             }
         }
         self.lock().status["checking"] = json!(false);
@@ -844,6 +1030,7 @@ impl Auto {
                     s.status["error"] = json!(code);
                     Self::note_source(&mut s, root, json!({ "error": code }));
                     s.status["pending"].as_object_mut().unwrap().shift_remove(root);
+                    self.defer_catch_up(&mut s, root);
                 }
                 self.changed();
                 false
@@ -851,7 +1038,8 @@ impl Auto {
         }
     }
 
-    fn allocate(&self) -> Result<(), String> {
+    /// Starts jobs for the vehicles with clips waiting; with `only`, just those.
+    fn allocate(&self, only: Option<&[String]>) -> Result<(), String> {
         let (active_roots, waiting, configs) = {
             let s = self.lock();
             let active: Vec<String> = s.status["active"].as_object().unwrap().keys().cloned().collect();
@@ -859,7 +1047,11 @@ impl Auto {
                 return Ok(());
             }
             let configs = s.settings["configs"].as_array().cloned().unwrap_or_default();
-            let waiting: Vec<String> = configs.iter().filter_map(|c| c["sourceRoot"].as_str().map(str::to_string)).filter(|r| s.status["pending"][r].as_f64().unwrap_or(0.0) > 0.0 && s.status["active"].get(r).is_none()).collect();
+            let waiting: Vec<String> = configs
+                .iter()
+                .filter_map(|c| c["sourceRoot"].as_str().map(str::to_string))
+                .filter(|r| s.status["pending"][r].as_f64().unwrap_or(0.0) > 0.0 && s.status["active"].get(r).is_none() && only.is_none_or(|o| o.contains(r)))
+                .collect();
             (active, waiting, configs)
         };
         if active_roots.is_empty() && waiting.is_empty() {
@@ -895,7 +1087,10 @@ impl Auto {
             let id = entry["jobId"].as_str().unwrap_or("").to_string();
             let lanes = plan.get(root).cloned().unwrap_or_default();
             if lanes.is_empty() {
-                if entry["pausedForDevices"] != true {
+                // (a catch-up job the user paused stays theirs: a device hold would resume it
+                // once the device came back, and its run would carry on unasked)
+                let user_paused = || entry["pausedForWindow"] != true && Self::in_catch_up(&self.lock(), root) && self.o.service.get(&id).is_ok_and(|j| j["state"] == "paused");
+                if entry["pausedForDevices"] != true && !user_paused() {
                     if self.o.service.pause(&id).is_ok() {
                         self.set_entry(root, "pausedForDevices", true);
                     }
@@ -944,14 +1139,20 @@ impl Auto {
         let inside = self.inside_window_at(time);
         self.hold_manual_jobs(inside);
         self.follow_active_jobs(inside)?;
-        if self.lock().settings["enabled"] != true || !inside {
+        if self.lock().settings["enabled"] != true {
             return Ok(());
+        }
+        self.retry_stranded(time);
+        if !inside {
+            return self.catch_up_outside();
         }
         if (self.o.is_busy)() {
             return Ok(());
         }
+        let mut opened = false;
         let round_left = {
             let mut s = self.lock();
+            let catching = Self::catching(&s);
             let known: Vec<String> = s.settings["configs"].as_array().cloned().unwrap_or_default().iter().filter_map(|c| c["sourceRoot"].as_str().map(str::to_string)).collect();
             let round: Vec<Value> = s.status["round"].as_array().unwrap().iter().filter(|r| r.as_str().is_some_and(|x| known.iter().any(|k| k == x))).cloned().collect();
             s.status["round"] = Value::Array(round);
@@ -959,24 +1160,127 @@ impl Auto {
             for r in stale {
                 s.status["pending"].as_object_mut().unwrap().shift_remove(&r);
             }
-            let next = s.status["nextCheckAt"].as_i64();
-            if s.status["round"].as_array().unwrap().is_empty() && next.map_or(true, |n| time >= n) {
-                s.status["round"] = json!(known);
-                s.status["nextCheckAt"] = json!(time + s.settings["intervalMinutes"].as_i64().unwrap_or(60) * 60_000);
+            let due = s.status["nextCheckAt"].as_i64().map_or(true, |n| time >= n);
+            match calendar_of(&s.settings) {
+                // a calendar check is due even while a job's next part waits in the round
+                Some(cal) if due => {
+                    let mut round = s.status["round"].as_array().cloned().unwrap_or_default();
+                    for r in &known {
+                        if !round.iter().any(|x| x == r.as_str()) {
+                            round.push(json!(r));
+                        }
+                    }
+                    s.status["round"] = Value::Array(round);
+                    s.status["nextCheckAt"] = json!(super::schedule::next_after(&cal, time));
+                    s.status["lastCheckAt"] = json!(time);
+                    s.round_at = Some(time);
+                    Self::open_round(&mut s, time);
+                    opened = true;
+                }
+                Some(_) => {}
+                // (vehicles queued for their catch-up run don't hold up a due check of the rest)
+                None if s.status["round"].as_array().unwrap().iter().all(|r| catching.iter().any(|c| r == c.as_str())) && due => {
+                    s.status["round"] = json!(known);
+                    s.status["nextCheckAt"] = json!(time + s.settings["intervalMinutes"].as_i64().unwrap_or(60) * 60_000);
+                }
+                None => {}
             }
             !s.status["round"].as_array().unwrap().is_empty()
         };
+        if opened {
+            self.save_state();
+        }
         if round_left {
-            self.sweep_round();
+            self.sweep_round(None);
         }
         {
             let mut s = self.lock();
             if s.status["nextCheckAt"].is_null() {
-                let n = (self.o.now)() + s.settings["intervalMinutes"].as_i64().unwrap_or(60) * 60_000;
+                let now = (self.o.now)();
+                let n = match calendar_of(&s.settings) {
+                    Some(cal) => super::schedule::next_after(&cal, now),
+                    None => now + s.settings["intervalMinutes"].as_i64().unwrap_or(60) * 60_000,
+                };
                 s.status["nextCheckAt"] = json!(n);
             }
         }
-        self.allocate()
+        let allocated = self.allocate(None);
+        self.note_round_done();
+        allocated
+    }
+
+    /// Back off from the time a check, job or start fails, not from its dispatch: a long job
+    /// may fail after the previous retry deadline. A completed batch or the run's end resets it.
+    fn defer_catch_up(&self, s: &mut Inner, root: &str) {
+        const FIRST: i64 = 15 * 60_000;
+        const MOST: i64 = 6 * 60 * 60_000;
+        if !Self::in_catch_up(s, root) {
+            return;
+        }
+        let wait = s.catch_up_retry.get(root).map_or(FIRST, |[_, wait]| (*wait * 2).min(MOST));
+        s.catch_up_retry.insert(root.to_string(), [(self.o.now)() + wait, wait]);
+    }
+
+    /// Retry failed catch-up work independently of the window or schedule. Active jobs
+    /// (including user pauses), queued checks and pending starts already have work to follow.
+    fn retry_stranded(&self, now: i64) {
+        let mut s = self.lock();
+        let catching = Self::catching(&s);
+        s.catch_up_retry.retain(|r, _| catching.contains(r));
+        for root in catching {
+            let stranded = s.status["active"].get(&root).is_none()
+                && !s.status["round"].as_array().unwrap().iter().any(|r| r == root.as_str())
+                && s.status["pending"][&root].as_f64().unwrap_or(0.0) <= 0.0;
+            if stranded && s.catch_up_retry.get(&root).is_some_and(|[at, _]| now >= *at) {
+                s.status["round"].as_array_mut().unwrap().push(json!(root));
+            }
+        }
+    }
+
+    /// Outside the window only the vehicles in their catch-up run are checked and given jobs;
+    /// the rest of the round waits for the window, and no scheduled check starts.
+    fn catch_up_outside(&self) -> Result<(), String> {
+        let catching = Self::catching(&self.lock());
+        if catching.is_empty() || (self.o.is_busy)() {
+            return Ok(());
+        }
+        let queued = self.lock().status["round"].as_array().unwrap().iter().any(|r| catching.iter().any(|c| r == c.as_str()));
+        if queued {
+            self.sweep_round(Some(&catching));
+        }
+        let allocated = self.allocate(Some(&catching));
+        self.note_round_done();
+        allocated
+    }
+
+    /// A calendar round has begun (a check, or a job's next part): until its jobs are done
+    /// the saved nextCheckAt is `at`, already passed.
+    fn under_way(s: &Inner) -> bool {
+        ["round", "pending", "active"].iter().any(|k| s.status[*k].as_array().map_or_else(|| !s.status[*k].as_object().unwrap().is_empty(), |a| !a.is_empty()))
+    }
+
+    fn open_round(s: &mut Inner, at: i64) {
+        s.round_open = true;
+        s.calendar[1] = json!(at);
+    }
+
+    /// A calendar round is over once every vehicle it found clips for has had its jobs,
+    /// next parts included: its check times are saved then. (A restart before that
+    /// checks again at once; the index makes that cheap.)
+    fn note_round_done(&self) {
+        {
+            let mut s = self.lock();
+            let waiting = Self::under_way(&s);
+            if !s.round_open || waiting || calendar_of(&s.settings).is_none() {
+                return;
+            }
+            s.round_open = false;
+            if let Some(at) = s.round_at.take() {
+                s.calendar[0] = json!(at);
+            }
+            s.calendar[1] = s.status["nextCheckAt"].clone();
+        }
+        self.save_state();
     }
 
     /// tick(): one at a time; a caller while one runs waits for it
@@ -1065,6 +1369,40 @@ impl Auto {
                 }
                 s.status[k] = Value::Array(list);
             }
+            // catch-up runs go on where they were: a vehicle without its job is checked at once
+            if catch_up_on(&s.settings) && s.settings["enabled"] == true {
+                let known: Vec<String> = s.settings["configs"].as_array().cloned().unwrap_or_default().iter().filter_map(|c| c["sourceRoot"].as_str().map(str::to_string)).collect();
+                for (root, e) in st["catchUp"].as_object().into_iter().flatten() {
+                    if let Some(since) = e["since"].as_i64().filter(|_| known.contains(root)) {
+                        Self::start_catch_up(&mut s, root, since);
+                    }
+                }
+                Self::queue_catch_up(&mut s);
+            }
+            // (turned off, nothing is due: turning it back on waits for the next scheduled time)
+            if let Some(cal) = calendar_of(&s.settings).filter(|_| s.settings["enabled"] == true) {
+                let now = (self.o.now)();
+                // times saved for another schedule (a save whose state.json write failed) don't count
+                let ours = st.get("schedule").is_none_or(|x| *x == cal);
+                let time = |k: &str| st[k].as_i64().filter(|_| ours);
+                let (last, next) = (time("lastCheckAt"), time("nextCheckAt"));
+                // one check for whatever was missed while the server was off, never one per missed time
+                let missed = match (next, last) {
+                    (Some(n), _) => n <= now,
+                    (None, Some(l)) => super::schedule::missed(&cal, l, now),
+                    (None, None) => false,
+                };
+                let upcoming = match next {
+                    Some(n) if n > now => n,
+                    _ => super::schedule::next_after(&cal, now),
+                };
+                // (a missed check stays saved as due until its round's jobs are done)
+                let saved_next = if missed { next.map(Value::from).unwrap_or(Value::Null) } else { json!(upcoming) };
+                s.calendar = [last.map(Value::from).unwrap_or(Value::Null), saved_next];
+                s.status["lastCheckAt"] = s.calendar[0].clone();
+                s.status["nextCheckAt"] = json!(if missed { now } else { upcoming });
+                s.round_open = missed;
+            }
         }
         if self.o.timer && self.lock().timer.is_none() {
             let stop = Arc::new(AtomicBool::new(false));
@@ -1099,6 +1437,7 @@ impl Auto {
             let off = self.nodes_off_for(&with_valid_lanes(&Value::Object(sent.clone()))["lanes"]).unwrap_or_else(|| {
                 configs.iter().find(|c| c["sourceRoot"] == root).and_then(|c| c["nodesOff"].as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
             });
+            inherit_keep_recent(&mut sent, configs.iter().find(|c| c["sourceRoot"] == root));
             configs.retain(|c| c["sourceRoot"] != root);
             if !off.is_empty() {
                 sent.insert("nodesOff".into(), json!(off));
@@ -1113,16 +1452,45 @@ impl Auto {
         }
         let mut input = next.as_object().cloned().unwrap_or_default();
         input.insert("configs".into(), Value::Array(configs));
+        let stored = self.lock().settings.clone();
+        Self::inherit_calendar(&mut input, &stored)?;
         let normalized = normalize_settings(&Value::Object(input))?;
+        let (was, calendar) = (calendar_of(&stored), calendar_of(&normalized));
         for c in normalized["configs"].as_array().unwrap() {
             self.load_index(c);
         }
-        let added: Vec<String> = {
+        let (added, entering): (Vec<String>, Vec<String>) = {
             let s = self.lock();
-            let before: IndexMap<String, String> = s.settings["configs"].as_array().cloned().unwrap_or_default().iter().map(|c| (c["sourceRoot"].as_str().unwrap_or("").to_string(), c.to_string())).collect();
-            normalized["configs"].as_array().unwrap().iter().filter(|c| before.get(c["sourceRoot"].as_str().unwrap_or("")) != Some(&c.to_string())).map(|c| c["sourceRoot"].as_str().unwrap_or("").to_string()).collect()
+            let before: IndexMap<String, Value> = s.settings["configs"].as_array().cloned().unwrap_or_default().into_iter().map(|c| (c["sourceRoot"].as_str().unwrap_or("").to_string(), c)).collect();
+            let root_of = |c: &Value| c["sourceRoot"].as_str().unwrap_or("").to_string();
+            let after = normalized["configs"].as_array().unwrap();
+            let added = after.iter().filter(|c| before.get(&root_of(c)).map(Value::to_string) != Some(c.to_string())).map(root_of).collect();
+            let entering = if catch_up_on(&normalized) { after.iter().filter(|c| more_eligible(before.get(&root_of(c)), c)).map(root_of).collect() } else { vec![] };
+            (added, entering)
         };
-        self.lock().settings = normalized.clone();
+        // (the schedule and its next check change together: a timer tick in between would
+        // otherwise check at once)
+        let (new_calendar, catch_up_changed) = {
+            let mut s = self.lock();
+            s.settings = normalized.clone();
+            let now = (self.o.now)();
+            let next = Self::follow_calendar(&mut s, was.as_ref(), calendar.as_ref(), now);
+            // a vehicle removed, or the switch turned off, ends its run; one re-added starts another
+            let had = s.status.get("catchUp").cloned();
+            let on = catch_up_on(&s.settings) && s.settings["enabled"] == true;
+            for root in Self::catching(&s) {
+                if !on || Self::config_for(&s, &root).is_none() {
+                    Self::end_catch_up(&mut s, &root);
+                }
+            }
+            for root in &entering {
+                Self::start_catch_up(&mut s, root, now);
+            }
+            (next, s.status.get("catchUp").cloned() != had)
+        };
+        if new_calendar || catch_up_changed {
+            self.save_state();
+        }
         self.write_json(SETTINGS_FILE, &normalized).map_err(|e| super::owned::code_of(&e).to_string())?;
         let saved = self.lock().saved.clone();
         let list = match keep {
@@ -1134,9 +1502,17 @@ impl Auto {
             None => saved,
         };
         self.write_saved(list);
+        // With a calendar schedule a save starts no work by itself: changed vehicles wait for
+        // the next scheduled check, except those in their catch-up run, which start now.
+        let queued: Vec<String> = if calendar.is_some() {
+            let catching = Self::catching(&self.lock());
+            added.into_iter().filter(|r| catching.contains(r)).collect()
+        } else {
+            added
+        };
         {
             let mut s = self.lock();
-            for r in added {
+            for r in &queued {
                 if !s.status["round"].as_array().unwrap().iter().any(|x| x == r.as_str()) {
                     s.status["round"].as_array_mut().unwrap().push(json!(r));
                 }
@@ -1147,8 +1523,69 @@ impl Auto {
             }
         }
         self.changed();
-        self.tick_soon();
+        if calendar.is_none() || !queued.is_empty() {
+            self.tick_soon();
+        }
         Ok(self.get_state())
+    }
+
+    /// The next check after a save: a new calendar schedule (or one turned back on) waits for
+    /// its next time; going back to an interval checks on this save's tick. True: the saved
+    /// check times changed.
+    fn follow_calendar(s: &mut Inner, was: Option<&Value>, calendar: Option<&Value>, now: i64) -> bool {
+        if s.settings["enabled"] != true || (was.is_some() && calendar.is_none()) {
+            s.round_open = false;
+            s.round_at = None;
+        }
+        if s.settings["enabled"] != true {
+            return false;
+        }
+        let Some(cal) = calendar else {
+            if was.is_some() {
+                s.status["nextCheckAt"] = Value::Null;
+            }
+            return false;
+        };
+        // (work an interval check left under way is the calendar's to finish)
+        if was.is_none() && Self::under_way(s) {
+            Self::open_round(s, now);
+        }
+        if was == Some(cal) && !s.status["nextCheckAt"].is_null() {
+            return false;
+        }
+        // (a round still owed, say one waiting for the window after a restart, stays due:
+        // it takes the new schedule's next time when it runs)
+        if s.round_open && s.status["nextCheckAt"].as_i64().is_some_and(|n| n <= now) {
+            return true;
+        }
+        let n = super::schedule::next_after(cal, now);
+        s.status["nextCheckAt"] = json!(n);
+        // (a round still waiting for jobs keeps its passed time saved until it has them)
+        if !s.round_open {
+            s.calendar[1] = json!(n);
+        }
+        true
+    }
+
+    /// Original's page knows neither `schedule` nor `catchUp`. A save without `catchUp` keeps the
+    /// stored one. A save without `schedule` keeps the stored calendar schedule when it sends the
+    /// interval and window that schedule stores (1440 and its window); otherwise it goes back to
+    /// the interval sent. `schedule: null` always clears it.
+    fn inherit_calendar(input: &mut Map<String, Value>, stored: &Value) -> Result<(), String> {
+        if !input.contains_key("catchUp") {
+            if let Some(c) = stored.get("catchUp") {
+                input.insert("catchUp".into(), c.clone());
+            }
+        }
+        if input.contains_key("schedule") {
+            return Ok(());
+        }
+        let Some(cal) = calendar_of(stored) else { return Ok(()) };
+        let sent = Value::Object(input.clone());
+        if interval_of(&sent) == 1440 && normalize_window(&sent)? == stored["window"] {
+            input.insert("schedule".into(), cal);
+        }
+        Ok(())
     }
 
     /// ownerResumed(jobId)
@@ -1250,6 +1687,7 @@ impl Auto {
         }
         let mut sent = config.as_object().unwrap().clone();
         sent.shift_remove("nodesOff");
+        inherit_keep_recent(&mut sent, saved.iter().find(|c| c["sourceRoot"] == config["sourceRoot"]));
         let mut list: Vec<Value> = saved.into_iter().filter(|c| c["sourceRoot"] != config["sourceRoot"]).collect();
         list.push(Value::Object(sent));
         self.write_saved(list);
@@ -1271,6 +1709,8 @@ impl Auto {
             let mut s = self.lock();
             s.status["nextCheckAt"] = Value::Null;
             s.status["round"] = json!([]);
+            // (outside the window a check now still checks the vehicles catching up)
+            Self::queue_catch_up(&mut s);
         }
         self.tick();
         self.get_state()

@@ -14,7 +14,7 @@ mod encode;
 pub mod lanes;
 mod recover;
 pub mod tools;
-mod work;
+pub(crate) mod work;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -23,6 +23,7 @@ pub mod lanes_tests;
 mod node_tests;
 
 pub use encode::{parse_progress_line, Progress};
+pub(crate) use encode::EncodeRequest;
 
 use super::contracts;
 use super::error::CError;
@@ -352,7 +353,8 @@ pub struct Options {
     pub job_clip_limit: usize,
     pub discovery_batch_size: usize,
     pub discovery_flush_ms: i64,
-    /// skipDiscovered(config, discovered): clips the host holds back
+    /// skipDiscovered(config, discovered): clips the host holds back; rechecked
+    /// before each automatic item starts so queued work follows current rules.
     pub skip_discovered: Option<Arc<dyn Fn(&Value, &Value) -> bool + Send + Sync>>,
     /// for tests: called with each encode's arguments before it starts
     pub on_spawn: Option<Arc<dyn Fn(&[String]) + Send + Sync>>,
@@ -425,6 +427,7 @@ pub struct RtState {
     pub queue_closed: bool,
     pub producer_done: bool,
     pub pause_requested: bool,
+    preview_pause: Option<u64>,
     pub cancel_requested: bool,
     pub stop_requested: bool,
     pub halted: bool,
@@ -484,6 +487,7 @@ impl Runtime {
                 queue_closed: false,
                 producer_done: false,
                 pause_requested: false,
+                preview_pause: None,
                 cancel_requested: false,
                 stop_requested: false,
                 halted: false,
@@ -581,6 +585,7 @@ pub struct Inner {
     pub listeners: Mutex<Vec<(u64, Listener)>>,
     pub listener_seq: AtomicU64,
     pub shutting_down: AtomicBool,
+    preview_active: AtomicBool,
     pub command: Mutex<()>,
     pub owner_seq: AtomicU64,
     pub reads: Arc<(Mutex<usize>, Condvar)>,
@@ -596,11 +601,29 @@ pub struct Inner {
 #[derive(Clone)]
 pub struct Service(pub Arc<Inner>);
 
+pub struct PreviewLease(Service);
+impl Drop for PreviewLease {
+    fn drop(&mut self) { self.0.0.preview_active.store(false, Ordering::SeqCst); }
+}
+
 pub fn service_error(code: &str) -> Fail {
     Fail::code(code)
 }
 
 impl Service {
+    /// Reserve the converter while idle (parked jobs may keep their ownership).
+    /// The command lock closes the idle-check/start-or-resume race.
+    pub fn try_preview(&self) -> SResult<Option<PreviewLease>> {
+        self.mutate(|| {
+            if self.0.shutting_down.load(Ordering::SeqCst) { return Err(service_error("SERVICE_SHUTDOWN")); }
+            if self.preview_active() || super::runtime::preview_conversion(self)?.is_some() { return Ok(None); }
+            self.0.preview_active.store(true, Ordering::SeqCst);
+            Ok(Some(PreviewLease(self.clone())))
+        })
+    }
+
+    pub fn preview_active(&self) -> bool { self.0.preview_active.load(Ordering::SeqCst) }
+
     pub fn new(o: Options) -> Service {
         Service(Arc::new(Inner {
             o,
@@ -608,6 +631,7 @@ impl Service {
             listeners: Mutex::new(vec![]),
             listener_seq: AtomicU64::new(0),
             shutting_down: AtomicBool::new(false),
+            preview_active: AtomicBool::new(false),
             command: Mutex::new(()),
             owner_seq: AtomicU64::new(1),
             reads: Arc::new((Mutex::new(0), Condvar::new())),
@@ -901,6 +925,7 @@ impl Service {
     /// start(config): the new job's id
     pub fn start(&self, config: &Value) -> SResult<String> {
         self.mutate(|| {
+            if self.preview_active() { return Err(service_error("JOB_ACTIVE")); }
             if self.0.shutting_down.load(Ordering::SeqCst) {
                 return Err(service_error("SERVICE_SHUTDOWN"));
             }
@@ -991,17 +1016,47 @@ impl Service {
         }).collect()
     }
 
-    /// pause(id)
-    pub fn pause(&self, id: &str) -> SResult<Value> {
+    /// Claim only a pause this preview actually requests. Existing owner,
+    /// recovery and network pauses are never claimed or resumed by a preview.
+    pub fn pause_for_preview(&self, id: &str) -> SResult<Option<u64>> {
         self.mutate(|| {
             let rt = self.ensure_runtime(id)?;
-            if rt.manifest().state().is_terminal() {
-                return Ok(public_snapshot(&rt.manifest()));
+            {
+                let s = rt.lock();
+                if !s.running || s.pause_requested || s.cancel_requested || s.stop_requested || s.recovery_required
+                    || s.manifest.state().is_terminal() || matches!(s.manifest.state(), JobState::Paused | JobState::PausedNetwork) {
+                    return Ok(None);
+                }
             }
-            rt.lock().pause_requested = true;
-            self.emit(&rt, "pause_requested", vec![]);
-            Ok(public_snapshot(&rt.manifest()))
+            let token = self.0.owner_seq.fetch_add(1, Ordering::SeqCst);
+            self.pause_now(id, Some(token))?;
+            Ok(Some(token))
         })
+    }
+
+    pub fn resume_after_preview(&self, id: &str, token: u64) -> SResult<()> {
+        self.mutate(|| {
+            let Some(rt) = self.runtime_of(id) else { return Ok(()) };
+            {
+                let s = rt.lock();
+                if s.preview_pause != Some(token) || !s.pause_requested || s.cancel_requested || s.stop_requested
+                    || s.manifest.state().is_terminal() || self.0.shutting_down.load(Ordering::SeqCst) { return Ok(()); }
+            }
+            self.resume_now(id).map(|_| ())
+        })
+    }
+
+    /// pause(id): the owner's new request also revokes any preview's claim.
+    pub fn pause(&self, id: &str) -> SResult<Value> { self.mutate(|| self.pause_now(id, None)) }
+
+    fn pause_now(&self, id: &str, owner: Option<u64>) -> SResult<Value> {
+        let rt = self.ensure_runtime(id)?;
+        if rt.manifest().state().is_terminal() { return Ok(public_snapshot(&rt.manifest())); }
+        {
+            let mut s = rt.lock(); s.pause_requested = true; s.preview_pause = owner;
+        }
+        self.emit(&rt, "pause_requested", vec![]);
+        Ok(public_snapshot(&rt.manifest()))
     }
 
     fn wake_paused(rt: &Runtime) {
@@ -1013,48 +1068,52 @@ impl Service {
 
     /// resume(id)
     pub fn resume(&self, id: &str) -> SResult<Value> {
-        self.mutate(|| {
-            let rt = self.live_runtime(id)?;
-            let (state, pause_requested, running, from) = {
-                let s = rt.lock();
-                (s.manifest.state(), s.pause_requested, s.running, recorded_from(&s.manifest))
-            };
-            if state != JobState::Paused && !pause_requested {
-                return Err(service_error("JOB_NOT_PAUSED"));
-            }
-            if from == Some(JobState::Replacing) && !running {
-                self.resolve_replacement_before_cancel(&rt, id, true)?;
-                self.emit(&rt, "resumed", vec![]);
-                return Ok(public_snapshot(&rt.manifest()));
-            }
-            if state != JobState::Paused && running {
-                {
-                    let mut s = rt.lock();
-                    s.pause_requested = false;
-                    s.pause_persisted = false;
-                }
-                Self::wake_paused(&rt);
-                self.emit(&rt, "resumed", vec![]);
-                return Ok(public_snapshot(&rt.manifest()));
-            }
-            self.release_interrupted_save(&rt, false)?;
-            let m = rt.manifest();
-            if m.str("activeItemId").is_some() && m.get("recovery").is_some_and(super::jobstore::normalize::truthy) {
-                return Err(service_error("RECOVERY_REQUIRED"));
-            }
+        self.mutate(|| self.resume_now(id))
+    }
+
+    fn resume_now(&self, id: &str) -> SResult<Value> {
+        if self.preview_active() { return Err(service_error("JOB_ACTIVE")); }
+        let rt = self.live_runtime(id)?;
+        rt.lock().preview_pause = None;
+        let (state, pause_requested, running, from) = {
+            let s = rt.lock();
+            (s.manifest.state(), s.pause_requested, s.running, recorded_from(&s.manifest))
+        };
+        if state != JobState::Paused && !pause_requested {
+            return Err(service_error("JOB_NOT_PAUSED"));
+        }
+        if from == Some(JobState::Replacing) && !running {
+            self.resolve_replacement_before_cancel(&rt, id, true)?;
+            self.emit(&rt, "resumed", vec![]);
+            return Ok(public_snapshot(&rt.manifest()));
+        }
+        if state != JobState::Paused && running {
             {
                 let mut s = rt.lock();
                 s.pause_requested = false;
                 s.pause_persisted = false;
             }
-            self.update(&rt, |_| Some(Patch::new().state(JobState::Waiting).set("recovery", Value::Null)))?;
             Self::wake_paused(&rt);
-            if !rt.lock().running {
-                self.relaunch_async(&rt);
-            }
             self.emit(&rt, "resumed", vec![]);
-            Ok(public_snapshot(&rt.manifest()))
-        })
+            return Ok(public_snapshot(&rt.manifest()));
+        }
+        self.release_interrupted_save(&rt, false)?;
+        let m = rt.manifest();
+        if m.str("activeItemId").is_some() && m.get("recovery").is_some_and(super::jobstore::normalize::truthy) {
+            return Err(service_error("RECOVERY_REQUIRED"));
+        }
+        {
+            let mut s = rt.lock();
+            s.pause_requested = false;
+            s.pause_persisted = false;
+        }
+        self.update(&rt, |_| Some(Patch::new().state(JobState::Waiting).set("recovery", Value::Null)))?;
+        Self::wake_paused(&rt);
+        if !rt.lock().running {
+            self.relaunch_async(&rt);
+        }
+        self.emit(&rt, "resumed", vec![]);
+        Ok(public_snapshot(&rt.manifest()))
     }
 
     fn queued_ids(m: &Manifest) -> Vec<String> {
@@ -1134,6 +1193,7 @@ impl Service {
     /// retryFailed(id)
     pub fn retry_failed(&self, id: &str) -> SResult<Value> {
         self.mutate(|| {
+            if self.preview_active() { return Err(service_error("JOB_ACTIVE")); }
             let rt = self.live_runtime(id)?;
             let m = rt.manifest();
             if recorded_from(&m) == Some(JobState::Replacing) {

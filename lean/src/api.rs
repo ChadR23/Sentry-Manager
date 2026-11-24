@@ -326,7 +326,7 @@ fn settled(md: &std::fs::Metadata, now: std::time::SystemTime) -> bool {
 }
 
 /// event.json of a Sentry / Saved event, when present and small (inventory.js eventInfo).
-fn event_info(v: &Vehicle, rec: &Recording) -> Value {
+pub(crate) fn event_info(v: &Vehicle, rec: &Recording) -> Value {
     event_info_at(v, rec, std::time::SystemTime::now())
 }
 

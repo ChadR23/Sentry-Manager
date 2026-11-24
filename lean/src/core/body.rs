@@ -107,6 +107,14 @@ where
     })
 }
 
+/// Whether a request waits for "100 Continue" before it sends its body (`Expect:
+/// 100-continue`). hyper sends the 100 the first time the body is read: an answer made
+/// without reading it goes out instead, with no 100, and its connection then closes, so a
+/// refused client never sends the body at all.
+pub fn expects_continue(h: &axum::http::HeaderMap) -> bool {
+    h.get(header::EXPECT).is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"100-continue"))
+}
+
 /// Marks an answer as the last on its connection (hyper then closes it; HTTP/2 drops the header).
 pub fn close_after(r: &mut Res) {
     r.headers_mut().insert(header::CONNECTION, HeaderValue::from_static("close"));

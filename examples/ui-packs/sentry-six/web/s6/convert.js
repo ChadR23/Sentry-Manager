@@ -264,7 +264,10 @@ function openStream() {
   es.addEventListener('converter:progress', (e) => {
     if (!valid()) return;
     try {
-      applySnapshot(JSON.parse(e.data).snapshot);
+      const event = JSON.parse(e.data);
+      if (event.type === 'preview') {
+        for (const fn of [...previewListeners]) fn(event);
+      } else applySnapshot(event.snapshot);
     } catch {
       /* ignore malformed data */
     }
@@ -319,6 +322,10 @@ export function follow(fn, owner) {
 }
 export function onBenchmark(fn, owner) {
   return subscribe(live.bench, fn, owner);
+}
+const previewListeners = new Set();
+export function onPreview(fn, owner) {
+  return subscribe(previewListeners, fn, owner);
 }
 /** Wait for subscription, without leaving a timer behind on navigation. */
 export function streamReady(owner) {

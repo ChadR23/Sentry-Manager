@@ -79,6 +79,66 @@ impl Item_ {
     }
 }
 
+/// First-attempt settings from the whole original clip. Encoder proofs and
+/// decode-tier collection belong to the caller; planning has no job or I/O.
+pub(crate) struct InitialPlan {
+    pub selected: Selected,
+    pub bitrate: Option<f64>,
+    pub quality: Option<String>,
+    pub smallest: Option<planner::Smallest>,
+    pub keep_order: bool,
+    pub hold_frames: i64,
+    /// Decode tier keys and arguments, fastest first; an empty list uses CPU decode.
+    pub decode: Vec<(String, Vec<String>)>,
+    pub codec: String,
+    pub profile_id: String,
+    pub cpu_only: bool,
+    pub no_target: bool,
+    pub target_bytes: Option<f64>,
+    pub duration_us: Option<i64>,
+}
+
+/// Use whole-file bytes and inspected duration, even when encoding a preview
+/// window. `selected` is already proven (CPU-only for Smallest); `tiers` are
+/// the caller's available decode tiers for this encoder and lead-in hold.
+pub(crate) fn initial_plan(
+    config: &Value,
+    source_bytes: u64,
+    inspected: &tools::Inspected,
+    timeline: &super::super::timeline::Timeline,
+    selected: Selected,
+    tiers: Vec<(String, Vec<String>)>,
+) -> SResult<InitialPlan> {
+    let hold_frames = super::super::lead_in::hold_frames(Some(&timeline.lead_in)) as i64;
+    let codec = config["codec"].as_str().unwrap_or("h265").to_string();
+    let profile_id = config["profileId"].as_str().unwrap_or("").to_string();
+    let custom = profile_id == "custom";
+    let quality: Option<String> = if profile_id == "quality" { config["qualityLevel"].as_str().map(str::to_string) } else { None };
+    // Smallest (CPU only): libx265 here, peaks at 60% of this clip's own average
+    // bitrate. A clip given back the original's timing keeps its frame order.
+    let cpu_only = profile_id == contracts::SMALLEST_PROFILE_ID;
+    let smallest = cpu_only.then(|| planner::Smallest { maxrate: contracts::smallest_maxrate(source_bytes as f64, inspected.duration_seconds) });
+    let keep_order = cpu_only && super::super::lead_in::source_timing_for(Some(&timeline.lead_in), Some(&timeline.undecodable)).is_some();
+    let no_target = !contracts::has_size_target(&profile_id);
+    let target_bytes = if no_target { None } else { Some(contracts::target_output_bytes(source_bytes, &profile_id)) };
+    let mut bitrate: Option<f64> = if quality.is_some() || cpu_only {
+        None
+    } else if custom {
+        Some(config["bitrateKbps"].as_f64().unwrap_or(0.0) * 1000.0)
+    } else {
+        Some(planner::calculate_initial_bitrate(&codec, target_bytes.unwrap_or(0.0), inspected.duration_seconds, 0.0, 0.0)
+            .map(|b| b as f64).map_err(|_| service_error("INVALID_BITRATE"))?)
+    };
+    if selected.hardware && !no_target {
+        bitrate = bitrate.map(|b| (tools::bitrate_floor(&codec) as f64).max((b * 0.93).floor()));
+    }
+    let duration_us = {
+        let d = contracts::js_round(inspected.duration_seconds * 1_000_000.0) as i64;
+        if d != 0 { Some(d) } else { None }
+    };
+    Ok(InitialPlan { selected, bitrate, quality, smallest, keep_order, hold_frames, decode: tiers, codec, profile_id, cpu_only, no_target, target_bytes, duration_us })
+}
+
 impl Service {
     // ---- the save slot and the lead
 
@@ -810,6 +870,14 @@ impl Service {
                 if item_state(&item) != ItemState::Queued {
                     continue;
                 }
+                let config = rt.manifest().config().clone();
+                if config["autoConvert"] == true && self.0.o.skip_discovered.as_ref().is_some_and(|skip| skip(&config, &item)) {
+                    // Recheck after queueing/pausing: a setup edit may now keep
+                    // this original. Never encode, copy or remember a deferral.
+                    self.item_patch(rt, &next, vec![("state", Some(ItemState::Skipped.into())),
+                        ("eligibleVideo", Some(json!(false))), ("resultCode", Some(json!("auto-deferred")))], vec![])?;
+                    continue;
+                }
                 Self::begin_item(rt, &item);
                 let outcome = if item["kind"] == "asset" {
                     self.process_asset(rt, &item, ("asset-retained", "copied"))
@@ -1164,30 +1232,13 @@ impl Service {
         let config = m.config().clone();
         let timeline = self.0.o.tools.read_timeline(source, &signal).map_err(Fail::from)?;
         timing.mark("timeline");
-        let hold_frames = super::super::lead_in::hold_frames(Some(&timeline.lead_in)) as i64;
-        let codec = config["codec"].as_str().unwrap_or("h265").to_string();
-        let profile_id = config["profileId"].as_str().unwrap_or("").to_string();
-        let custom = profile_id == "custom";
-        let mut quality: Option<String> = if profile_id == "quality" { config["qualityLevel"].as_str().map(str::to_string) } else { None };
-        // Smallest (CPU only): libx265 here, peaks at 60% of this clip's own average
-        // bitrate. A clip given back the original's timing keeps its frame order.
-        let cpu_only = profile_id == contracts::SMALLEST_PROFILE_ID;
-        let smallest = cpu_only.then(|| planner::Smallest { maxrate: contracts::smallest_maxrate(item.n("sourceBytes") as f64, inspected.duration_seconds) });
-        let keep_order = cpu_only && super::super::lead_in::source_timing_for(Some(&timeline.lead_in), Some(&timeline.undecodable)).is_some();
-        let no_target = !contracts::has_size_target(&profile_id);
-        let target_bytes = if no_target { None } else { Some(contracts::target_output_bytes(item.n("sourceBytes"), &profile_id)) };
-        let initial = |target: f64| planner::calculate_initial_bitrate(&codec, target, inspected.duration_seconds, 0.0, 0.0).map(|b| b as f64).map_err(|_| service_error("INVALID_BITRATE"));
-        let mut bitrate: Option<f64> = if quality.is_some() || cpu_only {
-            None
-        } else if custom {
-            Some(config["bitrateKbps"].as_f64().unwrap_or(0.0) * 1000.0)
-        } else {
-            Some(initial(target_bytes.unwrap_or(0.0))?)
-        };
-        let mut selected: Selected = match lane {
-            _ if cpu_only => self.0.o.tools.select_cpu_fallback(&codec),
-            Some(l) => self.0.o.tools.select_for(&codec, &super::super::devices::device_of(&l.device)),
-            None => self.0.o.tools.select(&codec),
+        // Probing and service decode state stay outside the pure clip plan.
+        let codec = config["codec"].as_str().unwrap_or("h265");
+        let cpu_only = config["profileId"].as_str().unwrap_or("") == contracts::SMALLEST_PROFILE_ID;
+        let selected: Selected = match lane {
+            _ if cpu_only => self.0.o.tools.select_cpu_fallback(codec),
+            Some(l) => self.0.o.tools.select_for(codec, &super::super::devices::device_of(&l.device)),
+            None => self.0.o.tools.select(codec),
         }
         .map_err(Fail::from)?;
         let mut used_cpu_fallback = !selected.hardware;
@@ -1198,13 +1249,14 @@ impl Service {
             return Err(service_error("NODE_NO_ENCODER"));
         }
         let mut check: Option<CheckSlot> = None;
-        let zero_copy = hold_frames == 0;
-        let mut tiers = self.encode_decode_tiers(&selected, zero_copy);
+        let zero_copy = super::super::lead_in::hold_frames(Some(&timeline.lead_in)) == 0;
+        let tiers = self.encode_decode_tiers(&selected, zero_copy);
+        let InitialPlan { mut selected, mut bitrate, mut quality, smallest, keep_order, hold_frames, decode: mut tiers, codec, profile_id, cpu_only, no_target, target_bytes, duration_us } =
+            initial_plan(&config, item.n("sourceBytes"), inspected, &timeline, selected, tiers)?;
+        // Used only after a no-target encode was measured and was not smaller.
+        let initial = |target: f64| planner::calculate_initial_bitrate(&codec, target, inspected.duration_seconds, 0.0, 0.0).map(|b| b as f64).map_err(|_| service_error("INVALID_BITRATE"));
         let mut failed_tiers: Vec<String> = vec![];
         let mut tier_retry = false;
-        if selected.hardware && !no_target {
-            bitrate = bitrate.map(|b| (tools::bitrate_floor(&codec) as f64).max((b * 0.93).floor()));
-        }
         let mut size_retry = 0i64;
         let mut under_source = 0usize;
         let mut attempts = rt.lock().item(&id).and_then(|i| i["attempts"].as_i64()).unwrap_or(0);
@@ -1228,13 +1280,9 @@ impl Service {
             let reserved_own = Own::from_typed(&reserved.owned_paths, &reserved.owned_artifacts);
             latest = Some(reserved_own.clone());
             Self::compose_into(rt, &id, &reserved_own);
-            let duration_us = {
-                let d = contracts::js_round(inspected.duration_seconds * 1_000_000.0) as i64;
-                if d != 0 { Some(d) } else { None }
-            };
             let used_tier = tiers.first().cloned();
             let fallback = if from_node { Some(self.take_fallback_slot(rt)?) } else { None };
-            let encoded = self.run_child(rt, &id, &EncodeRequest { source, target: &reserved.path, codec: &codec, encoder: &selected, bitrate, quality: quality.as_deref(), duration_us, hold_frames, smallest, keep_order, decode: used_tier.as_ref().map(|t| t.1.as_slice()), lane_id: lane.map(|l| l.id.as_str()) });
+            let encoded = self.run_child(rt, &id, &EncodeRequest { source, target: &reserved.path, codec: &codec, encoder: &selected, bitrate, quality: quality.as_deref(), duration_us, window: None, hold_frames, smallest, keep_order, decode: used_tier.as_ref().map(|t| t.1.as_slice()), lane_id: lane.map(|l| l.id.as_str()) });
             drop(fallback);
             timing.mark("encode");
             if let Err(code) = encoded {
@@ -2039,4 +2087,48 @@ pub fn ensure_destination_parent(root: &str, destination: &str) -> SResult<Desti
         captured.push((current.clone(), real, st.dev(), st.ino()));
     }
     Ok(DestinationGuard { captured })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::converter::{devices, snapshot::Registry, testutil::tempdir};
+    use std::process::Command;
+
+    #[test]
+    fn initial_plan_matches_job_path() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.mp4");
+        let generated = Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24:duration=2", "-c:v", "libx264", "-crf", "18", "-bf", "0", "-pix_fmt", "yuv420p", "-use_editlist", "0"])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+        let tools = tools::RealTools::new("ffmpeg", "ffprobe", Arc::new(Registry::new(dir.path().join("snapshots"))));
+        let signal = Arc::new(AtomicBool::new(false));
+        let inspected = tools.inspect_video(source.to_str().unwrap(), &signal).unwrap();
+        let timeline = tools.read_timeline(source.to_str().unwrap(), &signal).unwrap();
+        let source_bytes = std::fs::metadata(&source).unwrap().len();
+        let config = json!({ "profileId": "aggressive", "codec": "h265" });
+        let selected = tools.select_for("h265", &devices::device_of(&devices::cpu_device())).unwrap();
+        assert!(!selected.hardware);
+        assert_eq!(inspected.codec, "h264");
+        assert_eq!(inspected.duration_seconds, 2.0);
+
+        // The existing job path's target/planner calls, with whole-file bytes
+        // and inspected duration, not a separate bitrate formula.
+        let expected = planner::calculate_initial_bitrate(
+            "h265", contracts::target_output_bytes(source_bytes, "aggressive"), inspected.duration_seconds, 0.0, 0.0,
+        ).unwrap() as f64;
+        assert!(expected > planner::bitrate_floor("h265") as f64, "the fixture must exercise target maths above the floor");
+        let plan = initial_plan(&config, source_bytes, &inspected, &timeline, selected.clone(), vec![]).unwrap();
+        assert_eq!(plan.bitrate, Some(expected));
+        assert_eq!(plan.selected, selected);
+        assert_eq!(plan.quality, None);
+        assert_eq!(plan.smallest, None);
+        assert!(!plan.keep_order);
+        assert_eq!(plan.hold_frames, 0);
+        assert!(plan.decode.is_empty());
+    }
 }

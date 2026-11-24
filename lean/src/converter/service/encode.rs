@@ -155,6 +155,8 @@ pub struct EncodeRequest<'a> {
     pub bitrate: Option<f64>,
     pub quality: Option<&'a str>,
     pub duration_us: Option<i64>,
+    /// Start and end in source microseconds; None encodes the whole clip.
+    pub window: Option<(i64, i64)>,
     pub hold_frames: i64,
     /// Smallest (CPU only), and whether its clip keeps the original's frame order
     pub smallest: Option<super::super::planner::Smallest>,
@@ -163,6 +165,46 @@ pub struct EncodeRequest<'a> {
     pub decode: Option<&'a [String]>,
     /// the lane (chosen GPU) this clip runs on
     pub lane_id: Option<&'a str>,
+}
+
+impl EncodeRequest<'_> {
+    /// Shared by production and previews; a window never inherits lead-in holds.
+    pub(crate) fn local_args(&self) -> Result<Vec<String>, &'static str> {
+        let r = self;
+        if r.encoder.remote || r.window.is_some_and(|(start, end)| start < 0 || end <= start) {
+            return Err("encoder-start-failed");
+        }
+        let device = if r.encoder.hardware { r.encoder.device.as_ref() } else { None };
+        let encode_args = super::super::planner::build_encode_args(&super::super::planner::EncodeArgs {
+            codec: r.codec,
+            encoder: &r.encoder.codec,
+            bitrate: r.bitrate,
+            quality: r.quality,
+            hw_frames: r.decode.is_some_and(|d| d.iter().any(|a| a == "-hwaccel_output_format")),
+            device,
+            hold_frames: if r.window.is_some() { 0 } else { r.hold_frames },
+            smallest: r.smallest,
+            keep_order: r.smallest.is_some() && r.keep_order,
+            ..Default::default()
+        })
+        .map_err(|_| "encoder-start-failed")?;
+        let mut args: Vec<String> = ["-nostdin", "-hide_banner", "-loglevel", "error", "-n"].iter().map(|s| s.to_string()).collect();
+        args.extend(r.decode.unwrap_or(&[]).iter().cloned());
+        if let Some((start, _)) = r.window {
+            args.extend(["-ss".into(), format!("{start}us")]);
+        }
+        args.push("-i".into());
+        args.push(r.source.into());
+        args.extend(encode_args);
+        if let Some((start, end)) = r.window {
+            args.extend(["-t".into(), format!("{}us", end - start)]);
+        }
+        for a in ["-an", "-sn", "-dn", "-progress", "pipe:1", "-nostats", "-f", "mp4"] {
+            args.push(a.into());
+        }
+        args.push(r.target.into());
+        Ok(args)
+    }
 }
 
 impl Service {
@@ -194,32 +236,14 @@ impl Service {
     /// runChild: Ok(()) or the failure code ('encoder-start-failed',
     /// 'encoder-failed', 'encoder-stalled', 'cancelled').
     pub fn run_child(&self, rt: &Arc<Runtime>, item_id: &str, r: &EncodeRequest) -> Result<(), &'static str> {
+        if r.window.is_some_and(|(start, end)| start < 0 || end <= start || r.encoder.remote) {
+            // The node protocol does not carry a window: never silently send a whole clip.
+            return Err("encoder-start-failed");
+        }
         if r.encoder.remote {
             return self.run_remote(rt, item_id, r);
         }
-        let device = if r.encoder.hardware { r.encoder.device.as_ref() } else { None };
-        let encode_args = super::super::planner::build_encode_args(&super::super::planner::EncodeArgs {
-            codec: r.codec,
-            encoder: &r.encoder.codec,
-            bitrate: r.bitrate,
-            quality: r.quality,
-            hw_frames: r.decode.is_some_and(|d| d.iter().any(|a| a == "-hwaccel_output_format")),
-            device,
-            hold_frames: r.hold_frames,
-            smallest: r.smallest,
-            keep_order: r.smallest.is_some() && r.keep_order,
-            ..Default::default()
-        })
-        .map_err(|_| "encoder-start-failed")?;
-        let mut args: Vec<String> = ["-nostdin", "-hide_banner", "-loglevel", "error", "-n"].iter().map(|s| s.to_string()).collect();
-        args.extend(r.decode.unwrap_or(&[]).iter().cloned());
-        args.push("-i".into());
-        args.push(r.source.into());
-        args.extend(encode_args.iter().cloned());
-        for a in ["-an", "-sn", "-dn", "-progress", "pipe:1", "-nostats", "-f", "mp4"] {
-            args.push(a.into());
-        }
-        args.push(r.target.into());
+        let args = r.local_args()?;
         let ffmpeg = self.0.o.tools.ffmpeg_path().to_string();
         if super::super::process::validate_request(&ffmpeg, &args).is_err() {
             return Err("encoder-start-failed");
@@ -241,7 +265,7 @@ impl Service {
             let live = json!({
                 "jobId": s.manifest.id(), "itemId": item_id, "relativePath": rel, "encoder": r.encoder.codec,
                 "hardware": r.encoder.hardware, "decode": if r.decode.is_some_and(|d| !d.is_empty()) { "gpu" } else { "cpu" },
-                "device": render_device(&[r.decode.unwrap_or(&[]), encode_args.as_slice()].concat()), "node": null,
+                "device": render_device(&args), "node": null,
                 "deviceId": r.lane_id, "remote": false, "started": true, "pid": pid, "fps": null, "speed": null,
                 "bitrateKbps": null, "frame": null, "outTimeUs": null,
                 "durationUs": r.duration_us.filter(|d| *d > 0), "dropFrames": null, "dupFrames": null, "totalSizeB": null
@@ -585,6 +609,70 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::converter::{planner::{Selected, Smallest}, runtime::{Converter, RuntimeOptions}, testutil::tempdir};
+
+    #[test]
+    fn segment_encode_is_bounded() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.mp4");
+        let generated = Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i", "testsrc2=size=160x96:rate=12:duration=20", "-c:v", "libx264", "-g", "24", "-keyint_min", "24", "-sc_threshold", "0", "-bf", "0", "-pix_fmt", "yuv420p", "-use_editlist", "0"])
+            .arg(&source).output().unwrap();
+        assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+        let calls = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let recorded = calls.clone();
+        std::fs::create_dir_all(dir.path().join("temp")).unwrap();
+        let mut options = RuntimeOptions::new(dir.path().join("data"), dir.path().join("temp"), "ffmpeg", "ffprobe");
+        options.auto_timer = false;
+        options.tune = Some(Box::new(move |o| o.on_spawn = Some(Arc::new(move |args| recorded.lock().unwrap().push(args.to_vec())))));
+        let converter = Converter::open(options).unwrap();
+        let initial = json!({ "state": "waiting", "config": {
+            "sourceRoot": dir.path(), "destinationRoot": null, "codec": "h265", "profileId": "balanced",
+            "networkMode": "auto", "outputMode": "replace", "includedGroups": ["SavedClips"],
+            "replacementConfirmed": true, "concurrency": 1, "verifyMode": "quick"
+        }});
+        let manifest = converter.store.create(initial.as_object().unwrap()).unwrap();
+        let rt = converter.service.ensure_runtime(manifest.id()).unwrap();
+        let selected = Selected { family: "h265".into(), codec: "libx265".into(), hardware: false, remote: false, timed_out: false, device: None };
+
+        for (name, smallest, keep_order) in [("bitrate", None, false), ("smallest", Some(Smallest::default()), false), ("smallest-ordered", Some(Smallest::default()), true)] {
+            let target = dir.path().join(format!("{name}.mp4"));
+            converter.service.run_child(&rt, name, &EncodeRequest {
+                source: source.to_str().unwrap(), target: target.to_str().unwrap(), codec: "h265", encoder: &selected,
+                bitrate: if smallest.is_some() { None } else { Some(200_000.0) }, quality: None,
+                duration_us: Some(20_000_000), window: Some((7_000_000, 13_000_000)),
+                hold_frames: 24, smallest, keep_order, decode: None, lane_id: None,
+            }).unwrap();
+            let probed = Command::new("ffprobe")
+                .args(["-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "format=duration:stream=nb_read_frames", "-of", "json"])
+                .arg(&target).output().unwrap();
+            assert!(probed.status.success(), "{}", String::from_utf8_lossy(&probed.stderr));
+            let probe: Value = serde_json::from_slice(&probed.stdout).unwrap();
+            let duration: f64 = probe["format"]["duration"].as_str().unwrap().parse().unwrap();
+            let frames: u64 = probe["streams"][0]["nb_read_frames"].as_str().unwrap().parse().unwrap();
+            eprintln!("{name}: duration={duration}s, frames={frames}");
+            assert!((5.8..=6.3).contains(&duration), "{name}: duration {duration}, {probe}");
+            assert!((70..=75).contains(&frames), "{name}: frames {frames}, {probe}");
+            let recorded = calls.lock().unwrap();
+            let args = recorded.last().unwrap();
+            let seek = args.windows(2).position(|a| a == ["-ss", "7000000us"]).expect("seek to the requested start");
+            assert!(seek < args.iter().position(|a| a == "-i").unwrap(), "{name}: the seek belongs to the input");
+            assert!(!args.iter().any(|a| a.contains("tpad=")), "{name}: a segment must not inherit the source's lead-in hold");
+        }
+
+        let calls_before = calls.lock().unwrap().len();
+        for window in [(-1, 6_000_000), (0, 0), (13_000_000, 7_000_000), (i64::MIN, i64::MAX)] {
+            let target = dir.path().join("invalid.mp4");
+            let result = converter.service.run_child(&rt, "invalid", &EncodeRequest {
+                source: source.to_str().unwrap(), target: target.to_str().unwrap(), codec: "h265", encoder: &selected,
+                bitrate: Some(200_000.0), quality: None, duration_us: None, window: Some(window),
+                hold_frames: 0, smallest: None, keep_order: false, decode: None, lane_id: None,
+            });
+            assert_eq!(result, Err("encoder-start-failed"), "invalid window {window:?}");
+            assert!(!target.exists());
+        }
+        assert_eq!(calls.lock().unwrap().len(), calls_before, "invalid windows must not spawn ffmpeg");
+    }
 
     #[test]
     fn progress_lines_as_node_reads_them() {

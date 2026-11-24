@@ -1,4 +1,4 @@
-//! src/main/converter/ipc.js (the 22 channels, their checks and answers,
+//! src/main/converter/ipc.js (the original channels, their checks and answers,
 //! the live updates) behind server/converterBridge.js (verification never
 //! Off from the server, every folder through the footage guard):
 //!
@@ -16,10 +16,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-pub const CHANNELS: [&str; 22] = [
+pub const CHANNELS: [&str; 25] = [
     "converter:chooseFolder", "converter:start", "converter:getCurrent", "converter:pause", "converter:setConcurrency", "converter:resume", "converter:cancel", "converter:discard", "converter:retryFailed", "converter:dismissSummary",
     "converter:getCapabilities", "converter:subscribeProgress", "converter:unsubscribeProgress", "converter:runBenchmark", "converter:cancelBenchmark", "converter:getAuto", "converter:setAuto", "converter:checkAutoNow",
     "converter:saveVehicle", "converter:forgetVehicle", "converter:devices", "converter:setLanes",
+    "converter:previewStart", "converter:previewGet", "converter:previewCancel",
 ];
 const GROUPS: [&str; 3] = ["RecentClips", "SavedClips", "SentryClips"];
 const ACTIVE_STATES: [&str; 10] = ["discovering", "waiting", "staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing", "paused", "paused_network"];
@@ -405,12 +406,22 @@ fn group_list_ok(v: Option<&Value>, exact: bool) -> bool {
     a.iter().all(|g| g.as_str().is_some_and(|s| GROUPS.contains(&s) && seen.insert(s.to_string())))
 }
 
+/// A manual job never carries a null `keepRecent`: the job's config is normalized without it
+fn without_null_keep_recent(mut config: Value) -> Value {
+    if let Some(m) = config.as_object_mut() {
+        if m.get("keepRecent").is_some_and(Value::is_null) {
+            m.shift_remove("keepRecent");
+        }
+    }
+    config
+}
+
 /// validateStartConfig(payload)
 pub fn validate_start_config(p: Option<&Value>, replacement: &str) -> R<Value> {
     let Some(m) = p.and_then(Value::as_object) else { return fail("INVALID_REQUEST") };
     let has = |k: &str| m.contains_key(k);
     let mut expected: Vec<&str> = vec!["sourceRoot", "destinationRoot", "codec", "profileId", "networkMode", "outputMode", "includedGroups", "replacementConfirmed"];
-    for k in ["groupOrder", "concurrency", "bitrateKbps", "qualityLevel", "verifyMode", "lanes", "keepOffTarget", "keepLarger"] {
+    for k in ["groupOrder", "concurrency", "bitrateKbps", "qualityLevel", "verifyMode", "lanes", "keepOffTarget", "keepLarger", "keepRecent"] {
         if has(k) {
             expected.push(k);
         }
@@ -436,6 +447,11 @@ pub fn validate_start_config(p: Option<&Value>, replacement: &str) -> R<Value> {
     }
     if has("keepLarger") && (!m["keepLarger"].is_boolean() || (m["keepLarger"] == true && !no_target)) {
         return fail("INVALID_KEEP_LARGER");
+    }
+    // (null is how the guided page turns the keep window off: saveVehicle/setAuto carry it to the
+    // automatic settings, which remove it; a manual start drops it below)
+    if has("keepRecent") && !m["keepRecent"].is_null() && !super::keep_recent::valid(&m["keepRecent"]) {
+        return fail("INVALID_REQUEST");
     }
     let mut lanes = None;
     if has("lanes") {
@@ -557,6 +573,7 @@ pub struct Bridge {
     senders: Arc<Mutex<HashMap<String, Sender>>>,
     vetted: Mutex<HashMap<String, usize>>,
     extras: Mutex<Extras>,
+    previews: Mutex<Option<Arc<crate::wire::converter_preview::Previews>>>,
 }
 
 /// validateCapabilities(staging.capabilities + destinationContainment)
@@ -575,7 +592,7 @@ pub fn capabilities(staging: &Value) -> Value {
 
 impl Bridge {
     pub fn new(service: Arc<dyn ServiceApi>, ctx: Arc<dyn ConverterCtx>, capabilities: Value) -> Arc<Bridge> {
-        let b = Arc::new(Bridge { service: service.clone(), ctx: ctx.clone(), capabilities, clients: Mutex::new(HashMap::new()), senders: Arc::new(Mutex::new(HashMap::new())), vetted: Mutex::new(HashMap::new()), extras: Mutex::new(Extras::default()) });
+        let b = Arc::new(Bridge { service: service.clone(), ctx: ctx.clone(), capabilities, clients: Mutex::new(HashMap::new()), senders: Arc::new(Mutex::new(HashMap::new())), vetted: Mutex::new(HashMap::new()), extras: Mutex::new(Extras::default()), previews: Mutex::new(None) });
         let senders = b.senders.clone();
         let dropped_logged = Arc::new(std::sync::atomic::AtomicBool::new(false));
         service.subscribe(Arc::new(move |event: &Value| {
@@ -633,6 +650,21 @@ impl Bridge {
 
     pub fn channels(&self) -> Vec<&'static str> {
         CHANNELS.to_vec()
+    }
+
+    pub fn mount_previews(&self, previews: Arc<crate::wire::converter_preview::Previews>) {
+        *self.previews.lock().unwrap() = Some(previews);
+    }
+
+    pub fn previews(&self) -> Option<Arc<crate::wire::converter_preview::Previews>> { self.previews.lock().unwrap().clone() }
+
+    /// Preview updates use the same subscriptions, SSE name and dead-client cleanup.
+    pub fn preview_progress(&self, event: Value) {
+        let text = format!("event: converter:progress\ndata: {event}\n\n");
+        let list: Vec<_> = self.senders.lock().unwrap().iter().map(|(k, s)| (k.clone(), s.sink.clone(), s.alive.clone())).collect();
+        for (key, sink, alive) in list {
+            if !alive.load(std::sync::atomic::Ordering::SeqCst) || !sink(&text) { self.senders.lock().unwrap().remove(&key); }
+        }
     }
 
     /// attachEvents(clientId, res): `sink` writes SSE text and answers false once the client is gone.
@@ -710,7 +742,9 @@ impl Bridge {
             }
         }
         let mut added = vec![];
-        if self.check_paths(&mut payload, &mut added).is_err() {
+        // Preview payloads contain ids only. Their strict schema rejects path
+        // keys before the folder guard can resolve or rewrite any of them.
+        if !matches!(name, "previewStart" | "previewGet" | "previewCancel") && self.check_paths(&mut payload, &mut added).is_err() {
             self.release(&added);
             return json!({ "ok": false, "error": { "code": "PATH_NOT_ALLOWED" } });
         }
@@ -737,6 +771,16 @@ impl Bridge {
     fn handle(&self, name: &str, p: Option<&Value>, client: Option<&str>) -> R<Value> {
         let replacement = self.capabilities["replacement"].as_str().unwrap_or("unavailable").to_string();
         match name {
+            "previewStart" | "previewGet" | "previewCancel" => {
+                let p = p.ok_or_else(|| code_err("INVALID_REQUEST".into()))?;
+                if name == "previewStart" { crate::wire::converter_preview::validate_start(p).map_err(code_err)?; }
+                let previews = self.previews().ok_or_else(|| code_err("PREVIEW_UNAVAILABLE".into()))?;
+                match name {
+                    "previewStart" => previews.start(p),
+                    "previewGet" => previews.get(p),
+                    _ => previews.cancel(p),
+                }.map_err(code_err)
+            }
             "chooseFolder" => {
                 let Some(m) = p.and_then(Value::as_object) else { return fail("INVALID_REQUEST") };
                 if !m.get("purpose").and_then(Value::as_str).is_some_and(|x| x == "source" || x == "destination") || m.keys().any(|k| k != "purpose" && k != "defaultPath") {
@@ -751,7 +795,7 @@ impl Bridge {
                 }
             }
             "start" => {
-                let config = validate_start_config(p, &replacement)?;
+                let config = without_null_keep_recent(validate_start_config(p, &replacement)?);
                 self.check_lane_encoders(&config)?;
                 Ok(json!({ "jobId": safe_job_id(Some(&json!(self.service.start(&config)?)))? }))
             }
@@ -959,14 +1003,20 @@ impl Bridge {
 
     fn set_auto(&self, p: Option<&Value>, replacement: &str) -> R<Value> {
         let Some(auto) = self.extras().auto else { return fail("AUTO_UNAVAILABLE") };
-        let Some(m) = p.and_then(Value::as_object).filter(|m| m.keys().all(|k| ["enabled", "intervalMinutes", "window", "holdManual", "keepRunning", "openAtLogin", "config", "removeSource"].contains(&k.as_str()))) else { return fail("INVALID_REQUEST") };
+        let Some(m) = p.and_then(Value::as_object).filter(|m| m.keys().all(|k| ["enabled", "intervalMinutes", "window", "holdManual", "keepRunning", "openAtLogin", "config", "removeSource", "schedule", "catchUp"].contains(&k.as_str()))) else { return fail("INVALID_REQUEST") };
         let interval_ok = m.get("intervalMinutes").and_then(Value::as_f64).is_some_and(|i| super::auto_convert::INTERVAL_MINUTES.iter().any(|x| *x as f64 == i));
         if !m.get("enabled").is_some_and(Value::is_boolean) || !interval_ok || !m.get("keepRunning").is_some_and(Value::is_boolean) || !m.get("openAtLogin").is_some_and(Value::is_boolean) {
             return fail("INVALID_REQUEST");
         }
-        if m.get("holdManual").is_some_and(|h| !h.is_boolean()) {
+        if m.get("holdManual").is_some_and(|h| !h.is_boolean()) || m.get("catchUp").is_some_and(|c| !c.is_boolean()) {
             return fail("INVALID_REQUEST");
         }
+        // (the guided page's calendar schedule; Original sends none, and the stored one may stay)
+        let schedule = match m.get("schedule") {
+            None => None,
+            Some(Value::Null) => Some(Value::Null),
+            Some(v) => Some(super::schedule::normalize(v).map_err(code_err)?),
+        };
         if let Some(r) = m.get("removeSource") {
             if !r.as_str().is_some_and(|r| js_len(r) <= 4096) {
                 return fail("INVALID_REQUEST");
@@ -993,6 +1043,12 @@ impl Bridge {
         if let Some(r) = m.get("removeSource") {
             next["removeSource"] = r.clone();
         }
+        if let Some(s) = schedule {
+            next["schedule"] = s;
+        }
+        if let Some(c) = m.get("catchUp") {
+            next["catchUp"] = c.clone();
+        }
         bounded(&auto.configure(&next).map_err(code_err)?, MAX_PAYLOAD_BYTES, false, true)
     }
 }
@@ -1010,6 +1066,18 @@ pub fn clamp_verify(v: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_channels_reject_paths() {
+        let bridge = Bridge::new(Arc::new(Fake::default()), Arc::new(Guard(std::env::temp_dir())), json!({}));
+        for key in ["path", "sourceRoot", "defaultPath", "ffmpegArgs"] {
+            let mut p = json!({"vehicleId":"car"}); p[key] = json!("/outside");
+            assert_eq!(bridge.invoke("previewStart", Some(p), None)["error"]["code"], "INVALID_REQUEST");
+        }
+        for name in ["previewStart", "previewGet", "previewCancel"] {
+            assert_ne!(bridge.invoke(name, Some(json!({})), None)["error"]["code"], "UNKNOWN_CHANNEL");
+        }
+    }
 
     /// The stand-in job service of lean/parity/converterBridge.js.
     #[derive(Default)]
@@ -1067,6 +1135,27 @@ mod tests {
         }
         fn subscribe(&self, _l: Listener) -> u64 {
             0
+        }
+    }
+
+    impl super::super::auto_convert::AutoService for Fake {
+        fn start(&self, c: &Value) -> SResult<String> {
+            ServiceApi::start(self, c)
+        }
+        fn get(&self, id: &str) -> SResult<Value> {
+            self.get_(id)
+        }
+        fn list(&self) -> SResult<Vec<Value>> {
+            ServiceApi::list(self)
+        }
+        fn pause(&self, id: &str) -> SResult<Value> {
+            self.get_(id)
+        }
+        fn resume(&self, id: &str) -> SResult<Value> {
+            self.get_(id)
+        }
+        fn set_lanes(&self, id: &str, _l: &Value) -> SResult<Value> {
+            self.get_(id)
         }
     }
 
@@ -1142,6 +1231,120 @@ mod tests {
         let bridge = Bridge::new(Arc::new(Fake::default()), Arc::new(Guard(base.clone())), caps);
         bridge.set_extras(Extras { devices: Some(Arc::new(|| Err("Internal error".into()))), auto: None, benchmark: None });
         assert_eq!(bridge.invoke("devices", None, None), json!({ "ok": false, "error": { "code": "OPERATION_FAILED", "retryable": false } }));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn start_config_allows_keep_recent() {
+        let base = std::env::temp_dir().join(format!("lean-keep-recent-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        let config = |keep: Value| json!({
+            "sourceRoot": base.join("src"), "destinationRoot": null, "codec": "h265", "profileId": "balanced", "networkMode": "direct",
+            "outputMode": "replace", "includedGroups": ["RecentClips"], "replacementConfirmed": true, "keepRecent": keep
+        });
+        let ok = validate_start_config(Some(&config(json!({ "days": 7, "zone": "UTC" }))), "available").unwrap();
+        assert_eq!(ok["keepRecent"], json!({ "days": 7, "zone": "UTC" }));
+        for bad in [json!({ "days": 0, "zone": "UTC" }), json!({ "days": 7 }), json!("UTC")] {
+            assert_eq!(validate_start_config(Some(&config(bad)), "available").unwrap_err().code, "INVALID_REQUEST");
+        }
+        // null passes through (the automatic settings read it as "remove"); a manual start strips it
+        let off = validate_start_config(Some(&config(Value::Null)), "available").unwrap();
+        assert_eq!(off.get("keepRecent"), Some(&Value::Null));
+        assert!(without_null_keep_recent(off).get("keepRecent").is_none());
+        assert_eq!(without_null_keep_recent(ok.clone()), ok);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A bridge over a stand-in service with a real automatic-conversion store (no timer, no clips).
+    fn keep_recent_bridge(tag: &str) -> (Arc<Bridge>, std::path::PathBuf, Arc<Fake>) {
+        let base = std::env::temp_dir().join(format!("lean-keep-recent-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("allowed/src")).unwrap();
+        let caps = capabilities(&json!({ "separatePublication": "native-atomic", "ownershipCleanup": "atomic-expected-ownership", "replacement": "available" }));
+        let fake = Arc::new(Fake::default());
+        let bridge = Bridge::new(fake.clone(), Arc::new(Guard(base.clone())), caps);
+        let scanner: Arc<super::super::auto_convert::Scanner> = Arc::new(|_c: &Value, _a: &std::sync::atomic::AtomicBool, _out: &mut dyn FnMut(Value) -> bool| Ok(()));
+        let mut o = super::super::auto_convert::AutoOptions::new(fake.clone(), scanner, base.clone());
+        o.timer = false;
+        bridge.set_extras(Extras { devices: None, auto: Some(super::super::auto_convert::Auto::new(o)), benchmark: None });
+        (bridge, base, fake)
+    }
+
+    fn keep_config(base: &std::path::Path, codec: &str, keep: Option<Value>) -> Value {
+        let mut c = json!({
+            "sourceRoot": base.join("allowed/src"), "destinationRoot": null, "codec": codec, "profileId": "balanced", "networkMode": "direct",
+            "outputMode": "replace", "includedGroups": ["RecentClips"], "replacementConfirmed": true
+        });
+        if let Some(k) = keep {
+            c["keepRecent"] = k;
+        }
+        c
+    }
+
+    fn set_auto_payload(config: Value) -> Value {
+        json!({ "enabled": true, "intervalMinutes": 60, "window": null, "holdManual": false, "keepRunning": false, "openAtLogin": false, "config": config })
+    }
+
+    #[test]
+    fn save_vehicle_and_set_auto_keep_or_remove_keep_recent() {
+        let (bridge, base, _) = keep_recent_bridge("save");
+        let ok = |a: Value| assert_eq!(a["ok"], true, "{a}");
+        let keep = json!({ "days": 30, "zone": "UTC" });
+        let saved = |b: &Arc<Bridge>| b.extras().auto.unwrap().get_state()["saved"].as_array().unwrap().clone();
+        // saveVehicle (not automatic): kept when absent, removed on null
+        ok(bridge.invoke("saveVehicle", Some(json!({ "config": keep_config(&base, "h265", Some(keep.clone())) })), None));
+        ok(bridge.invoke("saveVehicle", Some(json!({ "config": keep_config(&base, "av1", None) })), None));
+        assert_eq!((saved(&bridge)[0]["codec"].clone(), saved(&bridge)[0]["keepRecent"].clone()), (json!("av1"), keep.clone()));
+        ok(bridge.invoke("saveVehicle", Some(json!({ "config": keep_config(&base, "av1", Some(Value::Null)) })), None));
+        assert!(saved(&bridge)[0].get("keepRecent").is_none());
+        // setAuto: kept when absent, removed on null
+        let stored = |b: &Arc<Bridge>| b.extras().auto.unwrap().get_state()["settings"]["configs"][0].clone();
+        ok(bridge.invoke("setAuto", Some(set_auto_payload(keep_config(&base, "h265", Some(keep.clone())))), None));
+        ok(bridge.invoke("setAuto", Some(set_auto_payload(keep_config(&base, "av1", None))), None));
+        assert_eq!((stored(&bridge)["codec"].clone(), stored(&bridge)["keepRecent"].clone()), (json!("av1"), keep));
+        ok(bridge.invoke("setAuto", Some(set_auto_payload(keep_config(&base, "av1", Some(Value::Null)))), None));
+        assert!(stored(&bridge).get("keepRecent").is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn set_auto_takes_a_calendar_schedule_and_an_original_save_keeps_it() {
+        let (bridge, base, _) = keep_recent_bridge("schedule");
+        let settings = |b: &Arc<Bridge>| b.extras().auto.unwrap().get_state()["settings"].clone();
+        let nightly = json!({ "kind": "daily", "hour": 2, "zone": "UTC" });
+        let mut guided = set_auto_payload(keep_config(&base, "h265", None));
+        guided["intervalMinutes"] = json!(1440);
+        guided["schedule"] = nightly.clone();
+        guided["catchUp"] = json!(false);
+        let a = bridge.invoke("setAuto", Some(guided.clone()), None);
+        assert_eq!(a["ok"], true, "{a}");
+        assert_eq!((settings(&bridge)["schedule"].clone(), settings(&bridge)["catchUp"].clone()), (nightly.clone(), json!(false)));
+        // Original's save: no schedule, no catchUp, the 1440 and window it was shown
+        let mut original = set_auto_payload(keep_config(&base, "av1", None));
+        original["intervalMinutes"] = json!(1440);
+        assert_eq!(bridge.invoke("setAuto", Some(original), None)["ok"], true);
+        assert_eq!((settings(&bridge)["schedule"].clone(), settings(&bridge)["catchUp"].clone()), (nightly, json!(false)));
+        for (k, bad, code) in [("schedule", json!({ "kind": "daily", "hour": 25, "zone": "UTC" }), "INVALID_AUTO_SCHEDULE"), ("catchUp", json!("yes"), "INVALID_REQUEST")] {
+            let mut p = guided.clone();
+            p[k] = bad;
+            assert_eq!(bridge.invoke("setAuto", Some(p), None)["error"]["code"], code);
+        }
+        let mut off = guided.clone();
+        off["schedule"] = Value::Null;
+        off["intervalMinutes"] = json!(60);
+        assert_eq!(bridge.invoke("setAuto", Some(off), None)["ok"], true);
+        assert!(settings(&bridge).get("schedule").is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn manual_start_with_null_keep_recent_makes_a_job_without_it() {
+        let (bridge, base, fake) = keep_recent_bridge("start");
+        let a = bridge.invoke("start", Some(keep_config(&base, "h265", Some(Value::Null))), None);
+        assert_eq!(a["ok"], true, "{a}");
+        let jobs = ServiceApi::list(fake.as_ref()).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0]["config"].as_object().unwrap().get("keepRecent").is_none());
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -781,10 +781,76 @@ fn a_replaced_log_that_could_not_be_read_is_not_replaceable_until_judged() {
     std::fs::write(&file, &body).unwrap();
     let mut s2: Value = serde_json::from_slice(&side).unwrap();
     s2["frames"] = json!(11);
-    assert_eq!(send(&logs, &sname, stringify(&s2).as_bytes(), 1).unwrap_err().code, "exists_different");
+    // the other half of a Resend all meanwhile: not a different file (the bridge would report
+    // that as a bug) but a retryable 409 busy, from offset 0
+    let e = send(&logs, &sname, stringify(&s2).as_bytes(), 1).unwrap_err();
+    assert_eq!((e.status, e.code.as_str(), e.received), (409, "busy", Some(0.0)));
     assert_eq!(check_of(&ask(&logs, &[nm(0)]), &nm(0)), pair("pending", "-"));
     t.check(KEY, &nm(0));
     assert_eq!(check_of(&ask(&logs, &[nm(0)]), &nm(0)), pair("verified", "-"));
+}
+
+#[test]
+fn a_replaced_log_that_could_not_be_read_as_the_other_half_arrives_answers_busy() {
+    let src = tmp("io-swap-bridge");
+    let dir = tmp("io-swap");
+    let (logs, t) = checked(&dir);
+    let mut b = Bridge::new(34);
+    b.log(&src, &nm(0), b"the log as the bridge wrote it", KEY);
+    let body = std::fs::read(src.join(KEY).join(nm(0))).unwrap();
+    let side = std::fs::read(src.join(KEY).join(format!("{}.json", nm(0)))).unwrap();
+    let sname = format!("{}.json", nm(0));
+    let mut bad = body.clone();
+    bad[2] ^= 0x20;
+    send(&logs, &nm(0), &bad, 1).unwrap();
+    send(&logs, &sname, &side, 1).unwrap();
+    assert_eq!(t.check(KEY, &nm(0))["status"], "failed");
+    assert_eq!(send(&logs, &nm(0), &body, 1).unwrap()["replaced"], true);
+    // the sidecar's new copy is all here when the judge fails to read the replaced log
+    let (t2, file) = (t.clone(), dir.join(KEY).join(nm(0)));
+    logs.set_before_swap(Box::new(move || {
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        t2.check(KEY, &nm(0));
+        std::fs::remove_dir(&file).unwrap();
+        std::fs::write(&file, b"the log as the bridge wrote it").unwrap();
+    }));
+    let mut s2: Value = serde_json::from_slice(&side).unwrap();
+    s2["frames"] = json!(11);
+    let e = send(&logs, &sname, stringify(&s2).as_bytes(), 1).unwrap_err();
+    assert_eq!((e.status, e.code.as_str(), e.received), (409, "busy", Some(0.0)), "retryable, not exists_different");
+    assert_eq!(std::fs::read(dir.join(KEY).join(&sname)).unwrap(), side, "the stored sidecar stays");
+    assert!(!dir.join(KEY).join(format!("{}.part", sname)).exists(), "the new copy's .part is dropped");
+}
+
+#[test]
+fn a_chain_continued_from_an_older_sidecar_is_no_mismatch() {
+    let dir = tmp("chain-fork");
+    let t = CanTrust::new(dir.clone(), Box::new(util::now_ms));
+    let mut b = Bridge::new(6);
+    for i in 0..13 {
+        b.log(&dir, &nm(i), format!("log {}", i).as_bytes(), KEY);
+        t.check(KEY, &nm(i));
+    }
+    // logs 10-12 went up from RAM; then RAM and chain.json were lost: the bridge goes on from
+    // the newest signed sidecar it still has (log 9), so 10-12 come again under new names
+    b.index = 10;
+    b.prev = (nm(9), util::sha256_hex(b"log 9"));
+    for i in 13..17 {
+        b.log(&dir, &nm(i), format!("log {} again", i).as_bytes(), KEY);
+        t.check(KEY, &nm(i));
+    }
+    let c = t.chain(KEY);
+    let kinds: Vec<&str> = c["issues"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, vec!["duplicate", "duplicate", "duplicate"], "{c}");
+    assert_eq!(c["issues"][0]["names"], json!([nm(10), nm(13)]));
+    // a link that fits no stored copy of the index before is still a mismatch
+    b.prev = (nm(16), ZERO.into());
+    b.log(&dir, &nm(17), b"a wrong link", KEY);
+    t.check(KEY, &nm(17));
+    let c = t.chain(KEY);
+    let last = c["issues"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!((last["kind"].as_str(), last["index"].as_i64()), (Some("mismatch"), Some(14)), "{c}");
 }
 
 #[test]

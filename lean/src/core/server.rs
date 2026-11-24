@@ -699,9 +699,13 @@ struct Refusal {
 }
 
 /// A refused request: its body read and dropped, the log line (once a minute per address),
-/// then 503 too_many_connections.
+/// then 503 too_many_connections. A request with `Expect: 100-continue` is answered without
+/// reading its body: hyper then sends no 100 Continue and closes the connection after the
+/// 503, so the client never sends the body (reading it would ask for all of it first).
 async fn refuse(state: &AppState, warned: &Warned, ip: std::net::IpAddr, why: &Refusal, req: Request<Body>) -> Res {
-    drop_body(req.into_body()).await;
+    if !super::body::expects_continue(req.headers()) {
+        drop_body(req.into_body()).await;
+    }
     if warned.once(ip) {
         state.log.warn(why.line.clone());
     }
@@ -1231,6 +1235,54 @@ mod tests {
         // another address is named on its own
         let mut s = upload_from([127, 0, 0, 3], addr, 2, b"ok", None).await;
         assert!(answer(&mut s).await.starts_with("HTTP/1.1 200"));
+        drop(held);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An upload from `from` that sends `Expect: 100-continue` and holds its body back.
+    async fn expecting(from: [u8; 4], addr: std::net::SocketAddr, length: usize, token: Option<&str>) -> TcpStream {
+        let sock = tokio::net::TcpSocket::new_v4().unwrap();
+        sock.bind((std::net::Ipv4Addr::from(from), 0).into()).unwrap();
+        let mut s = sock.connect(addr).await.unwrap();
+        let auth = token.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
+        s.write_all(format!("POST /api/can/logs HTTP/1.1\r\nHost: x\r\n{auth}Content-Length: {length}\r\nExpect: 100-continue\r\n\r\n").as_bytes()).await.unwrap();
+        s
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_upload_that_expects_100_continue_gets_its_503_before_its_body() {
+        let (addr, _, dir) = device_port("expect").await;
+        let me = [127, 0, 0, 1];
+        let mut held = Vec::new();
+        for _ in 0..6 {
+            held.push(upload(addr, 100, b"part").await);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        // the 7th without a token: 503 at once, no 100 Continue, the body never asked for
+        let began = Instant::now();
+        let mut s = expecting(me, addr, 8 * 1024 * 1024, None).await;
+        let a = answer(&mut s).await;
+        assert!(too_many(&a) && !a.contains("100 Continue"), "{a:?}");
+        assert!(began.elapsed() < Duration::from_secs(1), "answered at once: {:?}", began.elapsed());
+        // the 33rd, token or not (a connection kept only to answer 503)
+        for _ in 6..32 {
+            held.push(upload_from(me, addr, 100, b"part", Some("good")).await);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let began = Instant::now();
+        let mut s = expecting(me, addr, 8 * 1024 * 1024, Some("good")).await;
+        let a = answer(&mut s).await;
+        assert!(too_many(&a) && !a.contains("100 Continue"), "{a:?}");
+        assert!(began.elapsed() < Duration::from_secs(1), "answered at once: {:?}", began.elapsed());
+        // a served one still gets 100 Continue, then sends its body
+        let mut s = expecting([127, 0, 0, 3], addr, 2, None).await;
+        let mut head = [0u8; 25];
+        s.read_exact(&mut head).await.unwrap();
+        assert_eq!(&head, b"HTTP/1.1 100 Continue\r\n\r\n");
+        s.write_all(b"ok").await.unwrap();
+        let mut ok = [0u8; 12];
+        s.read_exact(&mut ok).await.unwrap();
+        assert_eq!(&ok, b"HTTP/1.1 200");
         drop(held);
         let _ = std::fs::remove_dir_all(dir);
     }

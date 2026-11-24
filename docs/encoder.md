@@ -136,6 +136,61 @@ with *Load these*, which fills the form only when you click it.
 - **After a restart** the Encoder page shows the job that is running now,
   even if the page was left open while the server restarted.
 
+## Guided setup (Sentry Six)
+
+In the Sentry Six interface, the Encoder walks through what to keep as
+recorded, how much to shrink older footage, and when to run.
+
+**Keep recent footage as recorded.** The keep window leaves the newest
+footage alone and shrinks footage once it is older than the chosen number
+of days. It starts at 30 days. Choose 3, 7, 14, 30 or 60 days, or a custom
+number from 1 to 365. Days follow the vehicle's time zone. The keep window
+never deletes anything; cleanup rules still decide what gets deleted.
+Choose which kinds of clips to shrink and their order. Saved, Sentry and
+Recent are all included by default, in that order.
+
+**Space levels** all use H.265:
+
+- **Standard** uses Balanced (`balanced`), aiming for about 20% smaller.
+- **Medium**, the recommended default, uses Aggressive (`aggressive`),
+  aiming for about 50% smaller.
+- **High** uses Smallest (`smallest`), aiming for about 60% smaller. It uses
+  the CPU and can take longer.
+
+These are targets, not promised savings. The **preview** picks one Saved
+clip and one Sentry clip from the vehicle's original front-camera footage.
+It shrinks about six seconds around the save or trigger at each level,
+using the same settings as a real run. Compare the original and smaller
+copy, including the zoomed detail. Sizes and savings are measured on that
+sample. Your footage is only read. **Try another clip** picks another event.
+
+**When to check** offers every night at an hour you choose (02:00 by
+default), once a week on a chosen weekday, once a month on day 1–28, or
+**As clips age**, which checks every hour. Calendar times use the browser's
+time zone, shown on the page. The schedule is shared by every vehicle that
+shrinks automatically. A check starts work; it does not set a finish time.
+**Only when electricity is cheapest** uses the hours in Settings >
+Electricity price. Work pauses outside those hours and resumes when they
+return.
+
+**Finish the first catch-up run as soon as possible** is on by default.
+It starts shrinking footage already outside the keep window after setup,
+ignoring the schedule and electricity hours until caught up. Later runs
+follow the schedule. Turning a vehicle back on, shortening its keep window,
+including another kind of clip or changing the level can start another
+catch-up run. **Pause** holds until you press **Resume**, even when the next
+scheduled check arrives.
+
+Review the choices and confirm replacement before turning on automatic
+shrinking. Each smaller copy is checked before it replaces the original.
+The status screen shows progress, space saved and the next check.
+
+**Expert** opens the full Encoder controls. The switch only changes the
+view; it never saves settings or starts work. Saving in Expert keeps the
+keep window and calendar schedule. Changing the interval or time window
+there replaces the calendar schedule with that timing. Settings outside
+the three levels appear as **Customized in Expert** in guided setup.
+
 ## GPU
 
 The converter uses the first GPU encoder that passes a real test encode,

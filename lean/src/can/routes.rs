@@ -8,7 +8,7 @@ use super::calc;
 use super::ctx::{CanCtx, Car, Rec, Who};
 use super::index::{self, CanIndex};
 use super::json::{self, n};
-use super::logs::{self, parse_name, CanError, CanLogs};
+use super::logs::{self, parse_name, CanError, CanLogs, Kept};
 use super::models;
 use super::prune::{self, CanPrune};
 use super::reader;
@@ -254,7 +254,16 @@ pub struct Can {
     progress_due: AtomicBool,
     /// GET /api/can/now's answers, a few seconds each: "<keys>|<units>" -> (when, answer)
     now_cache: Mutex<indexmap::IndexMap<String, (f64, Option<Value>)>>,
+    /// the background checks of logs not judged yet are running
+    backfilling: AtomicBool,
 }
+
+/// Logs judged at a time by the background checks (then a pause, so uploads and the
+/// index are not held up by a server with many logs from before the checks).
+pub const BACKFILL_BATCH: usize = 4;
+const BACKFILL_PAUSE: Duration = Duration::from_millis(250);
+/// A deleted log's sidecar sent again without its log is dropped after this long.
+const LONE_SIDE_MS: f64 = 10.0 * 60_000.0;
 
 fn can_index_dir(ctx: &dyn CanCtx) -> PathBuf {
     ctx.data_dir().join("can-index")
@@ -357,8 +366,33 @@ impl Can {
                 on_port: Mutex::new(None),
                 progress_due: AtomicBool::new(false),
                 now_cache: Mutex::new(indexmap::IndexMap::new()),
+                backfilling: AtomicBool::new(false),
             }
         })
+        .with_footage_hook()
+    }
+
+    /// The upload API's status (and the checks of deleted logs sent again) learn the oldest
+    /// footage of each car key's car from here.
+    fn with_footage_hook(self: Arc<Self>) -> Arc<Self> {
+        let w = Arc::downgrade(&self);
+        self.logs.set_footage(Box::new(move |key| w.upgrade().map_or(Kept::Unknown, |c| c.kept_footage(key))));
+        self
+    }
+
+    /// The oldest footage the car of a CAN key keeps (its car as the routes find it: the one it
+    /// is chosen for, or the only car): `Kept::Nothing` when its car has no footage,
+    /// `Kept::Unknown` while that cannot be told (the key-to-car map unreadable, the share away,
+    /// a scan running or failed), and whenever no car is this key's: unmapped with two or more
+    /// cars, mapped to a car since removed, or no car visible at all (manager.db unreadable, or
+    /// the only car removed to be added again; a rule deleted the log, so a car existed and its
+    /// footage may still be on the share). Its car, once known, may keep footage of the log's time.
+    pub fn kept_footage(&self, key: &str) -> Kept {
+        let Ok(map) = self.can_map() else { return Kept::Unknown };
+        match self.car_in(&map, key) {
+            None => Kept::Unknown,
+            Some(v) => self.prune.oldest_kept(&v),
+        }
     }
 
     /// The background work the Node server starts: the index after 20 s, the checks after 15 s
@@ -368,6 +402,12 @@ impl Can {
         if let Err(e) = self.viewer_car_data() {
             self.ctx.log("warn", &format!("Car data in the Viewer: not worked out at start: {e}"));
         }
+        // the tombstones of logs deleted before they were kept (once), at once: a status
+        // meanwhile answers those logs pending (CanTrust::buried), never missing
+        let me = self.clone();
+        std::thread::spawn(move || {
+            me.derive_tombstones();
+        });
         let me = self.clone();
         std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
@@ -547,6 +587,11 @@ impl Can {
 
     // ---- trust and the index
     fn judge(self: &Arc<Self>, key: &str, name: &str) -> Value {
+        if let Some(tomb) = self.trust.tomb(key, name) {
+            if let Some(rec) = self.judge_buried(key, name, &tomb) {
+                return rec;
+            }
+        }
         let before = self.trust.record(key, name);
         let rec = self.trust.check(key, name);
         let st = rec.get("status").and_then(|s| s.as_str());
@@ -558,10 +603,134 @@ impl Can {
         }
         rec
     }
-    fn judge_pending(self: &Arc<Self>) {
-        for (key, name) in self.trust.pending() {
-            self.judge(&key, &name);
+    /// A copy of a log deleted here on purpose, sent again (either half here). Deleted by the
+    /// owner (by name, or with its footage), or older than all the footage its car keeps (see
+    /// CanLogs::buried_older): judged as any log (SHA-256, signature, chain), the result kept
+    /// on its tombstone, and the copy deleted again (never indexed: CanTrust::usable). Deleted
+    /// by an automatic rule and inside the footage kept: kept as a new log (its tombstone goes;
+    /// None: judged as usual). While the footage is not known: judged, kept unindexed, and
+    /// decided by a later pass. (Another copy than the tombstone's never gets here: the upload
+    /// answers it 409 exists_different, see CanLogs::plan.)
+    fn judge_buried(self: &Arc<Self>, key: &str, name: &str, tomb: &Value) -> Option<Value> {
+        let here = self.logs.size_of(name);
+        let side = self.logs.size_of(&format!("{}.json", name));
+        if here.is_none() && side.is_none() {
+            return Some(self.trust.record(key, name).unwrap_or(json!({})));
         }
+        match CanLogs::buried_older(tomb, self.logs.kept(key)) {
+            Some(false) => {
+                self.trust.unbury(key, name);
+                self.ctx.log("info", &format!("CAN Bridge {}: {} was deleted here and sent again; its car keeps footage of its time, so it is kept as a new log", key, name));
+                None
+            }
+            None => {
+                // (judged once for this copy; the pass after the footage is known decides)
+                let rec = self.trust.record(key, name);
+                let judged = rec.as_ref().is_some_and(|r| r.get("length").and_then(|l| l.as_f64()) == here && r.get("status").and_then(|s| s.as_str()).is_some_and(|s| s != "waiting") && !json::truthy(r.get("deleted")));
+                Some(if here.is_some() && !judged { self.trust.check(key, name) } else { rec.unwrap_or(json!({})) })
+            }
+            Some(true) => {
+                let Some(size) = here else {
+                    // its sidecar alone (the log may follow): noted, dropped later if it does not
+                    if let Some(sd) = side {
+                        self.trust.note_side(key, name, sd, self.side_sha(key, name));
+                    }
+                    return Some(self.trust.record(key, name).unwrap_or(json!({})));
+                };
+                let rec = self.trust.check(key, name);
+                if let Some((check, reason)) = self.trust.rebury(key, name, size, side.map(|sd| (sd, self.side_sha(key, name)))) {
+                    self.logs.discard(name);
+                    self.drop_log(key, name);
+                    self.ctx.log("info", &format!("CAN Bridge {}: {} ({}) was sent again: checked ({}{}) and deleted again", key, name, if self.trust.tombs(key, &[name.to_string()]).into_iter().next().flatten().as_ref().and_then(|t| t.get("why")).and_then(|w| w.as_str()).is_some_and(|w| super::logs::OWNER_WHYS.contains(&w)) { "deleted here by the owner" } else { "deleted here, older than the car's footage" }, check, reason.map(|r| format!(": {r}")).unwrap_or_default()));
+                    self.ctx.announce("can");
+                }
+                Some(rec)
+            }
+        }
+    }
+    /// The SHA-256 of a log's sidecar here, if it can be read.
+    fn side_sha(&self, key: &str, name: &str) -> Option<String> {
+        util::hash_file(&self.logs.dir.join(key).join(format!("{}.json", name))).ok().map(|h| h.0)
+    }
+
+    /// The background checks: every log here not judged yet (from before the checks, or one
+    /// whose judging was cut off), waiting, or a deleted log sent again, `batch` at a time with
+    /// `pause` between; and a deleted log's sidecar sent again alone, dropped after 10 minutes.
+    /// The logs judged.
+    pub fn backfill(self: &Arc<Self>, batch: usize, pause: Duration) -> usize {
+        let list = self.trust.pending();
+        let mut judged = 0;
+        for (i, chunk) in list.chunks(batch.max(1)).enumerate() {
+            if i > 0 && !pause.is_zero() {
+                std::thread::sleep(pause);
+            }
+            for (key, name) in chunk {
+                self.judge(key, name);
+                judged += 1;
+            }
+        }
+        for key in self.logs.car_keys() {
+            for name in self.trust.lone_sides(&key) {
+                let side = format!("{}.json", name);
+                let old = std::fs::metadata(self.logs.dir.join(&key).join(&side)).is_ok_and(|m| util::now_ms() - util::mtime_ms(&m) > LONE_SIDE_MS);
+                if old && !self.logs.arriving(&name) {
+                    if let Some(tomb) = self.trust.tomb(&key, &name) {
+                        match CanLogs::buried_older(&tomb, self.logs.kept(&key)) {
+                            Some(true) => {
+                                if let Some(sd) = self.logs.size_of(&side) {
+                                    self.trust.note_side(&key, &name, sd, self.side_sha(&key, &name));
+                                }
+                                self.logs.discard(&name);
+                            }
+                            Some(false) => {
+                                self.trust.unbury(&key, &name);
+                            }
+                            None => {}
+                        }
+                    }
+                }
+            }
+        }
+        judged
+    }
+
+    /// The background checks, in a thread of their own (one at a time): start is never held up.
+    fn judge_pending(self: &Arc<Self>) {
+        if self.backfilling.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let me = self.clone();
+        std::thread::spawn(move || {
+            let n_ = me.backfill(BACKFILL_BATCH, BACKFILL_PAUSE);
+            if n_ > 0 {
+                me.ctx.log("info", &format!("CAN logs: {} checked in the background", n_));
+            }
+            me.backfilling.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// The tombstones of logs deleted before this server kept them (CanTrust::derive_tombstones),
+    /// for every car key not done yet: (tombstoned, left missing).
+    pub fn derive_tombstones(&self) -> (usize, usize) {
+        let (mut buried, mut missing, mut any) = (0, 0, false);
+        for key in self.logs.car_keys() {
+            if !logs::valid_key(&key) {
+                continue;
+            }
+            let here = |name: &str| self.logs.size_of(name).is_some() || self.logs.arriving(name);
+            if let Some((b, m)) = self.trust.derive_tombstones(&key, &here) {
+                any = true;
+                buried += b;
+                missing += m;
+            }
+        }
+        if any && buried + missing > 0 {
+            self.ctx.log(
+                "info",
+                &format!("CAN logs deleted before this update: {} tombstoned (the bridge is told they were delivered while they are older than their car's footage), {} left missing (nothing here shows they were deleted on purpose: they may be sent again)", buried, missing),
+            );
+        }
+        (buried, missing)
     }
     /// dropCanLog: a log's data taken out of the index, and the sync told.
     fn drop_log(&self, key: &str, name: &str) {
@@ -1388,10 +1557,10 @@ impl Can {
 
     fn delete_file(self: &Arc<Self>, req: &Req, name: &str) -> R {
         confirmed(req)?;
-        self.logs.remove(name).map_err(|e| he(e.status, e.message))?;
+        // (its tombstone kept: the bridge is not asked to send it again, see CanLogs::delete_log)
+        self.logs.delete_log(name, "owner").map_err(|e| he(e.status, e.message))?;
         if let Some(nm) = parse_name(name) {
             self.drop_log(&nm.vehicle_key, name);
-            self.trust.deleted(&nm.vehicle_key, name);
         }
         self.ctx.audit("info", &format!("CAN log deleted: {}: {}", name, req.who.by));
         self.ctx.announce("can");
@@ -2090,22 +2259,41 @@ impl Can {
     }
 
     pub fn upload(self: &Arc<Self>, req: &Req, raw_path: &str) -> Res {
+        match self.upload_gate(req, raw_path) {
+            Ok(g) => self.upload_gated(req, raw_path, g),
+            Err(r) => r,
+        }
+    }
+
+    /// 429 slow_down, with Retry-After: the seconds until the window that refused it ends.
+    fn slow_down(error: &str, until: f64, now: f64) -> Res {
+        let mut r = Self::fail(429, "slow_down", error, None);
+        let secs = ((until - now) / 1000.0).ceil().max(1.0) as u64;
+        if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+            r.headers_mut().insert(header::RETRY_AFTER, v);
+        }
+        r
+    }
+
+    /// The upload API's first checks, once per request (uploads on, HTTPS, the token, the
+    /// token's pace): the token, or the answer.
+    fn upload_gate(&self, req: &Req, raw_path: &str) -> Result<UploadGate, Res> {
         let (enabled, _, tokens) = match self.can_cfg() {
             Ok(c) => c,
-            Err(e) => return self.upload_failed(&e),
+            Err(e) => return Err(self.upload_failed(&e)),
         };
         if !enabled || tokens.is_empty() {
-            return Self::fail(404, "off", "Not found", None);
+            return Err(Self::fail(404, "off", "Not found", None));
         }
         if !self.secure(req) {
-            return Self::fail(403, "https_only", "CAN logs are only taken over HTTPS.", None);
+            return Err(Self::fail(403, "https_only", "CAN logs are only taken over HTTPS.", None));
         }
         let ip = if req.local_port == self.ctx.can_port() { if req.remote.is_empty() { "?".into() } else { req.remote.clone() } } else { self.ctx.client_key(&req.remote) };
         let now = util::now_ms();
         let Some(tok) = self.token_of(req, &tokens) else {
             let mut b = self.bad_tries.lock().unwrap();
-            if b.get(&ip).is_some_and(|x| x.1 > now && x.0 >= 20) {
-                return Self::fail(429, "slow_down", "Too many wrong tokens from this address; try again later.", None);
+            if let Some(x) = b.get(&ip).filter(|x| x.1 > now && x.0 >= 20) {
+                return Err(Self::slow_down("Too many wrong tokens from this address; try again later.", x.1, now));
             }
             let fresh = b.get(&ip).is_none_or(|x| x.1 < now);
             let v = if fresh { (1, now + 600_000.0) } else { let x = b[&ip]; (x.0 + 1, x.1) };
@@ -2115,10 +2303,14 @@ impl Can {
             }
             let mut r = Self::fail(401, "bad_token", "A valid CAN Bridge token is needed.", None);
             r.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-            return r;
+            return Err(r);
         };
         let tok_id = tok.get("id").map(|i| json::js_str(Some(i))).unwrap_or_default();
-        {
+        // uploads count toward the pace; `ping` and `status` (the bridge asks them every pass,
+        // 500 names at a time) do not
+        let sub = &raw_path["/api/can/logs".len().min(raw_path.len())..];
+        let asks = (req.method == Method::GET && sub == "/ping") || (req.method == Method::POST && sub == "/status");
+        if !asks {
             let mut p = self.pace.lock().unwrap();
             let e = p.entry(tok_id.clone()).or_insert((0, 0.0));
             if e.1 < now {
@@ -2126,10 +2318,61 @@ impl Can {
             } else {
                 e.0 += 1;
                 if e.0 > 1200 {
-                    return Self::fail(429, "slow_down", "Too many requests with this token; try again later.", None);
+                    return Err(Self::slow_down("Too many requests with this token; try again later.", e.1, now));
                 }
             }
         }
+        Ok(UploadGate { tok, tok_id })
+    }
+
+    /// An upload API request sent with `Expect: 100-continue`, before its body is read
+    /// (`body_len`: its Content-Length): every check its headers decide, so a refusal reaches
+    /// the bridge before it sends the piece. Err: the answer (a refusal, or `201` `already`
+    /// for the same file); Ok: read the body, then `upload_gated` with this.
+    pub fn upload_head(self: &Arc<Self>, req: &Req, raw_path: &str, body_len: Option<u64>) -> Result<UploadGate, Res> {
+        let g = self.upload_gate(req, raw_path)?;
+        let sub = &raw_path["/api/can/logs".len().min(raw_path.len())..];
+        if req.method == Method::GET && sub == "/ping" {
+            return Ok(g);
+        }
+        if req.method == Method::POST && sub == "/status" {
+            if body_len.is_some_and(|l| l > 1024 * 1024) {
+                return Err(Self::fail(413, "error", "That file is too large.", None));
+            }
+            return Ok(g);
+        }
+        let Some(rest) = sub.strip_prefix('/') else { return Err(Self::fail(404, "not_found", "Not found", None)) };
+        let Some(name) = crate::api::decode(rest, false) else { return Err(Self::fail(400, "bad_name", "That is not a CAN Bridge log name.", None)) };
+        let Some(nm) = parse_name(&name).filter(|_| req.method == Method::POST) else { return Err(Self::fail(404, "not_found", "Not found", None)) };
+        let key = match self.claim(&g.tok_id, &nm.vehicle_key, false) {
+            Ok(k) => k,
+            Err(e) => return Err(self.upload_failed(&e)),
+        };
+        if key.as_deref() != Some(nm.vehicle_key.as_str()) {
+            return Err(Self::fail(403, "wrong_car", &format!("This token is for car key {}, not {}.", key.unwrap_or_else(|| "null".into()), nm.vehicle_key), None));
+        }
+        if body_len.is_some_and(|l| l > logs::MAX_CHUNK) {
+            return Err(Self::fail(413, "error", "That file is too large.", None));
+        }
+        let sha = req.headers.get("upload-sha256").and_then(|v| v.to_str().ok()).unwrap_or("").to_lowercase();
+        match self.logs.precheck(&name, body_len, Self::num_header(req, "upload-offset"), Self::num_header(req, "upload-length"), &sha) {
+            Ok(None) => Ok(g),
+            Ok(Some(out)) => Err(self.uploaded(&g.tok_id, &nm, &name, out)),
+            Err(e) => Err(Self::fail_err(e)),
+        }
+    }
+
+    /// A number header of an upload (NaN when missing or empty).
+    fn num_header(req: &Req, h: &str) -> f64 {
+        match req.headers.get(h).and_then(|v| v.to_str().ok()) {
+            None | Some("") => f64::NAN,
+            Some(v) => json::str_number(v),
+        }
+    }
+
+    /// The upload API's answer to a request that passed `upload_gate` (or `upload_head`).
+    pub fn upload_gated(self: &Arc<Self>, req: &Req, raw_path: &str, g: UploadGate) -> Res {
+        let UploadGate { tok, tok_id } = g;
         let sub = &raw_path["/api/can/logs".len()..];
         if req.method == Method::GET && sub == "/ping" {
             return ok(json!({ "ok": true, "api": 1, "vehicleKey": tok.get("key").filter(|k| json::truthy(Some(k))), "maxChunk": logs::MAX_CHUNK, "maxParallel": logs::MAX_PARALLEL, "maxFile": logs::MAX_FILE, "maxSidecar": logs::MAX_SIDECAR, "formats": reader::FORMATS }));
@@ -2154,9 +2397,8 @@ impl Can {
                             }
                         }
                     }
-                    if keys.len() > 1 {
-                        return Self::fail(400, "mixed_cars", "A token is for one car: ask about one car key's files.", None);
-                    }
+                    // a token not tied to a car yet is tied by a batch of one car's names; with
+                    // two cars' names it stays untied and every name answers `forbidden`
                     if keys.len() == 1 {
                         key = match self.claim(&tok_id, &keys[0], false) {
                             Ok(k) => k,
@@ -2187,49 +2429,53 @@ impl Can {
             if key.as_deref() != Some(nm.vehicle_key.as_str()) {
                 return Self::fail(403, "wrong_car", &format!("This token is for car key {}, not {}.", key.unwrap_or_else(|| "null".into()), nm.vehicle_key), None);
             }
-            let num = |h: &str| -> f64 {
-                match req.headers.get(h).and_then(|v| v.to_str().ok()) {
-                    None | Some("") => f64::NAN,
-                    Some(v) => json::str_number(v),
-                }
-            };
             if req.body.len() as u64 > logs::MAX_CHUNK {
                 return Self::fail(413, "error", "That file is too large.", None);
             }
             let sha = req.headers.get("upload-sha256").and_then(|v| v.to_str().ok()).unwrap_or("").to_lowercase();
-            return match self.logs.receive(&name, &req.body, num("upload-offset"), num("upload-length"), &sha) {
-                Ok(out) => {
-                    // (the part was taken: only the token's last use was not noted)
-                    if let Err(e) = self.claim(&tok_id, &nm.vehicle_key, true) {
-                        self.ctx.log("warn", &format!("CAN Bridge token's last use was not kept: {e}"));
-                    }
-                    let complete = out.get("complete") == Some(&Value::Bool(true));
-                    if complete && !json::truthy(out.get("already")) {
-                        self.ctx.log("info", &format!("CAN Bridge: received {} ({} bytes)", name, json::num_str(out["length"].as_f64().unwrap_or(0.0))));
-                        self.ctx.announce("can");
-                        let me = self.clone();
-                        let (k, l) = (nm.vehicle_key.clone(), name.trim_end_matches(".json").to_string());
-                        let l = if name.ends_with(".json") { name[..name.len() - 5].to_string() } else { l };
-                        let replaced = json::truthy(out.get("replaced"));
-                        std::thread::spawn(move || {
-                            if replaced {
-                                // the failed copy's data (indexed only if used anyway) goes first
-                                me.drop_log(&k, &l);
-                            }
-                            me.judge(&k, &l);
-                        });
-                    }
-                    json_res(if complete { 201 } else { 200 }, &out)
-                }
+            return match self.logs.receive(&name, &req.body, Self::num_header(req, "upload-offset"), Self::num_header(req, "upload-length"), &sha) {
+                Ok(out) => self.uploaded(&tok_id, &nm, &name, out),
                 Err(e) => Self::fail_err(e),
             };
         }
         Self::fail(404, "not_found", "Not found", None)
     }
 
+    /// The answer to a chunk taken (or found all here already): its last use noted on the
+    /// token, and a file just completed announced and checked.
+    fn uploaded(self: &Arc<Self>, tok_id: &str, nm: &logs::Name, name: &str, out: Value) -> Res {
+        // (the part was taken: only the token's last use was not noted)
+        if let Err(e) = self.claim(tok_id, &nm.vehicle_key, true) {
+            self.ctx.log("warn", &format!("CAN Bridge token's last use was not kept: {e}"));
+        }
+        let complete = out.get("complete") == Some(&Value::Bool(true));
+        if complete && !json::truthy(out.get("already")) {
+            self.ctx.log("info", &format!("CAN Bridge: received {} ({} bytes)", name, json::num_str(out["length"].as_f64().unwrap_or(0.0))));
+            self.ctx.announce("can");
+            let me = self.clone();
+            let k = nm.vehicle_key.clone();
+            let l = if name.ends_with(".json") { name[..name.len() - 5].to_string() } else { name.to_string() };
+            let replaced = json::truthy(out.get("replaced"));
+            std::thread::spawn(move || {
+                if replaced {
+                    // the failed copy's data (indexed only if used anyway) goes first
+                    me.drop_log(&k, &l);
+                }
+                me.judge(&k, &l);
+            });
+        }
+        json_res(if complete { 201 } else { 200 }, &out)
+    }
+
     fn fail_err(e: CanError) -> Res {
         Self::fail(e.status, if e.code.is_empty() { "error" } else { &e.code }, &e.message, e.received)
     }
+}
+
+/// An upload API request past its first checks (see `Can::upload_head`): its token.
+pub struct UploadGate {
+    tok: Value,
+    tok_id: String,
 }
 
 /// A file opened when the zip comes to it.

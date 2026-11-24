@@ -157,7 +157,9 @@ request gets the same 503.
 
 The 503 is an answer, never a silent close: the TLS handshake completes, the
 request's body is read and dropped (up to 17 MiB, for at most a minute), and
-then:
+then (a request sent with `Expect: 100-continue` gets it at once instead, without
+a `100 Continue` and without its body being read: see
+[Expect: 100-continue](#expect-100-continue)):
 
 ```
 HTTP/1.1 503 Service Unavailable
@@ -200,11 +202,45 @@ its connection is closed.
 | Unfinished uploads per car | 16 (sidecars count; checked when an upload starts at offset 0; dropped after 2 days) | `429 too_many_partial` |
 | Logs per car | 200,000 | `507 car_full` |
 | Free disk space to start a file (offset 0) | twice its `Upload-Length` plus 2 GiB | `507 no_space` |
-| Requests with one token | 1,200 in 10 minutes (every request counts, `ping` too; the window starts at the first) | `429 slow_down` |
-| Wrong tokens from one address | 20 in 10 minutes (from the first wrong one); a right token is never refused because of them | `429 slow_down` (before that: `401 bad_token`) |
+| Requests with one token | 1,200 uploads in 10 minutes (every `POST /api/can/logs/<name>`; `ping` and `status` do not count; the window starts at the first) | `429 slow_down` with `Retry-After` |
+| Wrong tokens from one address | 20 in 10 minutes (from the first wrong one); a right token is never refused because of them | `429 slow_down` with `Retry-After` (before that: `401 bad_token`) |
 
-Only the 503 carries `Retry-After`. For `429`, wait (minutes) before trying
-again.
+The 503 carries `Retry-After: 5`. A `429 slow_down` carries `Retry-After`
+too: the seconds until its 10-minute window ends (up to 600). `429
+too_many_partial` has none: finish or resume the unfinished uploads.
+
+### Expect: 100-continue
+
+An upload may be sent with `Expect: 100-continue` (the CAN Bridge sends every
+upload that way, holding the body back until `100 Continue` or 3 s). The
+server then decides everything the request's headers allow **before it reads
+the body**, without reading or hashing any stored file (so a slow disk never
+holds up the `100 Continue` past the bridge's 3 s wait):
+
+- A request it serves gets `HTTP/1.1 100 Continue` as soon as those checks
+  pass (they read only the request's headers, the upload's state and the
+  folder's counts); the bridge sends the body and gets the usual answer.
+- A request it refuses without needing the body gets its answer straight
+  away, **without** a `100 Continue`, with `Connection: close`: the bridge never
+  sends the piece, and opens a new connection for its next request. These are:
+  the `503 too_many_connections` of every connection limit; `404 off`, `403
+  https_only`, `401 bad_token`, `429 slow_down`, `403 wrong_car`; `400
+  bad_name`, `bad_offset`, `bad_length`, `bad_sha256`, `past_end` (from
+  `Content-Length`); `413` for a chunk over `maxChunk` or a body over 17 MiB
+  (from `Content-Length`), `413 too_large`; `409 busy`, `length_changed`,
+  `offset_mismatch`; `507 no_space`, `car_full`; `429 too_many_partial`.
+- A request for a name whose file is **all here already** gets `100
+  Continue` and its body is read: whether it is the same file (`201`
+  `"already": true`), another copy (`409 exists_different`) or a new copy of
+  a failed log (see "Replacing a failed log") needs the stored file's
+  SHA-256, which is never worked out before the body.
+
+`422 sha256_mismatch`, `422 bad_sidecar`, a swap refused at the last moment
+(see "Replacing a failed log") and the answers for a file all here need the
+body, so they come after it.
+Every check is made again once the body is here, so nothing changes between
+the two. Without `Expect` the body is read first, as before (a refused client
+is then not reset while it is still sending).
 
 **On the web port (9000).** The same requests work there, under the web
 port's own limits: no limit per address (browsers share addresses), 1024
@@ -242,7 +278,11 @@ half of the 16 unfinished uploads a car may have (`429 too_many_partial`), so
 even 8 uploads cut off earlier and not resumed yet leave room for 8 new ones,
 and 8 uploads with a `status` or `ping` beside them stay far under the 32
 connections one address may hold with a token (see Connection limits). An
-older server answers no `maxParallel`.
+older server answers no `maxParallel`. A bridge that has no answer from
+`ping` (for example a 503) should not send more than 8 at once either: with
+up to 8 earlier uploads still unfinished, more than 8 new ones would get
+`429 too_many_partial`. `ping` and `status` themselves need no share of
+`maxParallel` (they never leave an unfinished upload behind).
 
 ### Connection limits
 
@@ -254,6 +294,8 @@ A recap of Limits above, for the bridge:
 - Past a limit the request is answered, never dropped:
   `503 { "code": "too_many_connections" }` with `Retry-After: 5` and
   `Connection: close`. Wait 5 seconds, then send again on a new connection.
+  With `Expect: 100-continue` the 503 comes before the body is sent (see
+  [Expect: 100-continue](#expect-100-continue)).
 
 ## 2. Which files are already here
 
@@ -281,7 +323,10 @@ Up to 2000 names per request (the app asks about up to 500). Answer `200`:
   failed log that is still arriving is `partial` too (see below).
 - `missing`: send it from offset 0.
 - `invalid`: the name is not a CAN Bridge log name (see Names).
-- `forbidden`: another car key's file (a token is for one car).
+- `forbidden`: another car key's file (a token is for one car). A token not
+  tied to a car yet is tied by a `status` whose names are all one car key's;
+  asked about two or more car keys' names at once, it stays untied and every
+  valid name answers `forbidden` (the first upload ties it).
 
 Every entry has `size`: the whole file's size in bytes once it is known (the
 same as `length`: a `complete` file, or a `partial` one whose upload said its
@@ -330,7 +375,9 @@ the same time) is still taken in place of the old one, once, so send both
 halves; the half already replaced answers `201` `"already": true` for the
 same bytes and `409 exists_different` for any other copy. If the new copy
 cannot be read when it is checked, its check stays `pending` and neither
-half is taken until it is checked again; once checked, the same rules apply
+half is taken until it is checked again: a different copy of either half
+meanwhile gets `409 busy` (with `"received": 0`), not `exists_different`,
+so send it again later from offset 0; once checked, the same rules apply
 again. Whether the old copy may be replaced is decided again, at the moment
 of the swap, from the stored check: if it was verified meanwhile (the owner
 trusted the car's new key), the new copy is dropped and the answer is `409 exists_different`. The
@@ -340,6 +387,100 @@ is `verified`, `pending` for any other reason, or `failed` only by a
 `chain_break` worked out from the previous log (above) is never replaced: a
 different copy gets `409 exists_different`. Sending the same bytes again
 answers `201` with `"already": true`, as before, for any check.
+
+**Logs deleted here.** A log the server deleted on purpose (the owner's
+delete in the Nerd settings, *Keeping logs*: with its footage deleted for
+good, older than the car's oldest footage, not linked to footage after N
+days, and "Also delete its CAN data" with footage moved to the Recycle Bin)
+leaves a **tombstone** in its car's `trust.json`: its name, size, SHA-256,
+its sidecar's size and SHA-256, the `check` it had (a log not checked yet is
+checked before it is deleted), when and why it was deleted, and when it
+ended (the sidecar's `end_wall_ms`, else ten minutes after its start, the
+longest a log runs). A log that vanished without the server deleting it (a
+crash, a lost or replaced disk, a file removed by hand) has none: it is
+`missing`, and the bridge may send it again. That includes a log a rule
+went to delete and found already gone (`404`): its record is kept for the
+chain and marked `lost`, never tombstoned.
+
+For a name with a tombstone and no file here, `status` answers:
+
+- **deleted by the owner** (by name in the Nerd settings, or with its
+  footage: "Also delete its CAN data"): never asked for again, whatever
+  footage the car keeps: `complete`, with the size it had (`received`,
+  `length` and `size`) and its `check`: `verified` counts as delivered (the
+  bridge may delete its copy); `failed` with its `check_reason` (the bridge
+  keeps it and lists it; only a *Resend all* sends it again, see below). A
+  check that was never made answers `missing`. Its sidecar answers the same,
+  with the sidecar's size (`missing` when its size is not known);
+- **deleted by an automatic rule** (*Keeping logs*: footage deleted for
+  good, older than the footage, not linked to footage; and the tombstones
+  worked out for logs deleted before this update, below): by the car's
+  **oldest footage kept** (its clips on the share in the footage index, and
+  its protected clips; not the Recycle Bin, which counts as deleted here; the
+  car is the one the key is chosen for, or the only car):
+  - the log ended **at least an hour before** the start of that oldest clip
+    (the margin of the rule "older than the car's oldest footage": clip
+    names are read in the car's time zone, which may be wrong or missing),
+    or its car has no footage at all:
+    `complete`, as above;
+  - otherwise, **inside** the footage kept (footage of its time may still
+    be here): `missing`, so the bridge may send it again. It is then stored
+    and checked as a new log, and its tombstone goes (a log deleted as not
+    linked to footage, or with footage deleted for good in the middle of
+    what is kept, is such a log: a bridge that still has it sends it again,
+    and the same rule deletes it again later);
+  - while that cannot be told (the share away, a scan running or failed,
+    the settings unreadable, or no car is the key's: not chosen with two or
+    more cars, chosen for a car since removed, or no car to be seen at all,
+    for example while the only car is removed to be added again): `complete`
+    with `check: pending`; ask again.
+
+**A deleted log sent again** that counts as delivered (above) is taken as
+any upload (`201`, offsets and limits as usual), checked as any log (its
+SHA-256, signature and chain link, once both halves are here), the result
+kept on its tombstone (`verified`, or `failed` with its reason), and deleted
+again: it is never indexed, listed or counted. A copy that fails answers
+`failed` again, and a resend is checked again the same way. A sidecar sent
+without its log is kept at least 10 minutes for the log, then dropped by
+the next background pass (below; its size noted). **Another copy** under
+the name (a log or sidecar of another size or SHA-256 than its tombstone
+recorded) gets `409 exists_different` after its body, as for a file stored
+here, and is dropped: the tombstone and the record the next log's chain
+link goes by stay as they were. (A sidecar's size and SHA-256 are known for
+logs deleted since this version; for older ones once a sidecar was sent
+again.)
+
+**Logs from before tombstones and checks.** On the first start after this
+update the server works out, once per car key (`tombstonesV` in
+`trust.json`), tombstones for logs it deleted before: only from records
+`trust.json` marked deleted of logs received complete and checked (their
+SHA-256 and length), whose file is not here. An older server marked a
+record deleted in the purposeful deletes above, after deleting the files,
+and also when its rule found the file already gone (`404`); those two cannot
+be told apart in its records, so such a log is tombstoned too (a rule had
+decided to delete it anyway). Every other record of a log that is gone gets
+none, so that log stays `missing` and may be sent again. These records hold
+no sidecar size (and the bridge's `chain.json` is not here), so the
+sidecar of such a tombstone answers `missing`, never a guessed size: a
+bridge that still has it sends it once, and it is noted and dropped. Until
+this has run for a car key (just after a start), a name whose record says
+deleted answers `complete` with `check: pending` (its record's length, 0 for
+its sidecar), never `missing`. The log says how many were tombstoned and
+how many were left missing. Logs here without a check (from before the
+checks, or still waiting), and copies here whose record still says deleted,
+are checked in the background from 15 s after start (4 at a time, with a
+pause between), never holding up the start or the uploads; `status` answers
+them `pending` until then.
+
+**Failed for good until the owner acts.** A *Resend all* changes nothing for
+a log whose stored copy is the bridge's own (the same bytes answer `201`
+`"already": true`) when its check failed for a reason the copy cannot fix:
+`unsigned` (the car is not paired, or the sidecar says `"signed": false`),
+`bad_signature` for a key this car is not paired with (an app reinstalled
+with a new key), or a `chain_break` from the previous log. Its check stays
+`failed` until the owner trusts the key or pairs the car in the Nerd
+settings. A bridge that keeps failed logs until they are verified keeps
+these until then, even past its own retention limit.
 
 ## 3. Upload a file (in chunks, resumable)
 
@@ -487,12 +628,14 @@ For the paired key's signed logs the Nerd settings report:
 
 - a gap: indexes that never arrived (`log 41 is missing`);
 - a mismatch: a log whose `prev_name`/`prev_sha256` is not the log stored
-  here with the index before (swapped, changed or replaced);
+  here with the index before (swapped, changed or replaced), nor any other
+  copy of that index here;
 - a duplicate index, or a later index that starts before an earlier one
   (reordered);
 - a log of the chain that failed its check.
 
-Logs received here and deleted later still count (their record is kept), and
+Logs received here and deleted later still count (their record is kept, and
+their tombstone, see "Logs deleted here"), and
 the bridge deleting its own copies after upload is not a break. A new key
 starts again at 0 (and is offered for trust, above).
 
@@ -517,6 +660,13 @@ Nerd list under the log's check (escaped, cut to 160 characters, all of it
 on hover), and quoted in the chain summary for a restart, a duplicate or a
 mismatch at that log. It never changes a log's check.
 
+**A chain continued from an older sidecar.** When the bridge goes on from the
+newest signed sidecar it still has, but newer logs already reached the server
+(for example logs 10 to 12 went up from RAM, then RAM and `chain.json` were
+lost and it went on from log 9), the new logs repeat those indexes under new
+names. Each repeated index is reported once as a duplicate; the log after
+them, which names the new copy of its previous index, is not a mismatch.
+
 ## Errors
 
 | Status | `code` | Meaning, what the app does |
@@ -525,8 +675,7 @@ mismatch at that log. It never changes a log's check.
 | 401 | `bad_token` | No token, or a revoked one: ask the owner for a new token. |
 | 403 | `https_only` | Plain HTTP was used. |
 | 403 | `wrong_car` | This token is for another car key. |
-| 400 | `mixed_cars` | A token not tied to a car yet asked about two cars' files at once. |
-| 429 | `slow_down` | Too many wrong tokens from this address (20 in 10 minutes), or more than 1,200 requests in 10 minutes with one token: wait. A right token is never refused because of wrong ones. |
+| 429 | `slow_down` | Too many wrong tokens from this address (20 in 10 minutes), or more than 1,200 uploads in 10 minutes with one token (`ping` and `status` do not count): wait `Retry-After` seconds (the rest of the 10 minutes). A right token is never refused because of wrong ones. |
 | 429 | `too_many_partial` | 16 unfinished uploads for this car already (sidecars count; checked when an upload starts at offset 0): finish or wait (unfinished uploads are dropped after two days). |
 | 408 | `timed_out` | The body sent nothing for 2 minutes, or was not all there within 10 minutes; the connection is closed. Resume (ask `status`). |
 | 503 | `too_many_connections` | Too many connections from this address (6 without a valid token, 32 with one) or to the server (256). Comes with `Retry-After: 5` and `Connection: close`: wait that long, then send again on a new connection. |
@@ -534,7 +683,7 @@ mismatch at that log. It never changes a log's check.
 | 409 | `offset_mismatch` | `Upload-Offset` is not what the server has: resume at `received`. |
 | 409 | `length_changed` | A different `Upload-Length` than the upload already started. |
 | 409 | `exists_different` | A different file with this name is complete here and its stored check did not fail (a failed log is replaced instead; see "Which files are already here"; a `chain_break` from the previous log is not this log's failure): rename (next `seq`) and report it. |
-| 409 | `busy` | Another request is uploading the same file: wait and resume. |
+| 409 | `busy` | Another request is uploading the same file, or a replaced log is waiting to be checked again: wait and resume at `received` (`0` for the latter: start again). |
 | 413 | `too_large` | Over `maxFile`/`maxSidecar`. |
 | 413 | `error` | A chunk over `maxChunk` (16 MiB), a body over 17 MiB, or a `status` body over 1 MiB. Send smaller chunks. |
 | 422 | `sha256_mismatch` | The finished file did not match its hash; it was discarded. Upload it again from offset 0. |
@@ -551,7 +700,7 @@ check failed, which a resent copy replaces (see "Which files are already here").
 them (start, car key, check, size, format and why it was closed, frames and
 dropped from the sidecar, in a
 box of its own height with a filter by car key, check and text), follows new
-uploads, checks and the index live, and can delete one (with the password).
+uploads, checks and the index live, and can delete one (with the password; it leaves a tombstone, and the bridge is never asked for it again, see "Logs deleted here").
 
 **How long logs are kept: with their footage.** A log is *paired* with the
 footage of its car (the car its key is chosen for in the Nerd settings) that
@@ -578,7 +727,9 @@ logs with their footage" (Nerd settings, *Keeping logs*; on by default):
   acted on once it is back.
 - At most 500 logs a run (the rest a minute later), each deleted as a delete in
   the Nerd settings is (the file and sidecar, its minutes in the index, the
-  sync, its trust record kept as deleted for the chain), with one audit line a
+  sync, its trust record kept as deleted for the chain, and a tombstone so
+  the bridge is not asked for it again while it is older than the footage
+  kept: see "Logs deleted here"; a log already gone gets none), with one audit line a
   run ("CAN logs deleted (car …): N (… with their footage deleted, … older
   than the car's oldest footage, … not linked to footage after 7 days)").
 
@@ -598,7 +749,8 @@ Ticked, `POST /api/vehicles/:id/trash` and `/trash-days` get `withCan: true`
 and, once the footage has moved, the logs of the moved recordings' minutes are
 deleted at once (with Delete through this date, `through: true`, every log of
 the car ending before the end of that day in the car's time zone as well).
-These do not come back on a restore. Minutes that footage still on the share
+These do not come back on a restore, and leave tombstones: the bridge is
+never asked for them again (see "Logs deleted here"). Minutes that footage still on the share
 or protected footage covers keep their logs; pending logs stay; nothing
 happens for an unmapped key or while the car's footage cannot be trusted.
 The count comes from `POST /api/vehicles/:id/trash-preview` `{ ids }` and the

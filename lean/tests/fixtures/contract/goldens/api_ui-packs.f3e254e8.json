@@ -18,9 +18,9 @@
         {
           "author": "Sentry Six Manager",
           "builtin": true,
-          "bytes": 530230,
+          "bytes": 613618,
           "description": "The Sentry family: what matters first, with Liquid Glass and details one tap away.",
-          "files": 37,
+          "files": 39,
           "id": "sentry-six",
           "name": "Sentry Six",
           "replaces": [

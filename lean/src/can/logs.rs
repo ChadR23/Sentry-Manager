@@ -10,9 +10,14 @@
 //!
 //! A `.part` next to a finished file of the same name is a new copy replacing one whose
 //! check failed (the bridge's "Resend all"): the old copy stays until the new one is all here.
+//!
+//! A log deleted here on purpose (the owner, "Keeping logs", "Also delete its CAN data")
+//! leaves a tombstone in its car's trust.json (see CanTrust::bury): `status` answers it as
+//! delivered when the owner deleted it (by name, or with its footage), or while its time is
+//! older than the car's oldest footage kept (with rule "old"'s margin), else as missing.
 
 use super::json::{self, n};
-use super::trust::{CanTrust, Half};
+use super::trust::{Buried, CanTrust, Half};
 use super::tz;
 use super::util::{self, mtime_ms};
 use serde_json::{json, Map, Value};
@@ -33,6 +38,38 @@ pub const MAX_PARTIAL: usize = 16;
 /// connections one address may hold with a token (and under 6 + headroom per server).
 pub const MAX_PARALLEL: usize = 8;
 const RESCAN_MS: f64 = 10.0 * 60_000.0;
+
+/// What `plan` found a chunk's checks leave to do.
+enum Plan {
+    /// the same file is all here: this answer
+    Already(Value),
+    /// write the chunk (`replacing`: a new copy of a finished file whose check failed)
+    Write { replacing: bool },
+    /// (before the body) a finished file of this name is here: whether this is the same file
+    /// (`already`) or another copy (`exists_different`, or a replacement) needs its hash, which
+    /// waits for the body
+    Wait,
+}
+
+/// The oldest footage a car still keeps (on the share or protected), for the logs deleted
+/// here: see `CanLogs::set_footage`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Kept {
+    /// no footage at all: the key's car has none (every deleted log is older)
+    Nothing,
+    /// the start of its oldest clip (UTC ms)
+    Since(f64),
+    /// not known now (the share unreachable, a scan running or failed, a setting unreadable,
+    /// or no car is the key's: unmapped with two or more, mapped to a removed one, or no car
+    /// visible at all)
+    Unknown,
+}
+
+/// Why a tombstone's log was deleted, for the owner's own deletes: by name in the Nerd
+/// settings, or with its footage ("Also delete its CAN data"). Those are never asked for again
+/// whatever footage the car keeps; the automatic rules ("unlinked", "footage", "old",
+/// "before-tombstones") go by the footage kept.
+pub const OWNER_WHYS: [&str; 2] = ["owner", "with-footage"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Name {
@@ -170,6 +207,8 @@ pub struct CanLogs {
     trust: OnceLock<Arc<CanTrust>>,
     /// (tests) run as a new copy is about to take a failed one's place
     before_swap: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    /// the oldest footage each car key's car keeps (set once; without it: `Kept::Nothing`)
+    footage: OnceLock<Box<dyn Fn(&str) -> Kept + Send + Sync>>,
 }
 
 fn stat(p: &Path) -> Option<fs::Metadata> {
@@ -178,15 +217,48 @@ fn stat(p: &Path) -> Option<fs::Metadata> {
 
 impl CanLogs {
     pub fn new(dir: PathBuf, free_bytes: Box<dyn Fn() -> f64 + Send + Sync>, now: Box<dyn Fn() -> f64 + Send + Sync>) -> Arc<CanLogs> {
-        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car: MAX_LOGS_PER_CAR, min_free: 2.0 * 1024f64.powi(3), busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new(), before_swap: OnceLock::new() })
+        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car: MAX_LOGS_PER_CAR, min_free: 2.0 * 1024f64.powi(3), busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new(), before_swap: OnceLock::new(), footage: OnceLock::new() })
     }
     pub fn with_limits(dir: PathBuf, max_files_per_car: usize, min_free: f64, free_bytes: Box<dyn Fn() -> f64 + Send + Sync>, now: Box<dyn Fn() -> f64 + Send + Sync>) -> Arc<CanLogs> {
-        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car, min_free, busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new(), before_swap: OnceLock::new() })
+        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car, min_free, busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new(), before_swap: OnceLock::new(), footage: OnceLock::new() })
     }
 
     /// The checks the status answers and replacements go by.
     pub fn set_trust(&self, trust: Arc<CanTrust>) {
         let _ = self.trust.set(trust);
+    }
+
+    /// How old the footage each car key's car still keeps is (`status` and the checks of
+    /// re-uploaded deleted logs go by it).
+    pub fn set_footage(&self, f: Box<dyn Fn(&str) -> Kept + Send + Sync>) {
+        let _ = self.footage.set(f);
+    }
+
+    /// The oldest footage `key`'s car keeps.
+    pub fn kept(&self, key: &str) -> Kept {
+        self.footage.get().map_or(Kept::Nothing, |f| f(key))
+    }
+
+    /// Whether a deleted log that ended at `end` is older than all the footage its car keeps,
+    /// with rule "old"'s margin (prune::MARGIN_MS: clip names are read in the car's time zone,
+    /// which may be wrong or missing): None while that is not known.
+    pub fn older_than_footage(kept: Kept, end: f64) -> Option<bool> {
+        match kept {
+            Kept::Nothing => Some(true),
+            Kept::Since(t) => Some(end <= t - super::prune::MARGIN_MS),
+            Kept::Unknown => None,
+        }
+    }
+
+    /// Whether a tombstone's log counts as delivered for good (Some(true)), may be sent again
+    /// (Some(false): its time still has footage), or is not known yet (None). The owner's own
+    /// deletes (OWNER_WHYS) count as delivered whatever footage is kept.
+    pub fn buried_older(tomb: &Value, kept: Kept) -> Option<bool> {
+        if tomb.get("why").and_then(|w| w.as_str()).is_some_and(|w| OWNER_WHYS.contains(&w)) {
+            return Some(true);
+        }
+        let end = tomb.get("end").and_then(|x| x.as_f64()).unwrap_or(f64::INFINITY);
+        Self::older_than_footage(kept, end)
     }
 
     /// (tests) f runs as a new copy is about to take a failed one's place, after the copy is
@@ -241,6 +313,8 @@ impl CanLogs {
         };
         let mut files = Map::new();
         let mut asked: Vec<(String, String, String)> = Vec::new();
+        // names not here whose log was deleted here on purpose: (car key, log, asked as)
+        let mut buried: Vec<(String, String, String)> = Vec::new();
         for v in list {
             let name = js_string(v);
             let parsed = parse_name(&name);
@@ -254,13 +328,52 @@ impl CanLogs {
                 Ok(s) => Self::state_json(&s),
                 Err(_) => json!({ "state": "invalid", "received": 0, "length": null, "size": 0 }),
             };
-            if st["state"] == "complete" {
+            if st["state"] == "complete" || st["state"] == "missing" {
                 if let Some(nm) = parsed.filter(|_| self.trust.get().is_some()) {
                     let log = if nm.sidecar { name[..name.len() - 5].to_string() } else { name.clone() };
-                    asked.push((nm.vehicle_key, log, name.clone()));
+                    // (a sidecar's log may be here while the sidecar is not: then it is missing)
+                    let gone = st["state"] == "missing" && self.log_size(&nm.vehicle_key, &log).is_none();
+                    if st["state"] == "complete" {
+                        asked.push((nm.vehicle_key, log, name.clone()));
+                    } else if gone {
+                        buried.push((nm.vehicle_key, log, name.clone()));
+                    }
                 }
             }
             files.insert(name, st);
+        }
+        if let (Some(trust), false) = (self.trust.get(), buried.is_empty()) {
+            let mut by_key: HashMap<String, Vec<(String, String)>> = HashMap::new();
+            for (key, log, asked_as) in buried {
+                by_key.entry(key).or_default().push((log, asked_as));
+            }
+            for (key, list) in by_key {
+                let logs: Vec<String> = list.iter().map(|x| x.0.clone()).collect();
+                let tombs = trust.buried(&key, &logs);
+                if tombs.iter().all(|t| matches!(t, Buried::No)) {
+                    continue;
+                }
+                // (worked out once per car key, and only when one of its names was deleted here)
+                let mut kept = None;
+                for (tomb, (_, asked_as)) in tombs.into_iter().zip(list) {
+                    let e = match tomb {
+                        Buried::No => continue,
+                        // deleted before tombstones were kept, and not worked out yet (just after
+                        // a start): not missing, ask again
+                        Buried::NotDerived(size) => {
+                            let sz = if asked_as.ends_with(".json") { 0.0 } else { size.unwrap_or(0.0) };
+                            Some(json!({ "state": "complete", "received": n(sz), "length": n(sz), "size": n(sz), "check": "pending" }))
+                        }
+                        Buried::Tomb(tomb) => {
+                            let k = *kept.get_or_insert_with(|| self.kept(&key));
+                            Self::buried_json(&tomb, asked_as.ends_with(".json"), k)
+                        }
+                    };
+                    if let Some(e) = e {
+                        files.insert(asked_as, e);
+                    }
+                }
+            }
         }
         // every complete log's check, read from its stored record (one lock per car key)
         if let Some(trust) = self.trust.get() {
@@ -292,6 +405,39 @@ impl CanLogs {
         Ok(json!({ "files": files }))
     }
 
+    /// The status entry of a name not here whose log was deleted here on purpose (None:
+    /// `missing`, send it). A log the owner deleted (by name or with its footage), or one older
+    /// than all the footage its car keeps (see `buried_older`), counts as delivered:
+    /// `complete` with the size it had and the check it had (or its re-upload got, see
+    /// `CanTrust::rebury`). Its sidecar answers the same with the sidecar's size, when known
+    /// (a tombstone worked out from an older server's records has none: missing, never a
+    /// guess). While the footage is not known it is `complete` and `pending` (ask again later).
+    /// A check that was never made (`pending`) answers `missing`: the bridge sends it again,
+    /// and that copy is checked and dropped again (see `Can::judge`).
+    fn buried_json(tomb: &Value, sidecar: bool, kept: Kept) -> Option<Value> {
+        let older = Self::buried_older(tomb, kept);
+        if older == Some(false) {
+            return None;
+        }
+        let size = if sidecar { tomb.get("side").and_then(|x| x.as_f64())? } else { tomb.get("size").and_then(|x| x.as_f64())? };
+        let mut e = json!({ "state": "complete", "received": n(size), "length": n(size), "size": n(size) });
+        let check = tomb.get("check").and_then(|x| x.as_str()).unwrap_or("pending");
+        if older.is_none() {
+            e["check"] = json!("pending");
+            return Some(e);
+        }
+        if !matches!(check, "verified" | "failed") {
+            return None;
+        }
+        e["check"] = json!(check);
+        if check == "failed" {
+            if let Some(r) = tomb.get("checkReason").and_then(|x| x.as_str()) {
+                e["check_reason"] = json!(r);
+            }
+        }
+        Some(e)
+    }
+
     /// cleanStale: half-finished uploads older than `max_age_ms` are dropped.
     pub fn clean_stale(&self, max_age_ms: f64) -> usize {
         let mut n = 0;
@@ -314,6 +460,38 @@ impl CanLogs {
 
     /// One chunk of a file (receive): { received, length, complete[, already] }.
     pub fn receive(&self, name: &str, body: &[u8], offset: f64, length: f64, sha256: &str) -> Result<Value, CanError> {
+        let (nm, file) = self.head(name, offset, length, sha256)?;
+        {
+            let mut b = self.busy.lock().unwrap();
+            if b.contains(&file) {
+                drop(b);
+                return Err(self.busy_error(name));
+            }
+            b.insert(file.clone());
+        }
+        let r = self.receive_locked(&nm, name, &file, body, offset, length, sha256);
+        self.busy.lock().unwrap().remove(&file);
+        r
+    }
+
+    /// What a chunk's headers decide before its body is read (an upload sent with `Expect:
+    /// 100-continue`): Err, the answer `receive` would give whatever the body; Ok(Some), the
+    /// same file is all here (`201` `already`); Ok(None), send the body. `body_len`: the body's
+    /// Content-Length, when it has one. Nothing is written.
+    pub fn precheck(&self, name: &str, body_len: Option<u64>, offset: f64, length: f64, sha256: &str) -> Result<Option<Value>, CanError> {
+        let (nm, file) = self.head(name, offset, length, sha256)?;
+        if self.busy.lock().unwrap().contains(&file) {
+            return Err(self.busy_error(name));
+        }
+        match self.plan(&nm, name, &file, body_len, offset, length, sha256, false)? {
+            Plan::Already(v) => Ok(Some(v)),
+            Plan::Write { .. } | Plan::Wait => Ok(None),
+        }
+    }
+
+    /// The checks of a chunk's own headers: its name, offset, length and hash, and the whole
+    /// file's size limit.
+    fn head(&self, name: &str, offset: f64, length: f64, sha256: &str) -> Result<(Name, PathBuf), CanError> {
         let nm = parse_name(name).ok_or_else(|| can_error(400, "bad_name", "That is not a CAN Bridge log name."))?;
         let safe = |x: f64| x.is_finite() && x.fract() == 0.0 && x.abs() <= 9_007_199_254_740_991.0;
         if !safe(offset) || offset < 0.0 {
@@ -330,22 +508,32 @@ impl CanLogs {
             return Err(can_error(413, "too_large", format!("A {} can be at most {} bytes.", if nm.sidecar { "sidecar" } else { "log" }, limit)));
         }
         let file = self.file_of(name)?;
-        {
-            let mut b = self.busy.lock().unwrap();
-            if b.contains(&file) {
-                drop(b);
-                let r = self.state_of(name).map(|s| s.1).unwrap_or(0.0);
-                return Err(with_received(can_error(409, "busy", "This file is being uploaded by another request."), r));
-            }
-            b.insert(file.clone());
-        }
-        let r = self.receive_locked(&nm, name, &file, body, offset, length, sha256);
-        self.busy.lock().unwrap().remove(&file);
-        r
+        Ok((nm, file))
     }
 
+    /// 409 busy: another request is on this file.
+    fn busy_error(&self, name: &str) -> CanError {
+        let r = self.state_of(name).map(|s| s.1).unwrap_or(0.0);
+        with_received(can_error(409, "busy", "This file is being uploaded by another request."), r)
+    }
+
+    /// A different copy of a finished file that may not take its place: `409 busy` (send it
+    /// again later, from offset 0) while the stored record waits to be judged again after its
+    /// new copy could not be read, else `409 exists_different`.
+    fn not_replaceable(&self, key: &str, log_name: &str) -> CanError {
+        if self.trust.get().is_some_and(|t| t.rereading(key, log_name)) {
+            return with_received(can_error(409, "busy", "This log is being checked again; send it again in a minute."), 0.0);
+        }
+        can_error(409, "exists_different", "A different file with this name is already here.")
+    }
+
+    /// Every check of a chunk that its headers and the files here decide (`body_len`: its
+    /// size, when known; the size checks wait for it otherwise), in `receive`'s order.
+    /// `hash`: false before the body is read (`precheck`): nothing is hashed then, so the
+    /// bridge's `100 Continue` never waits on the disk; a finished file of this name answers
+    /// `Plan::Wait` (whether it is the same file needs its hash).
     #[allow(clippy::too_many_arguments)]
-    fn receive_locked(&self, nm: &Name, name: &str, file: &Path, body: &[u8], offset: f64, length: f64, sha256: &str) -> Result<Value, CanError> {
+    fn plan(&self, nm: &Name, name: &str, file: &Path, body_len: Option<u64>, offset: f64, length: f64, sha256: &str, hash: bool) -> Result<Plan, CanError> {
         let log_name = if nm.sidecar { &name[..name.len() - 5] } else { name };
         let half = if nm.sidecar { Half::Sidecar } else { Half::Log };
         // a new copy may take the stored one's place only while its stored record says so (see
@@ -358,13 +546,24 @@ impl CanLogs {
         // a new copy for a finished one: only in place of a log whose stored check failed
         let replacing = stat(file).is_some();
         if had.0 == "complete" {
-            if had.2 == Some(length) && util::hash_file(file).map(|h| h.0).ok().as_deref() == Some(sha256) {
-                return Ok(json!({ "received": n(length), "length": n(length), "complete": true, "already": true }));
+            if !hash {
+                return Ok(Plan::Wait);
             }
-            if !replaceable() {
-                return Err(can_error(409, "exists_different", "A different file with this name is already here."));
+            if had.2 == Some(length) && util::hash_file(file).map(|h| h.0).ok().as_deref() == Some(sha256) {
+                return Ok(Plan::Already(json!({ "received": n(length), "length": n(length), "complete": true, "already": true })));
+            }
+            if self.differs_from_tomb(&nm.vehicle_key, log_name, half, length, sha256) || !replaceable() {
+                return Err(self.not_replaceable(&nm.vehicle_key, log_name));
             }
             had = ("missing".into(), 0.0, None);
+        } else if self.differs_from_tomb(&nm.vehicle_key, log_name, half, length, sha256) {
+            // another copy under the name of a log deleted here: decided after its body, as for
+            // a stored file (409 exists_different; nothing is written, the tombstone and the
+            // record the chain goes by stay)
+            if !hash {
+                return Ok(Plan::Wait);
+            }
+            return Err(can_error(409, "exists_different", "A different file with this name was here and was deleted; it is not taken again."));
         }
         if had.0 == "partial" && had.2.is_some() && had.2 != Some(length) {
             return Err(with_received(can_error(409, "length_changed", "Upload-Length differs from the upload already started; start again at offset 0 with a new name or the same length."), had.1));
@@ -372,11 +571,13 @@ impl CanLogs {
         if offset != had.1 {
             return Err(with_received(can_error(409, "offset_mismatch", format!("Expected Upload-Offset {}.", json::num_str(had.1))), had.1));
         }
-        if offset + body.len() as f64 > length {
-            return Err(with_received(can_error(400, "past_end", "The chunk goes past Upload-Length."), had.1));
-        }
-        if body.len() as u64 > MAX_CHUNK {
-            return Err(with_received(can_error(413, "chunk_too_large", format!("A chunk can be at most {} bytes.", MAX_CHUNK)), had.1));
+        if let Some(len) = body_len {
+            if offset + len as f64 > length {
+                return Err(with_received(can_error(400, "past_end", "The chunk goes past Upload-Length."), had.1));
+            }
+            if len > MAX_CHUNK {
+                return Err(with_received(can_error(413, "chunk_too_large", format!("A chunk can be at most {} bytes.", MAX_CHUNK)), had.1));
+            }
         }
         if offset == 0.0 && (self.free_bytes)() < length * 2.0 + self.min_free {
             return Err(can_error(507, "no_space", "There is not enough free space for this file."));
@@ -391,6 +592,32 @@ impl CanLogs {
                 return Err(with_received(can_error(429, "too_many_partial", "Too many unfinished uploads for this car; finish or wait for them."), 0.0));
             }
         }
+        Ok(Plan::Write { replacing })
+    }
+
+    /// Whether a copy (`length`, `sha256`) of one half of a log deleted here is not the one its
+    /// tombstone recorded (its size or SHA-256, when recorded: a sidecar's are known only for
+    /// logs deleted by this version, or once one was sent again).
+    fn differs_from_tomb(&self, key: &str, log_name: &str, half: Half, length: f64, sha256: &str) -> bool {
+        let Some(tomb) = self.trust.get().and_then(|t| t.tomb(key, log_name)) else { return false };
+        let (size_k, sha_k) = match half {
+            Half::Log => ("size", "sha256"),
+            Half::Sidecar => ("side", "sideSha256"),
+        };
+        let size = tomb.get(size_k).and_then(|x| x.as_f64());
+        let sha = tomb.get(sha_k).and_then(|x| x.as_str()).filter(|s| s.len() == 64);
+        size.is_some_and(|s| s != length) || sha.is_some_and(|s| !s.eq_ignore_ascii_case(sha256))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn receive_locked(&self, nm: &Name, name: &str, file: &Path, body: &[u8], offset: f64, length: f64, sha256: &str) -> Result<Value, CanError> {
+        let log_name = if nm.sidecar { &name[..name.len() - 5] } else { name };
+        let half = if nm.sidecar { Half::Sidecar } else { Half::Log };
+        let replacing = match self.plan(nm, name, file, Some(body.len() as u64), offset, length, sha256, true)? {
+            Plan::Already(v) => return Ok(v),
+            Plan::Write { replacing } => replacing,
+            Plan::Wait => unreachable!("hashed"),
+        };
         let io = |e: std::io::Error| can_error(500, "server_error", e.to_string());
         fs::create_dir_all(file.parent().unwrap()).map_err(io)?;
         let part = PathBuf::from(format!("{}.part", file.display()));
@@ -439,7 +666,7 @@ impl CanLogs {
                 // the new copy is dropped, as when the first look refused it
                 let _ = fs::remove_file(&part);
                 let _ = fs::remove_file(&part_json);
-                return Err(can_error(409, "exists_different", "A different file with this name is already here."));
+                return Err(self.not_replaceable(&nm.vehicle_key, log_name));
             }
         } else {
             fs::rename(&part, file).map_err(io)?;
@@ -605,6 +832,66 @@ impl CanLogs {
         self.with_cat(key, |c| c.list().into_iter().cloned().collect())
     }
 
+    /// delete_log(name, why): a log deleted on purpose (the owner in the Nerd settings,
+    /// "Keeping logs", "Also delete its CAN data"): what it was is worked out (its size, its
+    /// SHA-256, its sidecar's size, its check, its end), then its files are deleted, then its
+    /// tombstone is kept (CanTrust::bury). A log not judged yet is judged first, so its
+    /// tombstone carries a check. Only after the files are gone: a crash in between leaves no
+    /// tombstone (the log is then missing, and may be sent again), never a tombstone for a log
+    /// still here.
+    pub fn delete_log(&self, name: &str, why: &str) -> Result<(), CanError> {
+        let nm = parse_name(name).filter(|n| !n.sidecar).ok_or_else(|| can_error(400, "bad_name", "That is not a CAN Bridge log name."))?;
+        let key = nm.vehicle_key.clone();
+        let Some(trust) = self.trust.get() else { return self.remove(name) };
+        let Some(size) = self.log_size(&key, name) else { return Err(can_error(404, "not_found", "No such log.")) };
+        let kdir = self.dir.join(&key);
+        let side_path = kdir.join(format!("{}.json", name));
+        let side_size = stat(&side_path).filter(|s| s.is_file()).map(|s| s.len() as f64);
+        let side_sha = side_size.and_then(|_| util::hash_file(&side_path).ok()).map(|h| h.0);
+        let fresh = |r: &Option<Value>| r.as_ref().is_some_and(|r| r.get("length").and_then(|l| l.as_f64()) == Some(size) && r.get("status").and_then(|s| s.as_str()) != Some("waiting") && !json::truthy(r.get("deleted")));
+        if !fresh(&trust.record(&key, name)) {
+            trust.check(&key, name);
+        }
+        let rec = trust.record(&key, name);
+        let sha = match rec.as_ref().filter(|_| fresh(&rec)).and_then(|r| r.get("sha256")).and_then(|s| s.as_str()) {
+            Some(s) => Some(s.to_string()),
+            None => util::hash_file(&kdir.join(name)).ok().map(|h| h.0),
+        };
+        let (check, reason) = trust.checks(&key, &[(name.to_string(), size)]).into_iter().next().unwrap_or(("pending", None));
+        // (never before the longest a log runs from its name's time, as the rules go by the name:
+        // a sidecar's wall clock may have been set back, so it is never older too soon)
+        let longest = nm.started_at as f64 + super::prune::LOG_MAX_MS;
+        let end = util::read_json(&side_path).as_ref().and_then(log_end).map_or(longest, |e| e.max(longest));
+        self.remove(name)?;
+        trust.bury(&key, name, json!({ "size": n(size), "sha256": sha, "side": side_size.map(n), "sideSha256": side_sha, "check": check, "checkReason": reason, "at": n((self.now)()), "why": why, "end": n(end) }));
+        Ok(())
+    }
+
+    /// discard(name): a copy of a log deleted here before, sent again and checked, deleted
+    /// again (its tombstone stays, see Can::judge); either half may be all that is here.
+    pub fn discard(&self, name: &str) {
+        let Ok(file) = self.file_of(name) else { return };
+        let f = file.display().to_string();
+        for p in [f.clone(), format!("{}.json", f)] {
+            let _ = fs::remove_file(p);
+        }
+        if let Some(nm) = parse_name(name) {
+            self.note_changed(&nm.vehicle_key, name);
+        }
+    }
+
+    /// The size of a finished file here (a log or a sidecar), or None.
+    pub fn size_of(&self, name: &str) -> Option<f64> {
+        self.file_of(name).ok().and_then(|f| stat(&f)).filter(|s| s.is_file()).map(|s| s.len() as f64)
+    }
+
+    /// Whether an upload of this name (or of its sidecar) is still arriving.
+    pub fn arriving(&self, log_name: &str) -> bool {
+        let Ok(file) = self.file_of(log_name) else { return false };
+        let f = file.display().to_string();
+        stat(Path::new(&format!("{}.part", f))).is_some() || stat(Path::new(&format!("{}.json.part", f))).is_some()
+    }
+
     /// remove(name): delete one log and its sidecar.
     pub fn remove(&self, name: &str) -> Result<(), CanError> {
         let nm = parse_name(name).filter(|n| !n.sidecar).ok_or_else(|| can_error(400, "bad_name", "That is not a CAN Bridge log name."))?;
@@ -619,6 +906,11 @@ impl CanLogs {
         self.note_changed(&nm.vehicle_key, name);
         Ok(())
     }
+}
+
+/// When a log ended, from its sidecar's `end_wall_ms` (None without a usable one).
+pub fn log_end(side: &Value) -> Option<f64> {
+    side.get("end_wall_ms").and_then(json::finite).filter(|x| *x > 0.0)
 }
 
 /// String(v) as JS turns a JSON value into a name.

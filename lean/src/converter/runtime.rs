@@ -94,11 +94,21 @@ impl Bench {
 
 /// hasActiveJob({ manualOnly })
 pub fn has_active_job(service: &Service, manual_only: bool) -> bool {
-    service.list_summaries().unwrap_or_default().iter().any(|j| {
-        !["completed", "failed", "cancelled"].contains(&j["state"].as_str().unwrap_or(""))
-            && !(j["state"] == "paused" && j["recovery"]["action"] == "manual-intervention")
-            && !(manual_only && (j["autoConvert"] == true || j["config"]["autoConvert"] == true))
-    })
+    service.list_summaries().unwrap_or_default().iter().any(|j| active_job(j, manual_only))
+}
+
+fn active_job(j: &Value, manual_only: bool) -> bool {
+    !["completed", "failed", "cancelled"].contains(&j["state"].as_str().unwrap_or(""))
+        && !(j["state"] == "paused" && j["recovery"]["action"] == "manual-intervention")
+        && !(manual_only && (j["autoConvert"] == true || j["config"]["autoConvert"] == true))
+}
+
+/// A pause request is not idle until workers have parked and encodes have ended.
+pub(crate) fn preview_conversion(service: &Service) -> super::service::SResult<Option<String>> {
+    let jobs = service.list_summaries()?;
+    let encoding = !service.active_encodes().is_empty();
+    Ok(jobs.iter().find(|j| active_job(j, false) && (j["state"] != "paused" || encoding))
+        .and_then(|j| j["id"].as_str()).map(String::from))
 }
 
 impl Converter {
@@ -213,11 +223,11 @@ impl Converter {
         let service = Service::new(so);
         let bench = Arc::new(Bench::default());
         let (s2, b2) = (service.clone(), bench.clone());
-        *devices.encoding_now.lock().unwrap() = Some(Arc::new(move || b2.active() || !s2.active_encodes().is_empty()));
+        *devices.encoding_now.lock().unwrap() = Some(Arc::new(move || b2.active() || s2.preview_active() || !s2.active_encodes().is_empty()));
         // automatic conversion (its own jobs are not in the way: one per vehicle)
         let mut ao = super::auto_convert::AutoOptions::new(Arc::new(service.clone()), super::auto_convert::real_scanner(), o.data_path.join("converter-auto"));
         let (s3, b3) = (service.clone(), bench.clone());
-        ao.is_busy = Arc::new(move || b3.active() || has_active_job(&s3, true));
+        ao.is_busy = Arc::new(move || b3.active() || s3.preview_active() || has_active_job(&s3, true));
         ao.devices = Some(auto_devices(devices.clone()));
         let h3 = held.clone();
         ao.hold_discovered = Some(Arc::new(move |c: &Value, d: &Value| h3(c, d)));
@@ -412,13 +422,23 @@ impl Converter {
 
     /// something converts here right now (a GPU test encode then waits)
     pub fn encoding_now(&self) -> bool {
-        self.bench.active() || !self.service.active_encodes().is_empty()
+        self.bench.active() || self.service.preview_active() || !self.service.active_encodes().is_empty()
     }
 
     pub fn cancel_benchmark(&self) {
         if let Some(c) = self.bench.cancel.lock().unwrap().as_ref() {
             c.store(true, Ordering::SeqCst);
         }
+    }
+
+    pub fn benchmark_active(&self) -> bool { self.bench.active() }
+
+    pub fn try_preview(&self) -> Result<Option<super::service::PreviewLease>, String> {
+        // Same lock order as benchmark admission. A benchmark cannot slip in
+        // between this check and reserving the job service.
+        let benchmark = self.bench.cancel.lock().unwrap();
+        if benchmark.is_some() { return Ok(None); }
+        self.service.try_preview().map_err(|e| e.code.unwrap_or_else(|| "PREVIEW_JOB_CHECK_FAILED".into()))
     }
 
     /// encoderBlock for GET /api/stats (OpsCtx::encoder_block): the jobs as
@@ -627,7 +647,7 @@ impl Converter {
             if b.is_some() {
                 return Err("BENCHMARK_ACTIVE".into());
             }
-            if has_active_job(&self.service, false) {
+            if self.service.preview_active() || has_active_job(&self.service, false) {
                 return Err("JOB_ACTIVE".into());
             }
             *b = Some(cancel.clone());

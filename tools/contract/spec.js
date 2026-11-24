@@ -22,6 +22,7 @@
 const SKIP = {
   'GET /api/events': 'live stream (Server-Sent Events): see docs/api-contract.md "Live updates"',
   'GET /api/converter/events': 'live stream (Server-Sent Events): see docs/api-contract.md "Live updates"',
+  'GET /api/converter/previews/:id/images/:asset': 'preview-owned JPEGs have no Node golden; covered by wire::converter_preview image/access tests and guided preview browser checks',
   'GET /metrics': 'needs the metrics token (off by default); not called by the recorder',
   'GET /api/can/logs/ping': 'CAN Bridge token API (off by default); not called by the recorder',
   'GET /node/v1/info': 'node token API: only a paired main server calls it',
