@@ -3,6 +3,7 @@
 // and below: the clips, a new conversion, automatic conversion and a benchmark.
 
 import '/web/vehicleEncoding.js';
+import { clipFailureWhy } from '/web/clipFailure.js';
 import {
   $, $$, esc, icon, api, invoke, state, current, footageRoot, bytes, plural, pct, num, dur, when, ago, fin, ring, meter, toast,
   confirmDialog, openDialog, store, empty, liveDraw, watts, hourName
@@ -195,10 +196,15 @@ export default {
       $('#clip-states', body).innerHTML = `<span class="chip green">${c.completed} done</span><span class="chip teal">${c.working} working</span><span class="chip">${c.queued} waiting</span>${c.failed ? `<span class="chip red">${c.failed} failed</span>` : ''}${c.skipped ? `<span class="chip">${c.skipped} skipped</span>` : ''}`;
       const box = $('#items', body);
       const top = box.scrollTop;
+      // a failed clip's reason (failure.detail), in plain words under its state
+      const whyBox = (i) => {
+        const why = i.state === 'failed' ? clipFailureWhy(i.failure) : null;
+        return why ? `<div class="clip-why">${esc(why.plain)}${why.detail ? `<code>${esc(why.detail)}</code>` : ''}</div>` : '';
+      };
       const order = { processing: 0, failed: 1, queued: 2, completed: 3, skipped: 4 };
       const shown = [...items].sort((a, b) => (order[a.state] ?? 5) - (order[b.state] ?? 5)).slice(0, 200);
       box.innerHTML = shown.length ? `<table class="tbl stack-sm"><thead><tr><th>Clip</th><th>State</th><th>Size</th></tr></thead><tbody>${shown.map((i) => `<tr><td data-label="Clip">${esc(i.relativePath || i.id)}${i.kind === 'asset' ? ' <span class="muted tiny">(event file)</span>' : ''}</td>
-        <td data-label="State"><span class="chip ${i.state === 'completed' ? 'green' : i.state === 'failed' ? 'red' : i.state === 'processing' ? 'teal' : ''}">${esc(ITEM_TEXT[i.state] || i.state)}</span>${i.resultCode && i.state !== 'completed' ? ` <span class="muted tiny">${esc(String(i.resultCode).replace(/[_-]+/g, ' '))}</span>` : ''}${i.state === 'completed' && i.offTarget ? ` <span class="muted tiny">kept: ${esc(i.offTarget.savedPercent)}% smaller (target ${esc(i.offTarget.targetPercent)}%)</span>` : ''}</td>
+        <td data-label="State"><span class="chip ${i.state === 'completed' ? 'green' : i.state === 'failed' ? 'red' : i.state === 'processing' ? 'teal' : ''}">${esc(ITEM_TEXT[i.state] || i.state)}</span>${i.resultCode && i.state !== 'completed' ? ` <span class="muted tiny">${esc(String(i.resultCode).replace(/[_-]+/g, ' '))}</span>` : ''}${i.state === 'completed' && i.offTarget ? ` <span class="muted tiny">kept: ${esc(i.offTarget.savedPercent)}% smaller (target ${esc(i.offTarget.targetPercent)}%)</span>` : ''}${whyBox(i)}</td>
         <td data-label="Size" class="mono small">${bytes(i.sourceBytes)}${fin(i.outputBytes) ? ` → ${bytes(i.outputBytes)}` : ''}</td></tr>`).join('')}</tbody></table>${snap.itemsTruncated ? `<p class="muted tiny" style="padding:8px 12px">Showing ${shown.length} of ${snap.itemCount} clips.</p>` : ''}` : '<p class="muted" style="padding:12px">Finding clips…</p>';
       box.scrollTop = top;
       const t = snap.timings?.totalMs;

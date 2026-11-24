@@ -190,6 +190,14 @@ td.ell { display: table-cell; }
 .dtable .r { text-align: right; }
 .dtable td.num, .dtable td.r { white-space: nowrap; }
 .dtable tr.best td { background: var(--green-soft); }
+/* a failed clip's reason, on a row of its own under it: as wide as the visible
+   part of the table (the table scrolls sideways), kept in view while it scrolls */
+.tscroll:has(.why-box) { container-type: inline-size; }
+.dtable tr.has-why td { border-bottom: 0; }
+.dtable tr.ist-why td { padding-top: 0; }
+.dtable tr.ist-why:hover { background: none; }
+.why-box { position: sticky; left: 8px; box-sizing: border-box; width: calc(100cqw - 16px); display: grid; gap: 3px; padding: 6px 10px; border-left: 2px solid var(--red); background: var(--red-soft); color: var(--text); font-size: 12px; line-height: 1.45; white-space: normal; overflow-wrap: anywhere; }
+.why-box code { font: 11px/1.4 var(--mono); color: var(--muted); font-variant-ligatures: none; }
 .dense .dtable td { padding: 3px 6px; }
 .sort { all: unset; cursor: pointer; display: inline-flex; gap: 4px; align-items: center; }
 .sort:focus-visible { outline: 2px solid var(--focus); border-radius: 3px; }

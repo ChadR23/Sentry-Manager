@@ -89,9 +89,10 @@ pub struct TxError {
     pub cleanup_pending: Option<Vec<String>>,
     pub valid_final: Option<Box<Saved>>,
     pub rolled_back: Option<(Paths, Artifacts)>,
-    /// UNSAFE_OWNED_PATH only: which check refused and the values that did
-    /// not match ("check: field observed != recorded; ..."). No file
-    /// contents, no secrets; the code and message stay as they are.
+    /// UNSAFE_OWNED_PATH and SOURCE_CHANGED only: which check refused and
+    /// the values that did not match ("check: field observed != recorded;
+    /// ..."). No file contents, no secrets; the code and message stay as
+    /// they are.
     pub detail: Option<String>,
 }
 
@@ -108,7 +109,14 @@ pub const MAX_DETAIL: usize = 600;
 /// `detail` the values that did not match. One log line per refusal, naming
 /// the file (its name only) the check was about.
 pub fn unsafe_path(check: &str, target: &str, detail: impl AsRef<str>) -> TxError {
-    let detail = detail.as_ref();
+    let d = check_detail(check, detail.as_ref());
+    let name = Path::new(target).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    eprintln!("[CONVERTER] UNSAFE_OWNED_PATH refusal on {name:?}: {d}");
+    TxError { detail: Some(d), ..TxError::new("UNSAFE_OWNED_PATH") }
+}
+
+/// "check: detail", at most MAX_DETAIL bytes (cut at a character boundary).
+fn check_detail(check: &str, detail: &str) -> String {
     let mut d = if detail.is_empty() { check.to_string() } else { format!("{check}: {detail}") };
     if d.len() > MAX_DETAIL {
         let mut cut = MAX_DETAIL;
@@ -117,17 +125,66 @@ pub fn unsafe_path(check: &str, target: &str, detail: impl AsRef<str>) -> TxErro
         }
         d.truncate(cut);
     }
-    let name = Path::new(target).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    eprintln!("[CONVERTER] UNSAFE_OWNED_PATH refusal on {name:?}: {d}");
-    TxError { detail: Some(d), ..TxError::new("UNSAFE_OWNED_PATH") }
+    d
 }
 
-/// txe(code), with the refusal's detail when the code is UNSAFE_OWNED_PATH.
+/// A SOURCE_CHANGED refusal: the original is not provably the version this
+/// clip was converted from, so it is kept as it is. `check` names the check
+/// that refused, `detail` what did not match (observed != recorded). The
+/// service logs it once, with the clip's name.
+pub fn source_changed(check: &str, detail: impl AsRef<str>) -> TxError {
+    TxError { detail: Some(check_detail(check, detail.as_ref())), ..TxError::new("SOURCE_CHANGED") }
+}
+
+/// txe(code), with the refusal's detail when the code is UNSAFE_OWNED_PATH
+/// or SOURCE_CHANGED.
 fn refuse(code: &str, check: &str, target: &str, detail: impl AsRef<str>) -> TxError {
-    if code == "UNSAFE_OWNED_PATH" {
-        unsafe_path(check, target, detail)
+    match code {
+        "UNSAFE_OWNED_PATH" => unsafe_path(check, target, detail),
+        "SOURCE_CHANGED" => source_changed(check, detail),
+        _ => txe(code),
+    }
+}
+
+/// Kinds of the converter's own names beside an original.
+fn converter_name_kind(name: &str) -> Option<&'static str> {
+    if name.starts_with("BACKUP-") || (name.contains(".sentry-six-") && name.ends_with(".backup")) {
+        Some("the Encoder's backup name for the original, left by an earlier replace that did not finish")
+    } else if name.starts_with("TEMP-H265-") || name.starts_with("TEMP-AV1-") || (name.contains(".sentry-six-") && name.ends_with(".candidate")) {
+        Some("the Encoder's name for a converted copy, left by an earlier replace that did not finish")
     } else {
-        txe(code)
+        None
+    }
+}
+
+/// For a refusal of a file with more than one link: its other names in its
+/// own folder (names that contain its own name, as the Encoder's do), or
+/// that there is none there. Names only; nothing is changed.
+fn other_names(path: &str, st: &fs::Metadata) -> String {
+    let p = Path::new(path);
+    let (Some(base), Some(dir)) = (p.file_name().map(|n| n.to_string_lossy().into_owned()), p.parent()) else { return String::new() };
+    let Ok(entries) = fs::read_dir(dir) else { return String::new() };
+    let mut found = Vec::new();
+    for e in entries.flatten().take(100_000) {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name == base || !name.contains(base.as_str()) {
+            continue;
+        }
+        let Ok(m) = fs::symlink_metadata(e.path()) else { continue };
+        if m.dev() == st.dev() && m.ino() == st.ino() {
+            found.push(match converter_name_kind(&name) {
+                Some(kind) => format!("{name:?} ({kind})"),
+                None => format!("{name:?}"),
+            });
+        }
+        if found.len() >= 3 {
+            break;
+        }
+    }
+    if found.is_empty() {
+        " (no other name for it in its folder: the other link is elsewhere, e.g. a backup or deduplication tool)".into()
+    } else {
+        format!(" (also named {} in its folder)", found.join(", "))
     }
 }
 
@@ -659,6 +716,19 @@ fn persist(op: &Op, sn: Snap) -> R<()> {
     Ok(())
 }
 
+/// One read of inspectExactFile: unchanged throughout, or changed only in
+/// its metadata time (ctime), with the reason.
+enum Inspected {
+    Stable(Observed),
+    CtimeOnly(Observed, String),
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs on this thread after each inspect read's hash, before its after-stats.
+    pub static INSPECT_HOOK: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// One read-back: size, digest and the stats around it.
 pub(crate) struct Observed {
     pub size: u64,
@@ -872,25 +942,57 @@ impl Tx {
 
     /// inspectExactFile: hash a plain file at its real path, unchanged while read.
     fn inspect_exact_file(&self, target: &str, cancel: Option<&AtomicBool>, code: &str) -> R<Observed> {
-        (|| -> R<Observed> {
+        match self.inspect_once(target, cancel, code, "inspect-exact")? {
+            Inspected::Stable(o) => Ok(o),
+            Inspected::CtimeOnly(_, why) => Err(refuse(code, "inspect-exact", target, why)),
+        }
+    }
+
+    /// One full read of inspectExactFile. A read during which only the
+    /// file's metadata time (ctime) changed is told apart (CtimeOnly): its
+    /// identity, size and mtime stayed the same, but its bytes are not proven.
+    fn inspect_once(&self, target: &str, cancel: Option<&AtomicBool>, code: &str, check: &str) -> R<Inspected> {
+        (|| -> R<Inspected> {
             let link = exact_lstat(target)?;
             if !is_regular(&link) {
-                return Err(txe(code));
+                return Err(refuse(code, check, target, "lstat: not a regular file"));
             }
             if !same_path(&canonical_existing(target)?, target) {
-                return Err(txe(code));
+                return Err(refuse(code, check, target, "realpath differs from path (linked folder)"));
             }
             let mut f = File::open(target)?;
             let before = f.metadata()?;
             let (n, sha) = self.hash_open(&mut f, cancel)?;
+            #[cfg(test)]
+            INSPECT_HOOK.with(|h| h.borrow_mut().as_mut().map(|h| h(Path::new(target))));
             let after = f.metadata()?;
             let named = exact_lstat(target)?;
-            if !same_identity(&link, &before) || !same_identity(&before, &after) || !same_identity(&after, &named) || mtime_ns(&before) != mtime_ns(&after) || ctime_ns(&before) != ctime_ns(&after) || n != before.size() || n != after.size() {
-                return Err(txe(code));
+            let mut d = Vec::new();
+            if !same_identity(&link, &before) || !same_identity(&before, &after) || !same_identity(&after, &named) {
+                d.push(format!("dev:ino changed while hashed: lstat {} / open {} / after {} / lstat after {}", ident(&link), ident(&before), ident(&after), ident(&named)));
             }
-            Ok(Observed { size: n, sha256: sha, stat: after, stat_before: before })
+            if mtime_ns(&before) != mtime_ns(&after) {
+                d.push(format!("mtime_ns changed while hashed {} -> {}", mtime_ns(&before), mtime_ns(&after)));
+            }
+            if before.size() != after.size() {
+                d.push(format!("size changed while hashed {} -> {}", before.size(), after.size()));
+            } else if n != after.size() {
+                d.push(format!("bytes read {n} != size {}", after.size()));
+            }
+            let observed = Observed { size: n, sha256: sha, stat: after, stat_before: before };
+            if !d.is_empty() {
+                if ctime_ns(&observed.stat_before) != ctime_ns(&observed.stat) {
+                    d.push(format!("ctime_ns changed while hashed {} -> {}", ctime_ns(&observed.stat_before), ctime_ns(&observed.stat)));
+                }
+                return Err(refuse(code, check, target, d.join("; ")));
+            }
+            if ctime_ns(&observed.stat_before) != ctime_ns(&observed.stat) {
+                let why = format!("ctime_ns changed while hashed {} -> {} (dev, ino, size and mtime unchanged)", ctime_ns(&observed.stat_before), ctime_ns(&observed.stat));
+                return Ok(Inspected::CtimeOnly(observed, why));
+            }
+            Ok(Inspected::Stable(observed))
         })()
-        .or_tx(code)
+        .map_err(|e| if e.tx { e } else { refuse(code, check, target, format!("io {}", e.code)) })
     }
 
     /// copyExclusive(source, target, { expected, signal, collisionCode, failureCode, hooks..., resume })
@@ -1106,25 +1208,81 @@ impl Tx {
     }
 
     /// captureSource({ source }): the original's identity and hash, read once.
+    ///
+    /// A read during which only the metadata time (ctime) changed (a
+    /// permission, ACL, owner or xattr change on the NAS, nothing written) is
+    /// read in full once more. Its version is taken only when that second
+    /// read is itself unchanged throughout (ctime included) and finds the
+    /// same bytes, device, inode, size and mtime as the first; anything else
+    /// is SOURCE_CHANGED. The swap proves the bytes against this hash again
+    /// before the original is touched, and still wants one link.
     pub fn capture_source(&self, source: &str, cancel: Option<&AtomicBool>) -> R<SourceAuthority> {
+        const CHECK: &str = "capture-source";
         let src = valid_abs(Some(source))?;
-        let o = self.inspect_exact_file(&src, cancel, "SOURCE_CHANGED")?;
+        let o = match self.inspect_once(&src, cancel, "SOURCE_CHANGED", CHECK)? {
+            Inspected::Stable(o) => o,
+            Inspected::CtimeOnly(first, why) => {
+                let same = |o: &Observed| o.sha256 == first.sha256 && o.size == first.size && same_identity(&o.stat, &first.stat) && mtime_ns(&o.stat) == mtime_ns(&first.stat);
+                match self.inspect_once(&src, cancel, "SOURCE_CHANGED", CHECK) {
+                    Ok(Inspected::Stable(o)) if same(&o) => o,
+                    Ok(Inspected::Stable(o)) => {
+                        let mut d = vec![];
+                        if o.sha256 != first.sha256 {
+                            d.push("its bytes differ (sha256)".to_string());
+                        }
+                        if !same_identity(&o.stat, &first.stat) {
+                            d.push(format!("dev:ino {} != {}", ident(&o.stat), ident(&first.stat)));
+                        }
+                        if o.size != first.size {
+                            d.push(format!("size {} != {}", o.size, first.size));
+                        }
+                        if mtime_ns(&o.stat) != mtime_ns(&first.stat) {
+                            d.push(format!("mtime_ns {} != {}", mtime_ns(&o.stat), mtime_ns(&first.stat)));
+                        }
+                        return Err(source_changed(CHECK, format!("{why}; read again: {}", d.join("; "))));
+                    }
+                    Ok(Inspected::CtimeOnly(o, why2)) => {
+                        let contents = if same(&o) { "contents the same both times" } else { "contents differ between the reads" };
+                        return Err(source_changed(CHECK, format!("{why}; read again: {why2}; {contents}")));
+                    }
+                    Err(e) => {
+                        let again = e.detail.as_deref().map(|d| d.strip_prefix(&format!("{CHECK}: ")).unwrap_or(d).to_string()).unwrap_or_else(|| e.code.clone());
+                        return Err(if e.code == "SOURCE_CHANGED" { source_changed(CHECK, format!("{why}; read again: {again}")) } else { e });
+                    }
+                }
+            }
+        };
         Ok(SourceAuthority { size: o.size, sha256: o.sha256, device: o.stat.dev().to_string(), inode: o.stat.ino().to_string() })
     }
 
     /// assertSourceIdentity: a single-link plain file at its real path with the converted version's identity and size.
     fn assert_source_identity(&self, source: &str, e: &SourceAuthority) -> R<fs::Metadata> {
+        const CHECK: &str = "source-identity";
         validate_source_authority(Some(e))?;
-        let st = (|| -> R<fs::Metadata> {
-            let st = exact_lstat(source)?;
-            if !same_path(&canonical_existing(source)?, source) {
-                return Err(txe("SOURCE_CHANGED"));
-            }
-            Ok(st)
-        })()
-        .map_err(|_| txe("SOURCE_CHANGED"))?;
-        if !is_regular(&st) || !single_link(&st) || st.dev().to_string() != e.device || st.ino().to_string() != e.inode || st.size() != e.size {
-            return Err(txe("SOURCE_CHANGED"));
+        let st = exact_lstat(source).map_err(|x| source_changed(CHECK, format!("lstat {}{}", x.code, if x.code == "ENOENT" { " (no file at its name now: moved or deleted)" } else { "" })))?;
+        match canonical_existing(source) {
+            Ok(real) if same_path(&real, source) => {}
+            Ok(_) => return Err(source_changed(CHECK, "realpath differs from path (linked folder)")),
+            Err(x) => return Err(source_changed(CHECK, format!("realpath {}", x.code))),
+        }
+        let mut d = Vec::new();
+        if !is_regular(&st) {
+            d.push("not a regular file".to_string());
+        }
+        if !single_link(&st) {
+            d.push(format!("nlink {} != 1{}", st.nlink(), other_names(source, &st)));
+        }
+        if st.dev().to_string() != e.device {
+            d.push(format!("dev {} != {}", st.dev(), e.device));
+        }
+        if st.ino().to_string() != e.inode {
+            d.push(format!("ino {} != {}", st.ino(), e.inode));
+        }
+        if st.size() != e.size {
+            d.push(format!("size {} != {}", st.size(), e.size));
+        }
+        if !d.is_empty() {
+            return Err(source_changed(CHECK, d.join("; ")));
         }
         Ok(st)
     }
@@ -1133,7 +1291,20 @@ impl Tx {
         validate_source_authority(Some(e))?;
         let o = self.capture_source(source, cancel)?;
         if o != *e {
-            return Err(txe("SOURCE_CHANGED"));
+            let mut d = Vec::new();
+            if o.device != e.device {
+                d.push(format!("dev {} != {}", o.device, e.device));
+            }
+            if o.inode != e.inode {
+                d.push(format!("ino {} != {}", o.inode, e.inode));
+            }
+            if o.size != e.size {
+                d.push(format!("size {} != {}", o.size, e.size));
+            }
+            if o.sha256 != e.sha256 {
+                d.push("sha256 differs from the version converted".to_string());
+            }
+            return Err(source_changed("source-authority", d.join("; ")));
         }
         Ok(o)
     }
@@ -1193,13 +1364,13 @@ impl Tx {
             if c == "EEXIST" || c == "EACCES" {
                 txe("REPLACEMENT_COLLISION")
             } else if c == "ENOENT" {
-                txe("SOURCE_CHANGED")
+                source_changed("link-backup", "open ENOENT (no file at its name now: moved or deleted)")
             } else {
                 txe("REPLACEMENT_FAILED")
             }
         })?;
         match r {
-            owned::LinkResult::OwnershipMismatch => Err(txe("SOURCE_CHANGED")),
+            owned::LinkResult::OwnershipMismatch(why) => Err(source_changed("link-backup", why)),
             owned::LinkResult::Unsupported => Ok(false),
             owned::LinkResult::Linked => {
                 sync_directory(&dirname(backup))?;
@@ -1685,3 +1856,5 @@ pub fn choose_staging_mode(network_mode: &str, c: &Classification, space: Option
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod source_changed_tests;

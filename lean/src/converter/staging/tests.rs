@@ -92,7 +92,7 @@ impl Env {
             Ok(())
         }
     }
-    fn op<'a>(&self, persist: PersistFn<'a>) -> Op<'a> {
+    pub(super) fn op<'a>(&self, persist: PersistFn<'a>) -> Op<'a> {
         Op {
             job_id: JOB.into(),
             item_id: ITEM.into(),
