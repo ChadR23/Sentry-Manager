@@ -86,6 +86,10 @@ pub trait CanCtx: Send + Sync + 'static {
         self.vehicles().into_iter().find(|v| v.id == id)
     }
     fn scan_of(&self, vid: &str) -> Option<Scan>;
+    /// scan_of without its files and recordings (empty here): whether and how it scanned
+    fn scan_head(&self, vid: &str) -> Option<Scan> {
+        self.scan_of(vid).map(|s| Scan { files: Vec::new(), recordings: Vec::new(), ..s })
+    }
     /// Scan::generation without copying the scan
     fn scan_generation(&self, vid: &str) -> Option<u64> {
         self.scan_of(vid).map(|s| s.generation)

@@ -78,6 +78,11 @@ impl CanCtx for CoreCan {
             generation: st.generation,
         })
     }
+    fn scan_head(&self, vid: &str) -> Option<Scan> {
+        let s = self.srv()?;
+        let st = s.app().state_of(vid)?;
+        Some(Scan { scanned: st.scanned, scanned_at: st.scanned_at, scanning: st.scanning, last_error: st.last_error.clone(), error_count: st.error_count, files: Vec::new(), recordings: Vec::new(), generation: st.generation })
+    }
     fn scan_generation(&self, vid: &str) -> Option<u64> {
         Some(self.srv()?.app().state_of(vid)?.generation)
     }
@@ -241,41 +246,103 @@ pub async fn now(srv: Arc<Server>, q: RawReq) -> crate::core::http::Res {
 /// token, before core's checks.
 pub async fn upload(srv: Arc<Server>, q: RawReq) -> crate::core::http::Res {
     let Some(can) = srv.can().cloned() else { return crate::core::http::error_json(404, "Not found", Some("off"), "") };
-    let (parts, body) = q.req.into_parts();
+    let device = q.conn.device;
+    let at = UploadAt {
+        remote: q.conn.peer_ip().unwrap_or_default(),
+        local_port: if device { srv.state.config.can_port } else { srv.state.config.port },
+        encrypted: q.conn.encrypted,
+        client: q.client.clone(),
+        secure: q.secure,
+    };
+    serve_upload(can, q.req, at).await
+}
+
+/// Where an upload request came in (its connection, as core worked it out).
+#[derive(Clone, Debug, Default)]
+pub struct UploadAt {
+    /// the connection's own address
+    pub remote: String,
+    /// the port it came in on (CAN_PORT: the device port)
+    pub local_port: u16,
+    pub encrypted: bool,
+    /// the client's address (TRUST_PROXY) and whether core counts the request as HTTPS
+    pub client: String,
+    pub secure: bool,
+}
+
+/// One upload API request to `can`: the body read (at most a chunk and 1 MiB), then answered.
+/// With `Expect: 100-continue`, every check the headers decide is made first: a refusal (or
+/// `201` `already` for a file all here) is answered without reading the body, so hyper sends
+/// no 100 Continue and the bridge never sends the piece; the connection then closes.
+pub async fn serve_upload(can: Arc<Can>, req: axum::http::Request<axum::body::Body>, at: UploadAt) -> crate::core::http::Res {
+    let (parts, body) = req.into_parts();
     let path = parts.uri.path().to_string();
     let limit = (crate::can::logs::MAX_CHUNK + 1024 * 1024) as usize;
-    // (a bridge that lost Wi-Fi or power mid-upload sends nothing more: 408 after 2 minutes,
-    // and its connection closes, instead of holding the connection for ever)
-    let body = match crate::core::body::collect(body, limit).await {
-        Ok(b) => b,
-        Err(crate::core::body::BodyError::TimedOut) => {
-            let mut r = crate::can::routes::json_res(408, &serde_json::json!({ "error": crate::core::body::TIMED_OUT_TEXT, "code": "timed_out" }));
-            crate::core::body::close_after(&mut r);
-            return r;
-        }
-        Err(_) => return crate::can::routes::json_res(413, &serde_json::json!({ "error": "That file is too large.", "code": "error" })),
-    };
-    let device = q.conn.device;
-    let remote = q.conn.peer_ip().unwrap_or_default();
-    let who = super::Who { client: q.client.clone(), secure: q.secure, ..Default::default() };
+    let too_large = || crate::can::routes::json_res(413, &serde_json::json!({ "error": "That file is too large.", "code": "error" }));
+    let internal = || crate::can::routes::json_res(500, &serde_json::json!({ "error": "Internal error", "code": "server_error" }));
+    let who = super::Who { client: at.client.clone(), secure: at.secure, ..Default::default() };
     let query = parts.uri.query().map(|qs| {
         qs.split('&').filter(|p| !p.is_empty()).map(|p| {
             let (k, v) = p.split_once('=').unwrap_or((p, ""));
             (crate::api::decode(k, true).unwrap_or_default(), crate::api::decode(v, true).unwrap_or_default())
         }).collect()
     }).unwrap_or_default();
-    let req = Req {
+    let expect = crate::core::body::expects_continue(&parts.headers);
+    let mut req = Req {
         method: parts.method,
         path: path.clone(),
         query,
         headers: parts.headers,
-        body,
-        remote,
-        local_port: if device { srv.state.config.can_port } else { srv.state.config.port },
-        encrypted: q.conn.encrypted,
+        body: Default::default(),
+        remote: at.remote,
+        local_port: at.local_port,
+        encrypted: at.encrypted,
         who: Default::default(),
         confirmed: false,
         closed: Arc::new(AtomicBool::new(false)),
     };
-    tokio::task::spawn_blocking(move || super::as_who(who, || can.upload(&req, &path))).await.unwrap_or_else(|_| crate::can::routes::json_res(500, &serde_json::json!({ "error": "Internal error", "code": "server_error" })))
+    let mut gate = None;
+    if expect {
+        let early = |mut r: crate::core::http::Res| {
+            crate::core::body::close_after(&mut r);
+            r
+        };
+        let declared = req.headers.get(axum::http::header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok());
+        if declared.is_some_and(|l| l > limit as u64) {
+            return early(too_large());
+        }
+        let (c, w, p) = (can.clone(), who.clone(), path.clone());
+        let Ok((back, head)) = tokio::task::spawn_blocking(move || {
+            let head = super::as_who(w, || c.upload_head(&req, &p, declared));
+            (req, head)
+        })
+        .await
+        else {
+            return early(internal());
+        };
+        req = back;
+        match head {
+            Ok(g) => gate = Some(g),
+            Err(r) => return early(r),
+        }
+    }
+    // (a bridge that lost Wi-Fi or power mid-upload sends nothing more: 408 after 2 minutes,
+    // and its connection closes, instead of holding the connection for ever)
+    req.body = match crate::core::body::collect(body, limit).await {
+        Ok(b) => b,
+        Err(crate::core::body::BodyError::TimedOut) => {
+            let mut r = crate::can::routes::json_res(408, &serde_json::json!({ "error": crate::core::body::TIMED_OUT_TEXT, "code": "timed_out" }));
+            crate::core::body::close_after(&mut r);
+            return r;
+        }
+        Err(_) => return too_large(),
+    };
+    tokio::task::spawn_blocking(move || {
+        super::as_who(who, || match gate {
+            Some(g) => can.upload_gated(&req, &path, g),
+            None => can.upload(&req, &path),
+        })
+    })
+    .await
+    .unwrap_or_else(|_| internal())
 }

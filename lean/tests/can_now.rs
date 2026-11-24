@@ -449,3 +449,234 @@ fn ping_caps_parallel_uploads_and_status_answers_the_check() {
     assert_eq!(status(), json!({ "state": "complete", "received": 12, "length": 12, "size": 12, "check": "failed", "check_reason": "unsigned" }));
     let _ = std::fs::remove_dir_all(&data);
 }
+
+// ---- the upload API over a real HTTP/1.1 connection: Expect: 100-continue
+
+/// A CAN area with uploads on and the token "the bridge token" (tied to car key K when `tied`).
+fn upload_area(tag: &str, tied: bool) -> (Arc<Can>, PathBuf) {
+    let data = tmp(tag);
+    let ctx = Arc::new(TestCtx { data: data.clone(), settings: Mutex::new(HashMap::new()), audit: Mutex::new(Vec::new()), tls: None, fail: AtomicBool::new(false), fail_map: AtomicBool::new(false) });
+    let tok_hash = sentry_lean::can::util::sha256_hex(b"the bridge token");
+    let key = if tied { json!("K") } else { Value::Null };
+    ctx.settings.lock().unwrap().insert("can".into(), json!({ "enabled": true, "at": null, "tokens": [{ "id": "t1", "hash": tok_hash, "key": key, "vehicleId": null }] }));
+    (Can::new(ctx), data)
+}
+
+/// Serves `can`'s upload API as the device port does (HTTPS counted as done), on a free port.
+async fn serve_uploads(can: Arc<Can>) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((sock, _)) = listener.accept().await else { continue };
+            let can = can.clone();
+            tokio::spawn(async move {
+                let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                    let can = can.clone();
+                    async move {
+                        let at = sentry_lean::wire::can::UploadAt { remote: "127.0.0.1".into(), local_port: 10000, encrypted: true, client: "127.0.0.1".into(), secure: true };
+                        Ok::<_, std::convert::Infallible>(sentry_lean::wire::can::serve_upload(can, req.map(axum::body::Body::new), at).await)
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new().serve_connection(hyper_util::rt::TokioIo::new(sock), svc).await;
+            });
+        }
+    });
+    addr
+}
+
+/// The head of an upload of `len` bytes of the file `sha`/`length`, at `offset`, with
+/// `Expect: 100-continue` (its body not sent).
+async fn expecting(addr: std::net::SocketAddr, name: &str, token: &str, len: usize, offset: usize, length: usize, sha: &str) -> tokio::net::TcpStream {
+    use tokio::io::AsyncWriteExt;
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let head = format!("POST /api/can/logs/{name} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nContent-Type: application/octet-stream\r\nContent-Length: {len}\r\nUpload-Offset: {offset}\r\nUpload-Length: {length}\r\nUpload-SHA256: {sha}\r\nExpect: 100-continue\r\n\r\n");
+    s.write_all(head.as_bytes()).await.unwrap();
+    s
+}
+
+/// What the server sends within 3 s, or until it closes the connection.
+async fn heard(s: &mut tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut got = Vec::new();
+    let mut buf = [0u8; 4096];
+    let end = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while let Ok(Ok(n)) = tokio::time::timeout_at(end, s.read(&mut buf)).await {
+        if n == 0 {
+            break;
+        }
+        got.extend_from_slice(&buf[..n]);
+    }
+    String::from_utf8_lossy(&got).into_owned()
+}
+
+/// An early answer: no 100 Continue, the status and code, and the connection closed.
+fn early(a: &str, status: &str, code: &str) {
+    assert!(!a.contains("100 Continue"), "answered without asking for the body: {a:?}");
+    assert!(a.starts_with(&format!("HTTP/1.1 {status}")), "{a:?}");
+    assert!(a.contains(&format!("\"code\":\"{code}\"")) || code.is_empty(), "{a:?}");
+    assert!(a.to_ascii_lowercase().contains("\r\nconnection: close\r\n"), "{a:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_upload_refused_by_its_headers_is_answered_before_its_body() {
+    use tokio::io::AsyncWriteExt;
+    let (can, data) = upload_area("expect", true);
+    let addr = serve_uploads(can).await;
+    let tok = "the bridge token";
+    let name = "K_20261122T101500Z_42.log.xz";
+    let bytes = b"twelve bytes";
+    let sha = sentry_lean::can::util::sha256_hex(bytes);
+    // a served upload: 100 Continue, then the body, then 201
+    let mut s = expecting(addr, name, tok, 12, 0, 12, &sha).await;
+    let a = heard(&mut s).await;
+    assert_eq!(a, "HTTP/1.1 100 Continue\r\n\r\n");
+    s.write_all(bytes).await.unwrap();
+    let a = heard(&mut s).await;
+    assert!(a.starts_with("HTTP/1.1 201"), "{a:?}");
+    // the same file again (a Resend all of a log that is here): whether it is the same needs
+    // the stored file's hash, which never comes before 100 Continue (a slow disk would outlast
+    // the bridge's 3 s wait): 100 Continue, its body, then 201 already
+    let mut s = expecting(addr, name, tok, 12, 0, 12, &sha).await;
+    assert_eq!(heard(&mut s).await, "HTTP/1.1 100 Continue\r\n\r\n");
+    s.write_all(bytes).await.unwrap();
+    let a = heard(&mut s).await;
+    assert!(a.starts_with("HTTP/1.1 201") && a.contains(r#""already":true"#), "{a:?}");
+    // another copy of it: the same, then 409 exists_different (its check did not fail)
+    let other = sentry_lean::can::util::sha256_hex(b"other bytes!");
+    let mut s = expecting(addr, name, tok, 12, 0, 12, &other).await;
+    assert_eq!(heard(&mut s).await, "HTTP/1.1 100 Continue\r\n\r\n");
+    s.write_all(b"other bytes!").await.unwrap();
+    let a = heard(&mut s).await;
+    assert!(a.starts_with("HTTP/1.1 409") && a.contains("exists_different"), "{a:?}");
+    // a new file at the wrong offset
+    let mut s = expecting(addr, "K_20261122T101600Z_43.log.xz", tok, 12, 5, 17, &sha).await;
+    let a = heard(&mut s).await;
+    early(&a, "409", "offset_mismatch");
+    assert!(a.contains(r#""received":0"#), "{a:?}");
+    // past the end of the file, a whole file too large, a chunk too large, a body too large
+    let mut s = expecting(addr, "K_20261122T101600Z_43.log.xz", tok, 18, 0, 17, &sha).await;
+    early(&heard(&mut s).await, "400", "past_end");
+    let mut s = expecting(addr, "K_20261122T101600Z_43.log.xz.json", tok, 12, 0, 2 * 1024 * 1024, &sha).await;
+    early(&heard(&mut s).await, "413", "too_large");
+    let big = 16 * 1024 * 1024 + 1;
+    let mut s = expecting(addr, "K_20261122T101600Z_43.log.xz", tok, big, 0, 1 << 29, &sha).await;
+    early(&heard(&mut s).await, "413", "error");
+    let mut s = expecting(addr, "K_20261122T101600Z_43.log.xz", tok, 18 * 1024 * 1024, 0, 1 << 29, &sha).await;
+    early(&heard(&mut s).await, "413", "error");
+    // a bad header, another car's file, a wrong token
+    let mut s = expecting(addr, "K_20261122T101600Z_43.log.xz", tok, 12, 0, 12, "abc").await;
+    early(&heard(&mut s).await, "400", "bad_sha256");
+    let mut s = expecting(addr, "OTHER_20261122T101600Z_1.log.xz", tok, 12, 0, 12, &sha).await;
+    early(&heard(&mut s).await, "403", "wrong_car");
+    let mut s = expecting(addr, "K_20261122T101600Z_43.log.xz", "wrong", 12, 0, 12, &sha).await;
+    early(&heard(&mut s).await, "401", "bad_token");
+    // without Expect the body is read first, as before, and the answer is the same
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    s.write_all(format!("POST /api/can/logs/{name} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {tok}\r\nContent-Length: 12\r\nUpload-Offset: 0\r\nUpload-Length: 12\r\nUpload-SHA256: {other}\r\nConnection: close\r\n\r\nother bytes!").as_bytes()).await.unwrap();
+    let a = heard(&mut s).await;
+    assert!(a.starts_with("HTTP/1.1 409") && a.contains("exists_different"), "{a:?}");
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+#[test]
+fn status_for_a_token_not_tied_yet_answers_two_cars_names_as_forbidden() {
+    let (can, data) = upload_area("mixed", false);
+    let mut r = req(Method::POST, "/api/can/logs/status", false);
+    r.local_port = 10000;
+    r.headers.insert("authorization", "Bearer the bridge token".parse().unwrap());
+    let (a, b) = ("K_20261122T101500Z_42.log.xz", "L_20261122T101500Z_42.log.xz");
+    r.body = Bytes::from(json!({ "names": [a, b, "nonsense"] }).to_string());
+    let (s, _, body_) = body(can.upload(&r, "/api/can/logs/status"));
+    assert_eq!(s, 200, "{}", String::from_utf8_lossy(&body_));
+    let files = json_of(&body_)["files"].clone();
+    assert_eq!(files[a]["state"], "forbidden");
+    assert_eq!(files[b]["state"], "forbidden");
+    assert_eq!(files["nonsense"]["state"], "invalid");
+    // and the token is still not tied to either car
+    let mut p = req(Method::GET, "/api/can/logs/ping", false);
+    p.local_port = 10000;
+    p.headers = r.headers.clone();
+    let (_, _, pb) = body(can.upload(&p, "/api/can/logs/ping"));
+    assert_eq!(json_of(&pb)["vehicleKey"], Value::Null);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+#[test]
+fn the_token_pace_leaves_out_ping_and_status_and_its_429_says_when() {
+    let (can, data) = upload_area("pace", true);
+    let call = |method: Method, path: &str, auth: &str| {
+        let mut r = req(method, path, false);
+        r.local_port = 10000;
+        r.headers.insert("authorization", format!("Bearer {auth}").parse().unwrap());
+        if path.ends_with("/status") {
+            r.body = Bytes::from(json!({ "names": ["K_20261122T101500Z_42.log.xz"] }).to_string());
+        }
+        body(can.upload(&r, path))
+    };
+    for _ in 0..1300 {
+        assert_eq!(call(Method::GET, "/api/can/logs/ping", "the bridge token").0, 200);
+        assert_eq!(call(Method::POST, "/api/can/logs/status", "the bridge token").0, 200);
+    }
+    for _ in 0..1200 {
+        assert_eq!(call(Method::POST, "/api/can/logs/not-a-name", "the bridge token").0, 404);
+    }
+    let (s, h, b) = call(Method::POST, "/api/can/logs/not-a-name", "the bridge token");
+    assert_eq!((s, json_of(&b)["code"].clone()), (429, json!("slow_down")));
+    let wait: u64 = h.get("retry-after").expect("Retry-After").to_str().unwrap().parse().unwrap();
+    assert!((1..=600).contains(&wait), "{wait}");
+    // wrong tokens from one address: the same
+    for _ in 0..20 {
+        assert_eq!(call(Method::GET, "/api/can/logs/ping", "wrong").0, 401);
+    }
+    let (s, h, _) = call(Method::GET, "/api/can/logs/ping", "wrong");
+    assert_eq!(s, 429);
+    let wait: u64 = h.get("retry-after").expect("Retry-After").to_str().unwrap().parse().unwrap();
+    assert!((1..=600).contains(&wait), "{wait}");
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+#[test]
+fn a_log_the_owner_deletes_is_not_asked_for_again() {
+    let data = tmp("deleted");
+    let ctx = Arc::new(TestCtx { data: data.clone(), settings: Mutex::new(HashMap::new()), audit: Mutex::new(Vec::new()), tls: None, fail: AtomicBool::new(false), fail_map: AtomicBool::new(false) });
+    let tok_hash = sentry_lean::can::util::sha256_hex(b"the bridge token");
+    ctx.settings.lock().unwrap().insert("can".into(), json!({ "enabled": true, "at": null, "tokens": [{ "id": "t1", "hash": tok_hash, "key": "K", "vehicleId": null }] }));
+    // its key chosen for a car that has no footage here
+    ctx.settings.lock().unwrap().insert("can-vehicles".into(), json!({ "K": "a-car-with-no-footage" }));
+    let can = Can::new(ctx.clone());
+    let api = |path: &str, h: &[(&'static str, String)], b: Vec<u8>| {
+        let mut r = req(Method::POST, path, false);
+        r.local_port = 10000;
+        r.headers.insert("authorization", "Bearer the bridge token".parse().unwrap());
+        for (k, v) in h {
+            r.headers.insert(*k, v.parse().unwrap());
+        }
+        r.body = Bytes::from(b);
+        let (s, _, out) = body(can.upload(&r, path));
+        (s, json_of(&out))
+    };
+    let put = |name: &str, bytes: &[u8]| {
+        let h = [("upload-offset", "0".to_string()), ("upload-length", bytes.len().to_string()), ("upload-sha256", sentry_lean::can::util::sha256_hex(bytes))];
+        api(&format!("/api/can/logs/{name}"), &h, bytes.to_vec())
+    };
+    let name = "K_20261122T101500Z_42.log.xz";
+    assert_eq!(put(name, b"twelve bytes").0, 201);
+    assert_eq!(put(&format!("{name}.json"), br#"{"frames":1}"#).0, 201);
+    let status = || api("/api/can/logs/status", &[], json!({ "names": [name] }).to_string().into_bytes()).1["files"][name].clone();
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while status()["check"] == "pending" && std::time::Instant::now() < end {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(status()["check"], "failed", "unsigned, from a car not paired");
+    // the owner deletes it in the Nerd settings
+    let mut d = req(Method::DELETE, &format!("/api/can/files/{name}"), true);
+    d.confirmed = true;
+    let (s, _, _) = body(can.handle(&d).unwrap());
+    assert_eq!(s, 200);
+    assert!(!data.join("can/K").join(name).exists());
+    // older than all the footage its car keeps (none): not missing, so the bridge does not
+    // send it again; its check as it was
+    assert_eq!(status(), json!({ "state": "complete", "received": 12, "length": 12, "size": 12, "check": "failed", "check_reason": "unsigned" }));
+    let _ = std::fs::remove_dir_all(&data);
+}
