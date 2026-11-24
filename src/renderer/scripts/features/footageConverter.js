@@ -246,7 +246,7 @@ function setDisabled(element, disabled) {
 // guard the original footage: a file that is not exactly the one the
 // converter made or recorded is never removed or replaced.
 const REFUSAL_REASONS = [
-    [/^not known/i, 'refusalNotKnown', 'The reason is not known: this clip failed before the server last restarted. Retry failed shows it again, here or in the server log.'],
+    [/^not known/i, 'refusalNotKnown', 'The reason is not known: this clip failed before the server last restarted. Run it again (Retry failed, or a new Encoder job if Retry failed is refused) and the reason shows here and in the server log.'],
     [/nlink \d+ != 1/, 'refusalHardLink', 'The file has a second name (a hard link, often left by a backup or deduplication), so it was not touched.'],
     [/realpath|linked folder|symlink/i, 'refusalLinkedFolder', 'Its folder is reached through a linked folder (a symlink), so it was not touched.'],
     [/outside/i, 'refusalOutside', 'The file is outside the folder chosen for this conversion, so it was not touched.'],

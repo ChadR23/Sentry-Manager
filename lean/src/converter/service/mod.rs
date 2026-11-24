@@ -103,7 +103,7 @@ const MAX_FAILURE_DETAILS: usize = 4096;
 pub const UNSAFE_OWNED_PATH_RESULT: &str = "unsafe-owned-path";
 /// The detail of a stored unsafe-owned-path failure whose reason this
 /// process never saw (the details are kept in memory only).
-pub const DETAIL_NOT_KNOWN: &str = "not known: this clip failed before the server last restarted. Retry failed to see why";
+pub const DETAIL_NOT_KNOWN: &str = "not known: this clip failed before the server last restarted; run it again (Retry failed, or a new job if Retry failed is refused) to see why";
 /// The detail of a refusal that named no check (no such refusal is known).
 pub const DETAIL_NOT_RECORDED: &str = "not recorded: the refusal named no check";
 

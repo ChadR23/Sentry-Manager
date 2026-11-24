@@ -26,7 +26,7 @@ test('a refusal detail reads in plain words, with the check kept', async () => {
 
 test('a reason lost to a restart says so; a failure without a detail shows nothing more', async () => {
   const { refusalWhy } = await load();
-  const lost = refusalWhy({ code: 'unsafe-owned-path', detail: 'not known: this clip failed before the server last restarted. Retry failed to see why' });
+  const lost = refusalWhy({ code: 'unsafe-owned-path', detail: 'not known: this clip failed before the server last restarted; run it again (Retry failed, or a new job if Retry failed is refused) to see why' });
   assert.match(lost.plain, /not known.*restarted.*Retry failed/);
   assert.equal(lost.detail, '');
   assert.equal(refusalWhy({ code: 'source-changed', retryable: false }), null);
