@@ -155,14 +155,16 @@ button {
   border: 0;
   border-radius: 8px;
   background: oklch(0.72 0.17 150);
-  color: white;
+  color: #06100a;
   font:
     600 14px Inter,
     sans-serif;
   cursor: pointer;
 }
 button:disabled {
-  opacity: 0.65;
+  opacity: 1;
+  outline: 1px dashed #06100a;
+  outline-offset: -3px;
   cursor: wait;
 }
 button .spinner {

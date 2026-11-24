@@ -111,7 +111,7 @@ button:disabled {
 }
 .primary {
   background: var(--solid);
-  color: #fff;
+  color: #06100a;
 }
 .danger,
 .bad {
@@ -1373,7 +1373,7 @@ pre {
 }
 .solid {
   background: var(--solid);
-  color: white;
+  color: #06100a;
 }
 .kv {
   display: grid;
@@ -1791,7 +1791,7 @@ time {
 }
 .btn.primary {
   background: var(--solid);
-  color: white;
+  color: #06100a;
 }
 .grid > .card {
   min-width: 0;
@@ -1843,7 +1843,7 @@ time {
   padding: 0;
   border-radius: 50%;
   background: var(--solid);
-  color: white;
+  color: #06100a;
 }
 @media (max-width: 760px) {
   .footage-filters .pager {
@@ -3062,7 +3062,7 @@ dialog {
 }
 [aria-current='step'] .encoder-step-number {
   background: var(--solid);
-  color: #fff;
+  color: #06100a;
 }
 .encoder-eyebrow {
   margin-bottom: 10px;
@@ -3606,4 +3606,17 @@ dialog {
     width: 28px;
     height: 28px;
   }
+}
+
+/* Keep solid-green actions legible in every interaction state. Disabled
+   actions use a dashed border, not opacity that also fades their text. */
+:is(.primary, .btn.primary, .solid, .play-button):is(:hover, :active, :focus-visible, :disabled) {
+  background: var(--solid);
+  color: #06100a;
+  opacity: 1;
+}
+:is(.primary, .btn.primary, .solid, .play-button):disabled {
+  border-style: dashed;
+  border-color: #06100a;
+  cursor: not-allowed;
 }
