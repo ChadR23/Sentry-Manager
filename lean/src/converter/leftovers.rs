@@ -7,13 +7,19 @@
 //!
 //! A replace job's discovery calls `tidy_folder` for each folder with such
 //! names, before any clip of that folder is queued. A name is touched only
-//! when no job record names it or could recover from it (`Owners`), no
+//! when no job record names it or could recover from it (`Owners`, matched by
+//! path text, real path and the folder's identity, so another mount point of the
+//! folder is the same folder), no
 //! replace, rollback or recovery holds it in this process (`Tx::try_hold`),
 //! and the two names are in one of three exact shapes:
 //! - a: BACKUP-X is a second name of X (same file, 2 names): the second name goes;
 //! - b: X is missing and BACKUP-X is the original: it is put back as X;
 //! - c: X is the converted copy (H.265/AV1) and BACKUP-X the H.264 original:
-//!   the original goes to the Recycle Bin as the original of X (never deleted).
+//!   the original goes to the Recycle Bin as the original of X (never deleted),
+//!   only once X passes the verifier's full check as a copy of BACKUP-X (a
+//!   complete decode, frames and durations within its tolerance, every
+//!   telemetry record: what final validation rests on). A copy that failed its
+//!   final validation, or was never validated, keeps the original where it is.
 //!
 //! - an unfinished copy TEMP-H265-X / TEMP-AV1-X beside X (the copy a replace
 //!   writes before it touches the original; a later replace of X is refused
@@ -45,6 +51,9 @@ pub const COPY_PREFIXES: [(&str, &str); 2] = [("TEMP-H265-", "h265"), ("TEMP-AV1
 /// `.sentry-tidy-<16 hex>-L`. A server stopped between the rename and the unlink leaves
 /// it (a hidden second name of the clip, or a copy); the next tidy settles it as L.
 pub const QUARANTINE: &str = ".sentry-tidy-";
+/// Why an original beside its converted copy is kept when the copy is not proven good
+/// (the interfaces count these: web/backupCleanup.js).
+pub const UNVERIFIED: &str = "the converted copy beside it is not verified";
 
 /// The leftover name L that a tidy quarantine name stands for.
 pub fn quarantined_name(name: &str) -> Option<&str> {
@@ -109,8 +118,12 @@ pub struct Owners {
     pub paths: HashMap<PathBuf, String>,
     /// clips whose BACKUP- name a recovery could derive (a replace that started), by job
     pub sources: HashMap<PathBuf, String>,
-    /// the source folders of jobs with files still to settle
+    /// the source folders of jobs with files still to settle (as written, made real, and by
+    /// identity: staging::folder_identity)
     pub roots: Vec<(PathBuf, String)>,
+    /// the source folders of jobs with files still to settle that do not resolve now (a
+    /// mount that is gone, or not there yet): any folder may be one of them, so all are kept
+    pub unreachable: Vec<(String, String)>,
     /// the clips the calling job has not finished
     pub mine: HashSet<PathBuf>,
     /// folders already made real (see `keys`)
@@ -135,9 +148,10 @@ impl Owners {
         r
     }
 
-    /// A record's path as it is written and with its folder made real, the way the
-    /// in-process holds key it (staging::hold_keys): a record that names a file through
-    /// another spelling of its folder (a link to it) still owns that file.
+    /// A record's path as it is written, with its folder made real, and by its folder's
+    /// identity, the way the in-process holds key it (staging::hold_keys): a record that
+    /// names a file through another spelling of its folder (a link to it, or another
+    /// mount point of it) still owns that file.
     fn keys(&mut self, p: &str) -> Vec<PathBuf> {
         let l = res(p);
         let mut out = vec![l.clone()];
@@ -147,20 +161,30 @@ impl Owners {
                     out.push(r);
                 }
             }
+            if let Some(k) = super::staging::folder_identity(parent, Some(name)) {
+                out.push(k);
+            }
         }
         out
     }
 
-    /// A source folder as written and made real.
-    fn root_keys(&mut self, p: &str) -> Vec<PathBuf> {
+    /// An unsettled job's source folder as written, made real and by identity; one that
+    /// does not resolve now is kept aside as unreachable (every folder is then kept).
+    fn add_root(&mut self, p: &str, id: &str) {
         let l = res(p);
         let mut out = vec![l.clone()];
-        if let Some(r) = self.real(&l) {
-            if r != l {
-                out.push(r);
+        match self.real(&l) {
+            Some(r) => {
+                if r != l {
+                    out.push(r);
+                }
             }
+            None => self.unreachable.push((p.to_string(), id.to_string())),
         }
-        out
+        out.extend(super::staging::folder_identity(&l, None));
+        for k in out {
+            self.roots.push((k, id.to_string()));
+        }
     }
 
     fn own(&mut self, p: &str, id: &str) {
@@ -213,9 +237,7 @@ impl Owners {
             self.own(&p, id);
         }
         for r in roots {
-            for k in self.root_keys(&r) {
-                self.roots.push((k, id.to_string()));
-            }
+            self.add_root(&r, id);
         }
         Ok(())
     }
@@ -250,9 +272,7 @@ impl Owners {
         }
         if !calling && unsettled {
             if let Some(root) = m.config().get("sourceRoot").and_then(Value::as_str) {
-                for k in self.root_keys(root) {
-                    self.roots.push((k, id.clone()));
-                }
+                self.add_root(root, &id);
             }
         }
     }
@@ -263,22 +283,47 @@ impl Owners {
     }
 
     /// Why BACKUP-X must stay, given every name of X and of BACKUP-X (lexical and real).
+    /// Each is also compared by its folder's identity, and the folder and each folder above
+    /// it against the roots' identities (another mount point of the same folder).
     pub fn why(&self, originals: &[PathBuf], backups: &[PathBuf]) -> Option<String> {
-        for p in originals.iter().chain(backups) {
+        let with_ids = |ps: &[PathBuf]| -> Vec<PathBuf> {
+            let mut out = ps.to_vec();
+            for p in ps {
+                if let (Some(parent), Some(name)) = (p.parent(), p.file_name()) {
+                    out.extend(super::staging::folder_identity(parent, Some(name)));
+                }
+            }
+            out
+        };
+        let (originals, backups) = (with_ids(originals), with_ids(backups));
+        for p in originals.iter().chain(&backups) {
             if let Some(id) = self.paths.get(p) {
                 return Some(format!("job {id} still names it in its record"));
             }
         }
-        for p in originals {
+        for p in &originals {
             if let Some(id) = self.sources.get(p) {
                 return Some(format!("job {id} can still recover this clip from it"));
             }
             if self.mine.contains(p) {
                 return Some("this job has the clip in hand".into());
             }
-            if let Some((_, id)) = self.roots.iter().find(|(r, _)| p.starts_with(r)) {
+            if let Some((_, id)) = self.roots.iter().find(|(r, _)| r.is_absolute() && p.is_absolute() && p.starts_with(r)) {
                 return Some(format!("job {id} still has files to settle in this folder"));
             }
+            // (the folder and every folder above it, by identity)
+            if p.is_absolute() {
+                for a in p.ancestors().skip(1) {
+                    if let Some(k) = super::staging::folder_identity(a, None) {
+                        if let Some((_, id)) = self.roots.iter().find(|(r, _)| *r == k) {
+                            return Some(format!("job {id} still has files to settle in this folder"));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((root, id)) = self.unreachable.first() {
+            return Some(format!("job {id} still has files to settle in \"{root}\", which cannot be reached now (it may be this folder)"));
         }
         None
     }
@@ -299,11 +344,18 @@ struct St {
     regular: bool,
     link: bool,
     dir: bool,
+    /// modification and change times (ns)
+    mtime: i128,
+    ctime: i128,
 }
 
 impl St {
     fn same(&self, o: &St) -> bool {
         self.dev == o.dev && self.ino == o.ino
+    }
+    /// the same file, not written or changed since
+    fn unchanged(&self, o: &St) -> bool {
+        self.same(o) && self.regular == o.regular && self.nlink == o.nlink && self.size == o.size && self.mtime == o.mtime && self.ctime == o.ctime
     }
 }
 
@@ -315,7 +367,18 @@ fn stat_at_once(dir: &OwnedFd, name: &str) -> io::Result<St> {
         return Err(io::Error::last_os_error());
     }
     let fmt = st.st_mode & libc::S_IFMT;
-    Ok(St { dev: st.st_dev, ino: st.st_ino, nlink: st.st_nlink, size: st.st_size as u64, regular: fmt == libc::S_IFREG, link: fmt == libc::S_IFLNK, dir: fmt == libc::S_IFDIR })
+    let ns = |s: i64, n: i64| s as i128 * 1_000_000_000 + n as i128;
+    Ok(St {
+        dev: st.st_dev,
+        ino: st.st_ino,
+        nlink: st.st_nlink,
+        size: st.st_size as u64,
+        regular: fmt == libc::S_IFREG,
+        link: fmt == libc::S_IFLNK,
+        dir: fmt == libc::S_IFDIR,
+        mtime: ns(st.st_mtime, st.st_mtime_nsec),
+        ctime: ns(st.st_ctime, st.st_ctime_nsec),
+    })
 }
 
 /// fstatat without following a link; a link count above one is asked of the file system
@@ -475,10 +538,63 @@ fn clip_of_name(name: &str, kind: Kind) -> Result<(&str, Role), String> {
     Ok((rest, role))
 }
 
+/// (original, converted copy, codec) -> Ok when the copy is proven good (Tidy::verify)
+pub type VerifyConverted<'a> = dyn Fn(&Path, &Path, &'static str) -> Result<(), String> + Sync + 'a;
+
+/// The verifier's full check of `converted` as the copy of `original` (as a conversion's
+/// verify step and so its final validation: ffprobe codec and tag, a complete decode with
+/// ffmpeg, frame counts, durations and dimensions within the verifier's tolerance, every
+/// telemetry record mapped), only reading both files: neither is moved or changed, and the
+/// verifier's private snapshot is removed again. Err: the verifier's reason.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_converted(original: &Path, converted: &Path, codec: &str, ffprobe: &str, ffmpeg: &str, runner: &dyn super::process::Runner, registry: &super::snapshot::Registry, cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) -> Result<(), String> {
+    use super::adapters::Codec;
+    let codec = match codec {
+        "h265" => Codec::H265,
+        "av1" => Codec::Av1,
+        other => return Err(format!("not a converted codec ({other})")),
+    };
+    let v = super::verifier::verify_candidate(&super::verifier::VerifyOptions {
+        source: original.to_path_buf(),
+        candidate: converted.to_path_buf(),
+        codec,
+        profile_id: super::contracts::CUSTOM_PROFILE_ID.into(),
+        verify_mode: Some("full".into()),
+        keep_off_target: true,
+        allow_larger: true,
+        trusted_snapshot: false,
+        // (never: adopting moves the candidate into the snapshot)
+        adopt_candidate: false,
+        decode_accel: vec![],
+        source_duration_us: None,
+        source_timeline: None,
+        ffprobe_path: ffprobe.into(),
+        ffmpeg_path: ffmpeg.into(),
+        run_ffprobe: runner,
+        run_full_decode: runner,
+        registry,
+        on_decode_accel_fallback: None,
+        cancel,
+    });
+    if let Some(a) = &v.publication_artifact {
+        super::snapshot::discard_artifact(registry, a);
+    }
+    if v.ok {
+        return Ok(());
+    }
+    let kind = v.details.get("kind").and_then(Value::as_str).map(|k| format!(", {k}")).unwrap_or_default();
+    Err(format!("{}{kind}", v.reason.unwrap_or("verification-failed")))
+}
+
 /// What tidy_folder needs from its caller.
 pub struct Tidy<'a> {
     pub tx: &'a Tx,
     pub bin: Option<&'a dyn OriginalsBin>,
+    /// The check that the converted copy beside an original is a whole, good copy of it
+    /// (verify_converted: the verifier's full check, which final validation rests on), given
+    /// (original, converted copy, its codec): Err says what it found. None: not checked, so
+    /// an original beside its converted copy is kept.
+    pub verify: Option<&'a VerifyConverted<'a>>,
     /// the job records, read after the names are held (Err: kept, and why)
     pub owners: &'a dyn Fn() -> Result<Owners, String>,
 }
@@ -747,6 +863,20 @@ fn beside_copy(t: &Tidy, dir: &OwnedFd, real_dir: &Path, clip: &str, backup: &st
     let Some(bin) = t.bin else {
         return kept(format!("the original of \"{clip}\" (which is the converted {word} copy); this folder has no Recycle Bin, delete it by hand once \"{clip}\" plays"));
     };
+    // (only beside a copy proven good: a copy that failed its final validation, or was never
+    // validated, is no stand-in for its original. Both are read through the pinned folder.)
+    let Some(verify) = t.verify else {
+        return kept(format!("{UNVERIFIED} (it cannot be checked here)"));
+    };
+    let pinned = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
+    if let Err(found) = verify(&pinned.join(backup), &pinned.join(clip), xc.unwrap()) {
+        return kept(format!("{UNVERIFIED} (the {word} copy \"{clip}\" failed the check: {found})"));
+    }
+    // (and both are still the files checked, unchanged)
+    let still = |name: &str, want: &St| stat_at(dir, name).ok().is_some_and(|n| n.unchanged(want));
+    if !still(clip, x) || !still(backup, b) {
+        return kept("it changed while it was tidied");
+    }
     Ok(match bin.adopt_original(&real_dir.join(backup), &real_dir.join(clip), b.dev, b.ino) {
         Ok(item) => Outcome::Binned { item, codec: xc.map(str::to_string) },
         Err(why) => Outcome::Kept(format!("the original of \"{clip}\" (which is the converted {word} copy); not moved to the Recycle Bin: {why}")),

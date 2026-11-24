@@ -17,6 +17,9 @@ const CASES = [
   { removed: 0, restored: 2, binned: 0, kept: 0, keptWhy: [] },
   { removed: 0, restored: 0, binned: 0, kept: 23, keptWhy: Array.from({ length: 20 }, (_, i) => ({ path: `a/BACKUP-${i}`, why: 'a symbolic link (never followed)' })) },
   { removed: 0, restored: 0, binned: 0, kept: 0, keptWhy: [] },
+  { removed: 1, restored: 0, binned: 0, kept: 3, unverified: 2, keptWhy: [{ path: 'a/BACKUP-x-front.mp4', why: 'the converted copy beside it is not verified (the H.265 copy "x-front.mp4" failed the check: decode-failed, non-zero-status)' }] },
+  { removed: 0, restored: 0, binned: 0, kept: 1, unverified: 1, keptWhy: [] },
+  { removed: 0, restored: 0, binned: 0, kept: 1, unverified: 5, keptWhy: [] },
   null,
   'nonsense',
 ];
@@ -31,6 +34,11 @@ test('the words say what was tidied, put back, moved and kept', async () => {
   assert.equal(backupCleanupWords(CASES[3]).more, 3, 'the server sends the first 20');
   assert.equal(backupCleanupWords(CASES[4]), null, 'nothing done: nothing shown');
   assert.equal(backupCleanupWords(undefined), null);
+  // originals beside a converted copy that is not proven good are counted on their own
+  assert.equal(backupCleanupWords(CASES[5]).summary, 'Leftover files from an earlier replace: 1 tidied, 2 originals kept (the converted copies beside them are not verified), 1 kept.');
+  assert.equal(backupCleanupWords(CASES[6]).summary, 'Leftover files from an earlier replace: 1 original kept (the converted copy beside it is not verified).');
+  assert.equal(backupCleanupWords(CASES[7]).summary, 'Leftover files from an earlier replace: 1 original kept (the converted copy beside it is not verified).', 'never more than were kept');
+  assert.match(backupCleanupWords(CASES[5]).kept[0].why, /^the converted copy beside it is not verified \(/);
 });
 
 test('the HTML escapes names and lists the kept ones under a details', async () => {

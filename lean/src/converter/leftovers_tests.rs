@@ -15,6 +15,11 @@ struct Env {
     root: PathBuf,
     dir: PathBuf,
     tx: Tx,
+    /// the check of a converted copy (Tidy::verify): by default a stand-in that trusts the
+    /// header (the copies here are header-only fakes); the real verifier in its own tests
+    verify: Option<Box<VerifyConverted<'static>>>,
+    /// what the check was asked (original, converted copy, codec)
+    asked: Arc<Mutex<Vec<(PathBuf, PathBuf, String)>>>,
 }
 
 fn env() -> Env {
@@ -25,7 +30,13 @@ fn env() -> Env {
     let temp = tmp.path().join("temp");
     fs::create_dir_all(&temp).unwrap();
     let tx = Tx::new(staging::Options { temp_root: temp.join("tx"), chunk_size: 0, max_active_leases: 4, before_replace_original: None, replacement_free_space: None }, Arc::new(Registry::new(temp))).unwrap();
-    Env { _tmp: tmp, root, dir, tx }
+    let asked: Arc<Mutex<Vec<(PathBuf, PathBuf, String)>>> = Arc::default();
+    let a = asked.clone();
+    let verify: Box<VerifyConverted<'static>> = Box::new(move |o: &Path, c: &Path, codec: &'static str| {
+        a.lock().unwrap().push((o.to_path_buf(), c.to_path_buf(), codec.to_string()));
+        Ok(())
+    });
+    Env { _tmp: tmp, root, dir, tx, verify: Some(verify), asked }
 }
 
 /// A real H.264 clip, and the same bytes with its sample entry named hvc1 (what the
@@ -85,7 +96,7 @@ fn run_with(e: &Env, bin: Option<&dyn OriginalsBin>, owners: &dyn Fn() -> Result
     let f = found(&e.dir);
     let real_root = fs::canonicalize(&e.root).unwrap();
     let real_dir = real_root.join(e.dir.strip_prefix(&e.root).unwrap());
-    tidy_folder(&Tidy { tx: &e.tx, bin, owners }, &Folder { real_root: &real_root, dir: &e.dir, real_dir: &real_dir, found: &f })
+    tidy_folder(&Tidy { tx: &e.tx, bin, verify: e.verify.as_deref(), owners }, &Folder { real_root: &real_root, dir: &e.dir, real_dir: &real_dir, found: &f })
 }
 
 fn run(e: &Env, bin: Option<&dyn OriginalsBin>) -> Vec<(String, Outcome)> {
@@ -210,6 +221,12 @@ fn an_original_beside_its_converted_copy_goes_to_the_recycle_bin() {
     assert_eq!(fs::read(into.join(A)).unwrap(), h264(), "the original, whole");
     assert_eq!(fs::read(e.dir.join(A)).unwrap(), h265(), "the converted copy stays");
     assert_eq!(bin.adopted.lock().unwrap().len(), 1, "only the converted copy's original");
+    {
+        let asked = e.asked.lock().unwrap();
+        let (o, c, codec) = asked.last().expect("the copy was checked before its original moved");
+        assert_eq!((o.file_name().unwrap().to_string_lossy().into_owned(), c.file_name().unwrap().to_string_lossy().into_owned(), codec.as_str()), (format!("BACKUP-{A}"), A.to_string(), "h265"));
+        assert!(o.starts_with("/proc/self/fd/"), "read through the pinned folder: {o:?}");
+    }
     assert!(e.dir.join(format!("BACKUP-{B}")).exists() && e.dir.join(format!("BACKUP-{C}")).exists());
     assert!(log_line("", &format!("BACKUP-{A}"), outcome(&r, &format!("BACKUP-{A}"))).contains("to the Recycle Bin as the original of \"2026-08-30_20-53-04-front.mp4\" (item bin-item-1; \"2026-08-30_20-53-04-front.mp4\" is the converted H.265 copy)"));
 }
@@ -567,4 +584,180 @@ fn a_quarantined_original_whose_clip_is_missing_is_put_back() {
     assert!(kept_why(&r, &format!("{QUARANTINE}0123456789abcdef-{QUARANTINE}0123456789abcdef-BACKUP-{B}")).contains("a leftover name of a leftover name"), "{r:?}");
     assert_eq!(r.len(), 2, "{r:?}");
     assert!(!is_leftover_name(&format!("{QUARANTINE}0123456789ABCDEF-BACKUP-{B}")) && !is_leftover_name(&format!("{QUARANTINE}0123456789abcdef-")));
+}
+
+// ---- other mount points of the folder (bind mounts), and copies nobody proved good
+
+/// A bind mount of `from` at `at` (needs root; None, and the test skips, without it).
+struct Bind(PathBuf);
+impl Drop for Bind {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("umount").arg(&self.0).status();
+    }
+}
+fn bind(from: &Path, at: &Path) -> Option<Bind> {
+    fs::create_dir_all(at).unwrap();
+    let ok = std::process::Command::new("mount").arg("--bind").arg(from).arg(at).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!("skipped: a bind mount needs root");
+        return None;
+    }
+    let b = Bind(at.to_path_buf());
+    assert_eq!(fs::canonicalize(at).unwrap(), at, "canonicalize keeps the bind spelling");
+    Some(b)
+}
+
+#[test]
+fn a_record_through_a_bind_mount_of_the_folder_owns_it() {
+    let e = env();
+    let jobs = e.root.parent().unwrap().join("jobs");
+    fs::create_dir_all(&jobs).unwrap();
+    let store = JobStore::new(&jobs).unwrap();
+    let at = e.root.parent().unwrap().join("bind");
+    let Some(_b) = bind(&e.root, &at) else { return };
+    let x = e.dir.join(A);
+    fs::write(&x, h264()).unwrap();
+    fs::hard_link(&x, e.dir.join(format!("BACKUP-{A}"))).unwrap();
+    let via = at.join("SentryClips/2026-08-30_20-53-04");
+    let rel = format!("SentryClips/2026-08-30_20-53-04/{A}");
+    // a paused job that needs recovery, its record (root, clip and backup) through the bind mount
+    let stopped = job(&store, &at, "paused", vec![clip_item(1, &via.join(A), &rel, "processing")], vec![("activeItemId", json!("item-000001")), ("replacementPhase", json!("original-backed-up")), ("recovery", json!({ "fromState": "replacing", "phase": "original-backed-up", "action": "manual-intervention" })), ("ownedPaths", json!({ "replacementBackup": via.join(format!("BACKUP-{A}")).to_string_lossy() }))]);
+    let r = run_with(&e, None, &|| owners_of(&store, None));
+    assert_eq!(kept_why(&r, &format!("BACKUP-{A}")), format!("job {stopped} still names it in its record"));
+    assert_eq!(fs::metadata(&x).unwrap().nlink(), 2, "both names kept");
+    // only the root through the bind mount (a job with files to settle there): still kept
+    let jobs2 = e.root.parent().unwrap().join("jobs2");
+    fs::create_dir_all(&jobs2).unwrap();
+    let store2 = JobStore::new(&jobs2).unwrap();
+    let paused = job(&store2, &at, "paused", vec![], vec![]);
+    let r = run_with(&e, None, &|| owners_of(&store2, None));
+    assert_eq!(kept_why(&r, &format!("BACKUP-{A}")), format!("job {paused} still has files to settle in this folder"));
+    // and a job of a folder above it, through the bind mount
+    let jobs3 = e.root.parent().unwrap().join("jobs3");
+    fs::create_dir_all(&jobs3).unwrap();
+    let store3 = JobStore::new(&jobs3).unwrap();
+    let above = job(&store3, &at.join("SentryClips"), "paused", vec![], vec![]);
+    let r = run_with(&e, None, &|| owners_of(&store3, None));
+    assert_eq!(kept_why(&r, &format!("BACKUP-{A}")), format!("job {above} still has files to settle in this folder"));
+    assert_eq!(fs::metadata(&x).unwrap().nlink(), 2, "both names kept");
+}
+
+#[test]
+fn a_hold_through_a_bind_mount_blocks_the_tidy() {
+    let e = env();
+    let at = e.root.parent().unwrap().join("bind2");
+    let Some(_b) = bind(&e.root, &at) else { return };
+    let x = e.dir.join(A);
+    fs::write(&x, h264()).unwrap();
+    fs::hard_link(&x, e.dir.join(format!("BACKUP-{A}"))).unwrap();
+    let via = at.join("SentryClips/2026-08-30_20-53-04");
+    let (s, b) = (via.join(A).to_string_lossy().into_owned(), via.join(format!("BACKUP-{A}")).to_string_lossy().into_owned());
+    // a swap of another job holds the clip through the bind spelling
+    let h = e.tx.hold(&[&s, &b]);
+    let r = std::thread::scope(|sc| sc.spawn(|| run(&e, None)).join().unwrap());
+    assert_eq!(kept_why(&r, &format!("BACKUP-{A}")), "in use by a conversion right now");
+    assert_eq!(fs::metadata(&x).unwrap().nlink(), 2);
+    drop(h);
+    assert_eq!(outcome(&run(&e, None), &format!("BACKUP-{A}")), &Outcome::Removed, "once let go");
+}
+
+#[test]
+fn a_source_folder_that_cannot_be_reached_keeps_every_folder() {
+    let e = env();
+    let jobs = e.root.parent().unwrap().join("jobs");
+    fs::create_dir_all(&jobs).unwrap();
+    let store = JobStore::new(&jobs).unwrap();
+    let x = e.dir.join(A);
+    fs::write(&x, h264()).unwrap();
+    fs::hard_link(&x, e.dir.join(format!("BACKUP-{A}"))).unwrap();
+    // an unsettled job of a mount that is gone (it may be this folder mounted elsewhere)
+    let gone = e.root.parent().unwrap().join("old-mount/TeslaCam");
+    let stopped = job(&store, &gone, "paused", vec![clip_item(1, &gone.join(format!("SentryClips/2026-08-30_20-53-04/{A}")), &format!("SentryClips/2026-08-30_20-53-04/{A}"), "queued")], vec![]);
+    let r = run_with(&e, None, &|| owners_of(&store, None));
+    let why = kept_why(&r, &format!("BACKUP-{A}"));
+    assert!(why.starts_with(&format!("job {stopped} still has files to settle in \"{}\", which cannot be reached now", gone.display())), "{why}");
+    assert_eq!(fs::metadata(&x).unwrap().nlink(), 2);
+}
+
+/// The verifier's fixtures (converter/tests.rs): Tesla-like originals and real encodes of
+/// them, good and broken. None without ffmpeg and ffprobe.
+fn real_encodes() -> Option<&'static PathBuf> {
+    let have = |c: &str| std::process::Command::new(c).arg("-version").output().is_ok_and(|o| o.status.success());
+    if !have("ffmpeg") || !have("ffprobe") {
+        eprintln!("skipped: needs ffmpeg and ffprobe");
+        return None;
+    }
+    crate::converter::tests::fixtures()
+}
+
+/// The real check (verify_converted with ffprobe and ffmpeg), its snapshots under `snaps`.
+fn real_verify(e: &mut Env, snaps: &Path) {
+    fs::create_dir_all(snaps).unwrap();
+    let registry = Arc::new(Registry::new(snaps.to_path_buf()));
+    let runner = crate::converter::process::BoundedRunner { timeout_ms: 120_000, max_output_bytes: 4 * 1024 * 1024, ..Default::default() };
+    e.verify = Some(Box::new(move |o: &Path, c: &Path, codec: &'static str| verify_converted(o, c, codec, "ffprobe", "ffmpeg", &runner, &registry, None)));
+}
+
+#[test]
+fn an_original_beside_a_broken_converted_copy_is_kept() {
+    let Some(fx) = real_encodes() else { return };
+    let mut e = env();
+    let snaps = e.root.parent().unwrap().join("snaps");
+    real_verify(&mut e, &snaps);
+    let original = fs::read(fx.join("plain.mp4")).unwrap();
+    let good = fs::read(fx.join("verify/plain.h265.good.mp4")).unwrap();
+    // X: the converted copy's header with its picture data gone (zeros), as a copy that
+    // failed final validation and whose rollback did not finish
+    let mut zeroed = good.clone();
+    let mdat = good.windows(4).position(|w| w == b"mdat").unwrap();
+    let moov = good.windows(4).position(|w| w == b"moov").unwrap();
+    let (from, to) = if mdat > moov { (mdat + 8, good.len()) } else { (mdat + 8, moov - 8) };
+    zeroed[from..to].iter_mut().for_each(|b| *b = 0);
+    const D: &str = "2026-08-30_20-53-04-right_repeater.mp4";
+    const F: &str = "2026-08-30_20-53-04-left_pillar.mp4";
+    let shapes: [(&str, Vec<u8>, Vec<u8>); 5] = [
+        (A, zeroed, original.clone()),
+        // cut short (a copy killed before it was whole)
+        (B, fs::read(fx.join("verify/plain.h265.short.mp4")).unwrap(), original.clone()),
+        // telemetry changed
+        (C, fs::read(fx.join("verify/plain.h265.tampered.mp4")).unwrap(), original.clone()),
+        // a good copy, but of another original
+        (D, fs::read(fx.join("verify/first.h265.good.mp4")).unwrap(), original.clone()),
+        // a good copy of this original
+        (F, good.clone(), original.clone()),
+    ];
+    for (n, x, b) in &shapes {
+        fs::write(e.dir.join(n), x).unwrap();
+        fs::write(e.dir.join(format!("BACKUP-{n}")), b).unwrap();
+    }
+    let into = e.root.join("bin");
+    fs::create_dir_all(&into).unwrap();
+    let bin = FakeBin { into: Some(into.clone()), ..Default::default() };
+    let r = run(&e, Some(&bin));
+    for n in [A, B, C, D] {
+        let why = kept_why(&r, &format!("BACKUP-{n}"));
+        // (the short copy has no whole header: refused before the check)
+        if n != B {
+            assert!(why.starts_with(&format!("{UNVERIFIED} (the H.265 copy \"{n}\" failed the check: ")), "{n}: {why}");
+        }
+        assert_eq!(fs::read(e.dir.join(format!("BACKUP-{n}"))).unwrap(), original, "{n}: the original stays where it was");
+    }
+    assert!(kept_why(&r, &format!("BACKUP-{A}")).contains("decode-failed") || kept_why(&r, &format!("BACKUP-{A}")).contains("probe-failed"), "{r:?}");
+    assert_eq!(outcome(&r, &format!("BACKUP-{F}")), &Outcome::Binned { item: "bin-item-1".into(), codec: Some("h265".into()) }, "{r:?}");
+    assert_eq!(fs::read(into.join(F)).unwrap(), original, "the original of the good copy, whole, in the bin");
+    assert_eq!(fs::read(e.dir.join(F)).unwrap(), good, "the good copy stays");
+    assert_eq!(bin.adopted.lock().unwrap().len(), 1);
+    // the check only read: every copy as it was, and no snapshot of the verifier left
+    for (n, x, _) in &shapes {
+        assert_eq!(&fs::read(e.dir.join(n)).unwrap(), x, "{n}");
+    }
+    assert_eq!(fs::read_dir(&snaps).unwrap().count(), 0, "the verifier's snapshots are removed");
+    // and without a check: kept, never binned
+    let mut e2 = env();
+    e2.verify = None;
+    fs::write(e2.dir.join(F), &good).unwrap();
+    fs::write(e2.dir.join(format!("BACKUP-{F}")), &original).unwrap();
+    let r = run(&e2, Some(&bin));
+    assert_eq!(kept_why(&r, &format!("BACKUP-{F}")), format!("{UNVERIFIED} (it cannot be checked here)"));
+    assert_eq!(fs::read(e2.dir.join(format!("BACKUP-{F}"))).unwrap(), original);
 }

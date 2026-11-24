@@ -759,7 +759,7 @@ fn a_discarded_jobs_leftover_backup_is_tidied_by_the_next_replace() {
     let (base, names, before, job, backup) = discard_then_replace_again("backup-renamed", false, false);
     assert_recovered(&base, &job, "replace", &names, &before);
     // (the second name, and the unfinished copy the replace had written beside the clip)
-    assert_eq!(job["backupCleanup"], json!({ "removed": 2, "restored": 0, "binned": 0, "kept": 0, "keptWhy": [] }));
+    assert_eq!(job["backupCleanup"], json!({ "removed": 2, "restored": 0, "binned": 0, "kept": 0, "unverified": 0, "keptWhy": [] }));
     assert_eq!(tidy_logged(&format!("removed the second name \"{backup}\" in \"SentryClips/2026-10-20_07-44-14/\"")), 1);
     assert_eq!(tidy_logged(&format!("removed the unfinished copy \"TEMP-H265-{}\" in \"SentryClips/2026-10-20_07-44-14/\" (H.265;", names[0])), 1);
     fs::remove_dir_all(&base).unwrap();
@@ -767,7 +767,7 @@ fn a_discarded_jobs_leftover_backup_is_tidied_by_the_next_replace() {
     // no hard links, killed after the original was moved aside (P6): it is put back and converted
     let (base, names, before, job, backup) = discard_then_replace_again("backup-renamed", true, false);
     assert_recovered(&base, &job, "replace", &names, &before);
-    assert_eq!(job["backupCleanup"], json!({ "removed": 1, "restored": 1, "binned": 0, "kept": 0, "keptWhy": [] }));
+    assert_eq!(job["backupCleanup"], json!({ "removed": 1, "restored": 1, "binned": 0, "kept": 0, "unverified": 0, "keptWhy": [] }));
     assert_eq!(tidy_logged(&format!("put the original back: \"{backup}\" -> \"{}\"", names[0])), 1);
     fs::remove_dir_all(&base).unwrap();
 

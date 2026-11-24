@@ -426,7 +426,21 @@ impl Drop for Held<'_> {
     }
 }
 
-/// The names a path is held under: as given (made lexical) and through its folder's real path.
+/// A folder by what it is, not how it is spelled: "@<st_dev>:<st_ino>" of the folder (links
+/// followed), with `name` below it when given. Two mount points of one folder (a bind
+/// mount, the share mounted twice) give the same key, which their path text never does
+/// (canonicalize keeps a bind mount's spelling). Never a path (it does not start with "/").
+pub fn folder_identity(dir: &Path, name: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let m = fs::metadata(dir).ok().filter(|m| m.is_dir())?;
+    let mut k = PathBuf::from(format!("@{}:{}", m.dev(), m.ino()));
+    if let Some(n) = name {
+        k.push(n);
+    }
+    Some(k)
+}
+
+/// The names a path is held under: as given (made lexical), through its folder's real path,
+/// and by its folder's identity (folder_identity).
 pub fn hold_keys(paths: &[&str]) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for p in paths {
@@ -436,6 +450,11 @@ pub fn hold_keys(paths: &[&str]) -> Vec<PathBuf> {
                 let r = real.join(name);
                 if !out.contains(&r) {
                     out.push(r);
+                }
+            }
+            if let Some(k) = folder_identity(parent, Some(name)) {
+                if !out.contains(&k) {
+                    out.push(k);
                 }
             }
         }

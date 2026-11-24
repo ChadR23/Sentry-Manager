@@ -294,7 +294,9 @@ function backupCleanupWords(c, message = (_key, fallback, params) => String(fall
     if (n('removed')) parts.push(message('backupCleanupRemoved', '{count} tidied', { count: n('removed') }));
     if (n('restored')) parts.push(n('restored') === 1 ? message('backupCleanupRestoredOne', '1 original put back') : message('backupCleanupRestored', '{count} originals put back', { count: n('restored') }));
     if (n('binned')) parts.push(message('backupCleanupBinned', '{count} moved to the Recycle Bin', { count: n('binned') }));
-    if (n('kept')) parts.push(message('backupCleanupKept', '{count} kept', { count: n('kept') }));
+    const unverified = Math.min(n('unverified'), n('kept'));
+    if (unverified) parts.push(unverified === 1 ? message('backupCleanupUnverifiedOne', '1 original kept (the converted copy beside it is not verified)') : message('backupCleanupUnverified', '{count} originals kept (the converted copies beside them are not verified)', { count: unverified }));
+    if (n('kept') - unverified) parts.push(message('backupCleanupKept', '{count} kept', { count: n('kept') - unverified }));
     if (!parts.length) return null;
     const kept = (Array.isArray(c.keptWhy) ? c.keptWhy : [])
         .filter((k) => k && typeof k.path === 'string' && typeof k.why === 'string')

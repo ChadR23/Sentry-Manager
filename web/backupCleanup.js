@@ -2,7 +2,9 @@
 // not finish (BACKUP-<clip> and TEMP-H265-/TEMP-AV1-<clip> beside a clip), in
 // plain words, for every interface's Encoder page. The server sends it as the
 // job snapshot's `backupCleanup` (kept in memory only), and only when there
-// was something to tidy: { removed, restored, binned, kept, keptWhy: [{ path, why }] }.
+// was something to tidy: { removed, restored, binned, kept, unverified, keptWhy: [{ path, why }] }
+// (`unverified`: of the kept, originals beside a converted copy that is not
+// proven good, so they were not moved to the Recycle Bin).
 //
 // The Studio Encoder page (src/renderer/scripts/features/footageConverter.js)
 // has the same words; tools/backupCleanup.test.js keeps the two the same.
@@ -20,7 +22,9 @@ export function backupCleanupWords(c) {
     if (n('removed')) parts.push(`${n('removed')} tidied`);
     if (n('restored')) parts.push(`${count(n('restored'), 'original', 'originals')} put back`);
     if (n('binned')) parts.push(`${n('binned')} moved to the Recycle Bin`);
-    if (n('kept')) parts.push(`${n('kept')} kept`);
+    const unverified = Math.min(n('unverified'), n('kept'));
+    if (unverified) parts.push(unverified === 1 ? '1 original kept (the converted copy beside it is not verified)' : `${unverified} originals kept (the converted copies beside them are not verified)`);
+    if (n('kept') - unverified) parts.push(`${n('kept') - unverified} kept`);
     if (!parts.length) return null;
     const kept = (Array.isArray(c.keptWhy) ? c.keptWhy : [])
         .filter((k) => k && typeof k.path === 'string' && typeof k.why === 'string')

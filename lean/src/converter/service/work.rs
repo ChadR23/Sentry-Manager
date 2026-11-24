@@ -609,7 +609,9 @@ impl Service {
         use super::super::leftovers::{self, Folder, Outcome, Tidy};
         let job = rt.manifest().id().to_string();
         let owners = || self.backup_owners(rt);
-        let t = Tidy { tx: &self.0.o.staging, bin: self.0.o.originals_bin.as_deref(), owners: &owners };
+        let tools = self.0.o.tools.clone();
+        let verify = move |original: &std::path::Path, converted: &std::path::Path, codec: &'static str| tools.verify_converted(original, converted, codec);
+        let t = Tidy { tx: &self.0.o.staging, bin: self.0.o.originals_bin.as_deref(), verify: Some(&verify), owners: &owners };
         let results = leftovers::tidy_folder(&t, &Folder { real_root: d.real_root, dir: d.dir, real_dir: &d.real_dir, found: &d.found });
         let mut changed = false;
         for (name, outcome) in &results {

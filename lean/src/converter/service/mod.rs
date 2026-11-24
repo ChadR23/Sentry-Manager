@@ -33,7 +33,7 @@ use super::jobstore::{ItemIn, JobStore, Manifest, Patch};
 use super::staging::{self, Tx};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use tools::Tools;
@@ -185,6 +185,8 @@ pub struct BackupCleanup {
     pub restored: u64,
     pub binned: u64,
     pub kept: u64,
+    /// of the kept: originals beside a converted copy that is not proven good
+    pub unverified: u64,
     pub kept_why: Vec<(String, String)>,
 }
 static BACKUP_CLEANUP: Mutex<Option<HashMap<String, BackupCleanup>>> = Mutex::new(None);
@@ -209,6 +211,9 @@ pub fn note_backup_cleanup(job: &str, rel_dir: &str, name: &str, o: &super::left
         Outcome::Binned { .. } => c.binned += 1,
         Outcome::Kept(why) => {
             c.kept += 1;
+            if why.starts_with(super::leftovers::UNVERIFIED) {
+                c.unverified += 1;
+            }
             if c.kept_why.len() < MAX_KEPT_WHY {
                 let rel = if rel_dir.is_empty() { name.to_string() } else { format!("{rel_dir}/{name}") };
                 c.kept_why.push((rel, why.clone()));
@@ -228,7 +233,7 @@ fn backup_cleanup_json(job: &str) -> Option<Value> {
         return None;
     }
     let why: Vec<Value> = c.kept_why.iter().map(|(p, w)| json!({ "path": p, "why": w })).collect();
-    Some(json!({ "removed": c.removed, "restored": c.restored, "binned": c.binned, "kept": c.kept, "keptWhy": why }))
+    Some(json!({ "removed": c.removed, "restored": c.restored, "binned": c.binned, "kept": c.kept, "unverified": c.unverified, "keptWhy": why }))
 }
 
 impl std::fmt::Display for Fail {
@@ -974,6 +979,17 @@ impl Service {
         f()
     }
 
+    /// Whether two source folders are one inside the other by what they are, not by how they
+    /// are spelled (a bind mount or a second mount of the share): either one, or a folder
+    /// above it, is the other (staging::folder_identity). A folder that does not resolve now
+    /// may be either, so it overlaps.
+    fn overlap_by_identity(x: &Path, y: &Path) -> bool {
+        use super::staging::folder_identity;
+        let (Some(ix), Some(iy)) = (folder_identity(x, None), folder_identity(y, None)) else { return true };
+        let above = |p: &Path, k: &PathBuf| p.ancestors().any(|a| folder_identity(a, None).as_ref() == Some(k));
+        above(x, &iy) || above(y, &ix)
+    }
+
     fn may_run_alongside(config: &Value, others: &[Value]) -> bool {
         let devices = |c: &Value| c.get("lanes").and_then(Value::as_array).map(|a| a.iter().filter_map(|l| l["device"].as_str().map(str::to_string)).collect::<Vec<_>>());
         let Some(mine) = devices(config).filter(|d| !d.is_empty()) else { return false };
@@ -983,7 +999,7 @@ impl Service {
         let overlaps = |a: Option<&str>, b: Option<&str>| match (a, b) {
             (Some(a), Some(b)) => {
                 let (x, y) = (super::owned::resolve(Path::new(a)), super::owned::resolve(Path::new(b)));
-                x == y || x.starts_with(&y) || y.starts_with(&x)
+                x == y || x.starts_with(&y) || y.starts_with(&x) || Self::overlap_by_identity(&x, &y)
             }
             _ => true,
         };
@@ -1540,5 +1556,43 @@ mod state_tests {
         let e = svc.update(&rt, |_| Some(Patch::new().state(JobState::Waiting))).unwrap_err();
         assert_eq!(e.code.as_deref(), Some("INVALID_STATE_TRANSITION"));
         assert_eq!(svc.get(&id).unwrap()["state"], "cancelled");
+    }
+}
+
+#[cfg(test)]
+mod alongside_tests {
+    use super::Service;
+    use serde_json::json;
+    use std::fs;
+    use std::path::Path;
+
+    fn cfg(root: &Path, device: &str) -> serde_json::Value {
+        json!({ "sourceRoot": root, "autoConvert": true, "lanes": [{ "device": device }] })
+    }
+
+    #[test]
+    fn jobs_of_one_folder_through_two_mount_points_never_run_alongside() {
+        let tmp = crate::converter::testutil::tempdir().unwrap();
+        let a = tmp.path().join("share/TeslaCam");
+        fs::create_dir_all(a.join("SentryClips")).unwrap();
+        let other = tmp.path().join("other/TeslaCam");
+        fs::create_dir_all(&other).unwrap();
+        let running = |root: &Path| json!({ "config": cfg(root, "gpu0"), "state": "running" });
+        assert!(Service::may_run_alongside(&cfg(&other, "cpu"), &[running(&a)]), "two unrelated folders");
+        assert!(!Service::may_run_alongside(&cfg(&a.join("SentryClips"), "cpu"), &[running(&a)]), "one inside the other");
+        assert!(!Service::may_run_alongside(&cfg(&tmp.path().join("gone"), "cpu"), &[running(&a)]), "a folder that cannot be reached may be either");
+        // a bind mount of the share (needs root)
+        let at = tmp.path().join("bind");
+        fs::create_dir_all(&at).unwrap();
+        let ok = std::process::Command::new("mount").arg("--bind").arg(tmp.path().join("share")).arg(&at).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+        if !ok {
+            eprintln!("skipped: a bind mount needs root");
+            return;
+        }
+        let r1 = Service::may_run_alongside(&cfg(&at.join("TeslaCam"), "cpu"), &[running(&a)]);
+        let r2 = Service::may_run_alongside(&cfg(&a, "cpu"), &[running(&at.join("TeslaCam/SentryClips"))]);
+        let _ = std::process::Command::new("umount").arg(&at).status();
+        assert!(!r1, "the same folder through a bind mount");
+        assert!(!r2, "a folder inside it through a bind mount");
     }
 }
