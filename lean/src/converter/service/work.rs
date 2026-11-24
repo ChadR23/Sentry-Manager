@@ -588,8 +588,8 @@ impl Service {
             } || rt.aborted();
             if !controlled {
                 let code = stable_failure(&e, "discovery-failed");
-                if code == super::UNSAFE_OWNED_PATH_RESULT {
-                    super::log_line(format!("[CONVERTER] UNSAFE_OWNED_PATH job {} failed: {}", rt.manifest().id(), e.detail.as_deref().unwrap_or(super::DETAIL_NOT_RECORDED)));
+                if let Some(label) = super::detailed_failure(&code) {
+                    super::log_line(format!("[CONVERTER] {label} job {} failed: {}", rt.manifest().id(), e.detail.as_deref().unwrap_or(super::DETAIL_NOT_RECORDED)));
                 }
                 let retryable = Self::is_retryable_network(&e);
                 self.update(rt, |_| Some(Patch::new().state(JobState::Failed).set("activeItemId", Value::Null).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", json!({ "code": code, "retryable": retryable }))))?;
@@ -945,8 +945,8 @@ impl Service {
             };
             if let (Some(e), false, false) = (&rejected, state_failed, controlled) {
                 let code = stable_failure(e, "operation-failed");
-                if code == super::UNSAFE_OWNED_PATH_RESULT {
-                    super::log_line(format!("[CONVERTER] UNSAFE_OWNED_PATH job {} failed: {}", rt2.manifest().id(), e.detail.as_deref().unwrap_or(super::DETAIL_NOT_RECORDED)));
+                if let Some(label) = super::detailed_failure(&code) {
+                    super::log_line(format!("[CONVERTER] {label} job {} failed: {}", rt2.manifest().id(), e.detail.as_deref().unwrap_or(super::DETAIL_NOT_RECORDED)));
                 }
                 let _ = me.update(&rt2, |_| Some(Patch::new().state(JobState::Failed).set("activeItemId", Value::Null).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", json!({ "code": code, "retryable": false }))));
             } else {
@@ -1405,7 +1405,8 @@ impl Service {
                 let cleanup = self.cleanup_ownership(rt, &id, Some(&adopted_own), None, false);
                 if !cleanup.cleaned {
                     Self::compose_into(rt, &id, &adopted_own);
-                    return Err(Fail { code: Some(verdict.reason.unwrap_or("VERIFICATION_FAILED").into()), retryable: verdict.retryable, ..Default::default() });
+                    let detail = (verdict.reason == Some(super::super::verifier::reasons::SOURCE_CHANGED)).then(|| verify_source_detail(&details));
+                    return Err(Fail { code: Some(verdict.reason.unwrap_or("VERIFICATION_FAILED").into()), retryable: verdict.retryable, detail, ..Default::default() });
                 }
                 if retry.0 {
                     size_retry += 1;
@@ -1437,7 +1438,8 @@ impl Service {
                     continue;
                 }
                 eprintln!("[CONVERTER] Verification failed: {} {} {}", item.s("relativePath"), verdict.reason.unwrap_or("unknown"), details.to_string().chars().take(600).collect::<String>());
-                return Err(Fail { code: Some(verdict.reason.unwrap_or("VERIFICATION_FAILED").into()), retryable: verdict.retryable, ..Default::default() });
+                let detail = (verdict.reason == Some(super::super::verifier::reasons::SOURCE_CHANGED)).then(|| verify_source_detail(&details));
+                return Err(Fail { code: Some(verdict.reason.unwrap_or("VERIFICATION_FAILED").into()), retryable: verdict.retryable, detail, ..Default::default() });
             }
             let Some(artifact) = verdict.publication_artifact.clone() else { return Err(service_error("INVALID_PUBLICATION_ARTIFACT")) };
             let destination = output_path(&config, &item.v);
@@ -1625,9 +1627,9 @@ impl Service {
     pub fn fail_item(&self, rt: &Arc<Runtime>, item_id: &str, e: &Fail) -> SResult<()> {
         let retryable = e.retryable || Self::is_retryable_network(e);
         let code = stable_failure(e, "operation-failed");
-        // why an unsafe-owned-path refusal fired: logged with the clip's name,
-        // shown as failure.detail in the snapshot (never stored)
-        if code == super::UNSAFE_OWNED_PATH_RESULT {
+        // why an unsafe-owned-path or source-changed refusal fired: logged
+        // with the clip's name, shown as failure.detail in the snapshot (never stored)
+        if super::detailed_failure(&code).is_some() {
             let m = rt.manifest();
             let rel = m.item(item_id).and_then(|i| i.str("relativePath").map(str::to_string)).unwrap_or_default();
             super::note_clip_refusal(m.id(), item_id, &rel, e);
@@ -2057,4 +2059,16 @@ pub fn ensure_destination_parent(root: &str, destination: &str) -> SResult<Desti
         captured.push((current.clone(), real, st.dev(), st.ino()));
     }
     Ok(DestinationGuard { captured })
+}
+
+/// A verifier source-changed: the bytes read from the clip are not the size
+/// it was stat'ed at (observed != recorded).
+fn verify_source_detail(details: &Value) -> String {
+    let n = |k: &str| details.get(k).map_or_else(|| "none".to_string(), |v| v.to_string());
+    format!("verify-source: bytes read {} != size {} (stat)", n("readBytes"), n("statBytes"))
+}
+
+#[cfg(test)]
+pub(super) fn verify_source_detail_for_test(read: u64, stat: u64) -> String {
+    verify_source_detail(&json!({ "statBytes": stat, "readBytes": read }))
 }

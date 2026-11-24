@@ -1,6 +1,7 @@
 // Encoder: start, watch and steer conversions through /api/converter/invoke/* and
 // the /api/converter/events stream. Per-lane throughput comes from /api/stats.
 import '/web/vehicleEncoding.js';
+import { clipFailureWhy } from '/web/clipFailure.js';
 import { esc, api, invoke, state, current, sourceOf, bytes, rate, pct, num, dur, energy, watts, money, icon, toast, confirmDialog, busy, store, fin, plural, isoish, debounce, bus, CLIENT_ID, liveDraw } from '../core.js';
 import { split, seg, wireSeg, meter, chip, empty } from '../ui.js';
 import { spark, C, PALETTE } from '../charts.js';
@@ -293,7 +294,7 @@ export default {
         if (tableF.state === 'done') return i.state === 'completed';
         return i.state === tableF.state;
       };
-      const list = items.filter((i) => pick(i) && (!q || `${i.relativePath} ${i.state} ${i.resultCode || ''}`.toLowerCase().includes(q)));
+      const list = items.filter((i) => pick(i) && (!q || `${i.relativePath} ${i.state} ${i.resultCode || ''} ${i.failure?.detail || ''}`.toLowerCase().includes(q)));
       const order = { processing: 0, failed: 1, queued: 2, completed: 3, skipped: 4, cancelled: 5 };
       list.sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9) || String(a.relativePath).localeCompare(String(b.relativePath)));
       $('#enc-items-n').textContent = `${list.length} shown of ${snap?.itemCount || items.length}${snap?.itemsTruncated ? ' (the server sends the newest 256)' : ''}`;
@@ -301,7 +302,10 @@ export default {
         ${list.slice(0, 400).map((i) => {
           const [label, tone] = itemState(i);
           const saved = i.outputBytes && i.sourceBytes && i.kind === 'video' ? (1 - i.outputBytes / i.sourceBytes) * 100 : null;
-          return `<tr class="ist-${esc(i.state)}"><td class="mono small ell" title="${esc(i.relativePath)}">${esc(String(i.relativePath || '').split('/').slice(-2).join('/'))}</td><td class="small">${esc(String(i.group || '').replace('Clips', ''))}</td><td class="small">${esc(i.camera || i.assetType || '')}</td><td>${chip(label, tone)}</td><td class="r num">${bytes(i.sourceBytes)}</td><td class="r num">${i.outputBytes ? bytes(i.outputBytes) : '—'}</td><td class="r num">${saved === null ? '—' : pct(saved, 1)}</td><td class="r num">${i.attempts ?? 0}</td></tr>`;
+          // a failed clip's reason (failure.detail), in plain words on a row of its own
+          const why = i.state === 'failed' ? clipFailureWhy(i.failure) : null;
+          const whyRow = why ? `<tr class="ist-why"><td colspan="8"><div class="why-box"><span>${esc(why.plain)}</span>${why.detail ? `<code>${esc(why.detail)}</code>` : ''}</div></td></tr>` : '';
+          return `<tr class="ist-${esc(i.state)}${why ? ' has-why' : ''}"><td class="mono small ell" title="${esc(i.relativePath)}">${esc(String(i.relativePath || '').split('/').slice(-2).join('/'))}</td><td class="small">${esc(String(i.group || '').replace('Clips', ''))}</td><td class="small">${esc(i.camera || i.assetType || '')}</td><td${why ? ` title="${esc(why.plain)}${why.detail ? `\n${esc(why.detail)}` : ''}"` : ''}>${chip(label, tone)}</td><td class="r num">${bytes(i.sourceBytes)}</td><td class="r num">${i.outputBytes ? bytes(i.outputBytes) : '—'}</td><td class="r num">${saved === null ? '—' : pct(saved, 1)}</td><td class="r num">${i.attempts ?? 0}</td></tr>${whyRow}`;
         }).join('') || `<tr><td colspan="8" class="muted" style="padding:14px">${snap ? 'No clips match.' : 'No conversion yet.'}</td></tr>`}</tbody>`;
     }
     wireSeg(el, 'ist', (x) => { tableF.state = x; drawItems(); });

@@ -2,6 +2,7 @@
 // conversion lanes are cylinders, and the job's progress is a lap counter.
 // Everything goes through /api/converter/invoke/* and /api/converter/events.
 import '/web/vehicleEncoding.js';
+import { clipFailureWhy } from '/web/clipFailure.js';
 import { h, ico, api, conv, app, car, carRoot, size, perSec, pc, fixed, count, span, stampFull, watt, wh, cash, ok, toast, ask, act, local, segs, onSegs, pill, bar, panelHead, bus, debounce, CLIENT, liveDraw } from '../core.js';
 import { dial, setDial, ring, setRing } from '../gauges.js';
 import { splitDevices, deviceLabel, laneValue, jobLanes, groupMemory, groupBodyId, wireGroups } from '../nodelanes.js';
@@ -300,19 +301,24 @@ export default {
     }
 
     // ---------- clips table ----------
+    // a failed clip's reason (failure.detail), in plain words under its state
+    const whyBox = (i) => {
+      const why = i.state === 'failed' ? clipFailureWhy(i.failure) : null;
+      return why ? `<div class="why">${h(why.plain)}${why.detail ? `<code>${h(why.detail)}</code>` : ''}</div>` : '';
+    };
     function drawItems() {
       const items = snap?.items || [];
       const q = flt.q.toLowerCase();
       const pick = (i) => flt.state === 'all' || (flt.state === 'active' ? i.state === 'processing' : flt.state === 'done' ? i.state === 'completed' : i.state === flt.state);
       const order = { processing: 0, failed: 1, queued: 2, completed: 3, skipped: 4, cancelled: 5 };
-      const list = items.filter((i) => pick(i) && (!q || `${i.relativePath} ${i.state} ${i.resultCode || ''}`.toLowerCase().includes(q)))
+      const list = items.filter((i) => pick(i) && (!q || `${i.relativePath} ${i.state} ${i.resultCode || ''} ${i.failure?.detail || ''}`.toLowerCase().includes(q)))
         .sort((a, b) => (order[a.state] ?? 9) - (order[b.state] ?? 9) || String(a.relativePath).localeCompare(String(b.relativePath)));
       $('#e-itemn').textContent = `${list.length} shown of ${snap?.itemCount || items.length}${snap?.itemsTruncated ? ' (the server sends the newest 256)' : ''}`;
       $('#e-items').innerHTML = `<thead><tr><th>Clip</th><th>Group</th><th>Camera</th><th>State</th><th class="r">In</th><th class="r">Out</th><th class="r">Saved</th><th class="r">Tries</th></tr></thead><tbody>
         ${list.slice(0, 400).map((i) => {
           const [l, tone] = itemLabel(i);
           const saved = i.outputBytes && i.sourceBytes && i.kind === 'video' ? (1 - i.outputBytes / i.sourceBytes) * 100 : null;
-          return `<tr><td data-label="Clip" class="mono small wrap-any">${h(String(i.relativePath || '').split('/').slice(-2).join('/'))}</td><td data-label="Group" class="small">${h(String(i.group || '').replace('Clips', ''))}</td><td data-label="Camera" class="small">${h(i.camera || i.assetType || '')}</td><td data-label="State">${pill(l, tone)}</td><td data-label="In" class="r num">${size(i.sourceBytes)}</td><td data-label="Out" class="r num">${i.outputBytes ? size(i.outputBytes) : '—'}</td><td data-label="Saved" class="r num">${saved === null ? '—' : pc(saved, 1)}</td><td data-label="Tries" class="r num">${i.attempts ?? 0}</td></tr>`;
+          return `<tr><td data-label="Clip" class="mono small wrap-any">${h(String(i.relativePath || '').split('/').slice(-2).join('/'))}</td><td data-label="Group" class="small">${h(String(i.group || '').replace('Clips', ''))}</td><td data-label="Camera" class="small">${h(i.camera || i.assetType || '')}</td><td data-label="State">${pill(l, tone)}${whyBox(i)}</td><td data-label="In" class="r num">${size(i.sourceBytes)}</td><td data-label="Out" class="r num">${i.outputBytes ? size(i.outputBytes) : '—'}</td><td data-label="Saved" class="r num">${saved === null ? '—' : pc(saved, 1)}</td><td data-label="Tries" class="r num">${i.attempts ?? 0}</td></tr>`;
         }).join('') || `<tr><td colspan="8" class="dim">${snap ? 'No clip matches.' : 'No conversion yet.'}</td></tr>`}</tbody>`;
     }
     onSegs(el, 'ist', (x) => { flt.state = x; drawItems(); });

@@ -750,7 +750,7 @@ impl Tx {
                 source_removed = true;
             } else {
                 // no hard links on this file system: the original is moved aside instead
-                let (_, removed) = self.promote_no_replace(source, backup, "REPLACEMENT_COLLISION", Some(&expected.expected()), true, false).map_err(|e| if e.tx && e.code == "UNSAFE_OWNED_PATH" { txe("SOURCE_CHANGED") } else { e })?;
+                let (_, removed) = self.promote_no_replace(source, backup, "REPLACEMENT_COLLISION", Some(&expected.expected()), true, false).map_err(|e| if e.tx && e.code == "UNSAFE_OWNED_PATH" { source_changed("move-original-aside", e.detail.as_deref().unwrap_or("")) } else { e })?;
                 let (rec, mt) = self.backup_record(backup, &p.backup_nonce, removed, &expected, proven_backup.as_deref())?;
                 arts.insert("replacementBackup".into(), rec);
                 backup_mtime = mt;

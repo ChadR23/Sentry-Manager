@@ -31,7 +31,7 @@
         {
           "author": "Aurora",
           "builtin": true,
-          "bytes": 404215,
+          "bytes": 405056,
           "description": "A night sky with drifting northern lights behind a frosted-glass, spatial interface: a floating dock, glass windows, a Sky home with a glowing storage ring, a filmstrip of days, a cockpit-style six-camera Viewer and an orbiting Encoder.",
           "files": 31,
           "id": "aurora",
@@ -44,7 +44,7 @@
         {
           "author": "Daylight pack",
           "builtin": true,
-          "bytes": 385913,
+          "bytes": 386598,
           "description": "A calm, friendly interface: a Today page that answers your questions first, a calendar of footage, a big six-camera Viewer, guided conversions, light and dark looks.",
           "files": 32,
           "id": "daylight",
@@ -57,7 +57,7 @@
         {
           "author": "Flux",
           "builtin": true,
-          "bytes": 402624,
+          "bytes": 403942,
           "description": "A dense, dark control console for people who want every number: live canvas telemetry, a command palette (Ctrl/Cmd+K), keyboard shortcuts everywhere, sortable tables, a six-camera synced viewer with telemetry and a lane-level encoder view.",
           "files": 29,
           "id": "flux",
@@ -70,7 +70,7 @@
         {
           "author": "Sentry Six Manager examples",
           "builtin": true,
-          "bytes": 412006,
+          "bytes": 412887,
           "description": "Retro-futuristic synthwave cockpit: neon HUD panels over an endless grid that runs toward a setting sun. Dashboard instrument cluster, track-list footage, heads-up Viewer and a dyno-room Encoder.",
           "files": 28,
           "id": "horizon",

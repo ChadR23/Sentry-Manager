@@ -241,7 +241,8 @@ function setDisabled(element, disabled) {
     if (element) element.disabled = Boolean(disabled);
 }
 
-// Why a clip was refused (failure.detail of an unsafe-owned-path failure),
+// Why a clip was refused (failure.detail of an unsafe-owned-path or a
+// source-changed failure),
 // in plain words, with the server's own words kept for a report. The checks
 // guard the original footage: a file that is not exactly the one the
 // converter made or recorded is never removed or replaced.
@@ -255,11 +256,31 @@ const REFUSAL_REASONS = [
     [/\bsize \S+ != |sha256|changed/i, 'refusalChanged', 'The file changed while it was being converted, so it was not touched.'],
 ];
 
+// source-changed: the original is not provably the version that was
+// converted (web/clipFailure.js has the same words for the other interfaces)
+const KEPT = 'The original was kept as it is, not replaced.';
+const SOURCE_CHANGED_REASONS = [
+    REFUSAL_REASONS[0],
+    [/contents the same both times/, 'changedCtimeOnly', `The file changed after it was checked: its metadata time (ctime) changed, its contents did not. Something kept changing its permissions or attributes while it was read. ${KEPT} Run it again.`],
+    [/nlink \d+ != 1[^;]*the Encoder's backup name/, 'changedBackupLink', `The file changed after it was checked: it got a second name (a hard link), BACKUP-… beside it, left by an earlier Encoder replace that did not finish. ${KEPT}`],
+    [/nlink \d+ != 1/, 'changedHardLink', `The file changed after it was checked: it got a second name (a hard link), often made by a backup or deduplication tool. ${KEPT}`],
+    [/ENOENT|moved or deleted/, 'changedGone', `The file changed after it was checked: it was moved or deleted. ${KEPT}`],
+    [/realpath|linked folder/i, 'changedLinkedFolder', `Its folder is reached through a linked folder (a symlink), so it was not replaced. ${KEPT}`],
+    [/not a regular file/i, 'changedNotFile', `It is not a plain file, so it was not replaced. ${KEPT}`],
+    [/bytes differ|sha256 differs/, 'changedContents', `The file changed after it was checked: its contents changed. ${KEPT}`],
+    [/\bino \S+ != |dev:ino/, 'changedReplaced', `The file changed after it was checked: it was replaced by another file. ${KEPT}`],
+    [/\bdev \S+ != /, 'changedRemounted', `The file changed after it was checked: the share it is on was mounted again (its device number changed). ${KEPT} Run it again.`],
+    [/\bsize \S+ != |size changed|bytes read \S+ != size/, 'changedSize', `The file changed after it was checked: its size changed. ${KEPT}`],
+    [/mtime_ns/, 'changedWritten', `The file changed after it was checked: it was written to while it was read. ${KEPT}`],
+    [/ctime_ns/, 'changedCtime', `The file changed after it was checked: its metadata time (ctime) changed while it was read. ${KEPT} Run it again.`],
+];
+
 function refusalWhy(failure, message = (_key, fallback) => fallback) {
     const detail = typeof failure?.detail === 'string' ? failure.detail.trim() : '';
     if (!detail) return null;
-    const hit = REFUSAL_REASONS.find(([pattern]) => pattern.test(detail));
-    const plain = hit ? message(hit[1], hit[2]) : message('refusalOther', 'A safety check on the file did not pass, so it was not touched.');
+    const changed = failure?.code === 'source-changed';
+    const hit = (changed ? SOURCE_CHANGED_REASONS : REFUSAL_REASONS).find(([pattern]) => pattern.test(detail));
+    const plain = hit ? message(hit[1], hit[2]) : changed ? message('changedOther', `The file changed after it was checked. ${KEPT}`) : message('refusalOther', 'A safety check on the file did not pass, so it was not touched.');
     return { plain, detail: hit?.[1] === 'refusalNotKnown' ? '' : detail };
 }
 

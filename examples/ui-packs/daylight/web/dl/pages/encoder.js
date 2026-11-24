@@ -3,6 +3,7 @@
 // once (per GPU / node), automatic conversion, and a speed test.
 
 import '/web/vehicleEncoding.js';
+import { clipFailureWhy } from '/web/clipFailure.js';
 import { api, esc, enc, icon, bytes, plural, pct, duration, meter, chip, emptyState, details, kv, confirmDialog, modal, toast, fail, busy, invoke, store, ago, fin, liveDraw, hourOpts, clockPref } from '../core.js';
 import { state, vehicle, setVehicle, vehiclePicker, vehicleById } from '../state.js';
 import { go } from '../app.js';
@@ -193,7 +194,7 @@ async function overview(ctx) {
         ['New size', summary ? bytes(summary.outputVideoBytes) : bytes(snap.counters?.outputVideoBytes)],
         ['Live encoder', snap.progress?.fps ? `${snap.progress.fps} frames/s` : ''],
         ['Job', `<span class="mono">${esc(snap.id)}</span>`]
-      ])}${c.failedItems.length ? `<h4 style="margin:14px 0 6px">Clips that couldn’t be converted</h4><ul class="files">${c.failedItems.map((i) => `<li><span>${esc(i.relativePath || i.id)}</span><span class="muted">${esc(FAIL_WORDS[i.failure?.code] || String(i.failure?.code || 'failed').replace(/[-_]/g, ' '))}</span></li>`).join('')}</ul><p class="muted small">The originals of these clips were kept exactly as they were.</p>` : ''}${c.keptItems?.length ? `<h4 style="margin:14px 0 6px">Kept, though they didn’t shrink as much as chosen</h4><ul class="files">${c.keptItems.map((i) => `<li><span>${esc(i.relativePath || i.id)}</span><span class="muted">${esc(`${i.offTarget.savedPercent}% smaller (aimed for ${i.offTarget.targetPercent}%)`)}</span></li>`).join('')}</ul>` : ''}`)}
+      ])}${c.failedItems.length ? `<h4 style="margin:14px 0 6px">Clips that couldn’t be converted</h4><ul class="files">${c.failedItems.map((i) => `<li><span>${esc(i.relativePath || i.id)}</span><span class="muted">${esc(FAIL_WORDS[i.failure?.code] || String(i.failure?.code || 'failed').replace(/[-_]/g, ' '))}</span>${((why) => why ? `<span class="clip-why">${esc(why.plain)}${why.detail ? `<code>${esc(why.detail)}</code>` : ''}</span>` : '')(clipFailureWhy(i.failure))}</li>`).join('')}</ul><p class="muted small">The originals of these clips were kept exactly as they were.</p>` : ''}${c.keptItems?.length ? `<h4 style="margin:14px 0 6px">Kept, though they didn’t shrink as much as chosen</h4><ul class="files">${c.keptItems.map((i) => `<li><span>${esc(i.relativePath || i.id)}</span><span class="muted">${esc(`${i.offTarget.savedPercent}% smaller (aimed for ${i.offTarget.targetPercent}%)`)}</span></li>`).join('')}</ul>` : ''}`)}
     </div>`;
   };
 

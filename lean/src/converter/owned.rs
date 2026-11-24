@@ -454,7 +454,9 @@ pub enum LinkResult {
     Linked,
     /// no hard links here: the caller moves the original aside instead
     Unsupported,
-    OwnershipMismatch,
+    /// not the expected file, or the link did not land on it: which check
+    /// refused and what did not match
+    OwnershipMismatch(String),
 }
 
 /// renameExclusive.linkBackup({ from, to, expectedSource, identityOnly })
@@ -474,11 +476,11 @@ fn link_backup_inner(from: &Path, to: &Path, expected: &Expected, identity_only:
         return Err(code_err("ENOTSUP", "Linking requires two distinct absolute paths."));
     }
     if !valid_expected(expected) {
-        return Ok(LinkResult::OwnershipMismatch);
+        return Ok(LinkResult::OwnershipMismatch("no valid record of the expected file".into()));
     }
     let (_f, st) = match open_verified(from, expected, identity_only_for(expected, identity_only))? {
         Opened::Missing => return Err(code_err("ENOENT", "Source is missing.")),
-        Opened::Mismatch(_) => return Ok(LinkResult::OwnershipMismatch),
+        Opened::Mismatch(why) => return Ok(LinkResult::OwnershipMismatch(why)),
         Opened::Verified(f, st) => (f, st),
     };
     if let Err(err) = fs::hard_link(from, to) {
@@ -496,7 +498,8 @@ fn link_backup_inner(from: &Path, to: &Path, expected: &Expected, identity_only:
             let _ = fs::remove_file(to);
             return Ok(LinkResult::Unsupported);
         }
-        return Ok(LinkResult::OwnershipMismatch);
+        let at = |m: &Option<fs::Metadata>| m.as_ref().map_or_else(|| "missing".to_string(), |m| format!("{}:{}", m.dev(), m.ino()));
+        return Ok(LinkResult::OwnershipMismatch(format!("after link: dev:ino original {} / backup {} != {}:{}", at(&named), at(&linked), st.dev(), st.ino())));
     }
     Ok(LinkResult::Linked)
 }

@@ -93,15 +93,25 @@ impl From<staging::TxError> for Fail {
 
 // ---- refusal details -------------------------------------------------------------
 
-/// Why a clip's unsafe-owned-path refusal fired, by (job id, item id). Kept
-/// in memory only and shown as `failure.detail` in the job snapshot of a clip
-/// whose failure is unsafe-owned-path: the job file keeps Node's format
+/// Why a clip's unsafe-owned-path or source-changed refusal fired, by (job
+/// id, item id). Kept in memory only and shown as `failure.detail` in the job
+/// snapshot of a clip whose failure is one of those: the job file keeps Node's format
 /// (its failure record allows only code and retryable), so the stored job,
 /// and every snapshot compared with Node's, are unchanged.
 static FAILURE_DETAILS: Mutex<Option<HashMap<(String, String), String>>> = Mutex::new(None);
 const MAX_FAILURE_DETAILS: usize = 4096;
 pub const UNSAFE_OWNED_PATH_RESULT: &str = "unsafe-owned-path";
-/// The detail of a stored unsafe-owned-path failure whose reason this
+pub const SOURCE_CHANGED_RESULT: &str = "source-changed";
+/// The failure codes whose refusal says why (logged with the clip's name,
+/// failure.detail in the snapshot), and the name each is logged under.
+pub fn detailed_failure(code: &str) -> Option<&'static str> {
+    match code {
+        UNSAFE_OWNED_PATH_RESULT => Some("UNSAFE_OWNED_PATH"),
+        SOURCE_CHANGED_RESULT => Some("SOURCE_CHANGED"),
+        _ => None,
+    }
+}
+/// The detail of a stored unsafe-owned-path or source-changed failure whose reason this
 /// process never saw (the details are kept in memory only).
 pub const DETAIL_NOT_KNOWN: &str = "not known: this clip failed before the server last restarted; run it again (Retry failed, or a new job if Retry failed is refused) to see why";
 /// The detail of a refusal that named no check (no such refusal is known).
@@ -116,12 +126,14 @@ pub(crate) fn log_line(line: String) {
 #[cfg(test)]
 pub(crate) static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// A clip that ends with unsafe-owned-path: one log line naming the clip
-/// (its relative path), the check and the values that did not match, and the
-/// detail kept for the job snapshot. Returns the detail recorded.
+/// A clip that ends with unsafe-owned-path or source-changed: one log line
+/// naming the clip (its relative path), the check and the values that did
+/// not match, and the detail kept for the job snapshot. Returns the detail
+/// recorded.
 pub fn note_clip_refusal(job: &str, item: &str, relative_path: &str, e: &Fail) -> String {
     let detail = e.detail.clone().filter(|d| !d.is_empty()).unwrap_or_else(|| DETAIL_NOT_RECORDED.to_string());
-    log_line(format!("[CONVERTER] UNSAFE_OWNED_PATH clip {relative_path:?} ({job} {item}) failed: {detail}"));
+    let label = detailed_failure(&stable_failure(e, "operation-failed")).unwrap_or("UNSAFE_OWNED_PATH");
+    log_line(format!("[CONVERTER] {label} clip {relative_path:?} ({job} {item}) failed: {detail}"));
     set_failure_detail(job, item, Some(&detail));
     detail
 }
@@ -155,9 +167,7 @@ pub fn failure_detail(job: &str, item: &str) -> Option<String> {
 /// A failed clip's snapshot with its refusal detail; one this process never
 /// saw (the clip failed before a restart) says so.
 fn with_failure_detail(job: &str, v: &Value) -> Option<Value> {
-    if v.get("failure").and_then(|f| f.get("code")).and_then(Value::as_str) != Some(UNSAFE_OWNED_PATH_RESULT) {
-        return None;
-    }
+    detailed_failure(v.get("failure").and_then(|f| f.get("code")).and_then(Value::as_str)?)?;
     let d = failure_detail(job, v.get("id")?.as_str()?).unwrap_or_else(|| DETAIL_NOT_KNOWN.to_string());
     let mut c = v.clone();
     c["failure"]["detail"] = Value::String(d);
@@ -1401,7 +1411,7 @@ mod failure_detail_tests {
         let failed = |code: &str| json!({ "state": "failed", "failure": { "code": code, "retryable": false }, "resultCode": code });
         let items = vec![
             ItemIn::Raw(Value::Object(merge_value(&clip(1), &failed("unsafe-owned-path")))),
-            ItemIn::Raw(Value::Object(merge_value(&clip(2), &failed("source-changed")))),
+            ItemIn::Raw(Value::Object(merge_value(&clip(2), &failed("decode-failed")))),
         ];
         let m = store.transition(&job, Patch::new().items(items)).unwrap();
 
@@ -1416,7 +1426,7 @@ mod failure_detail_tests {
         let items = snap["items"].as_array().unwrap();
         assert_eq!(items[0]["failure"], json!({ "code": "unsafe-owned-path", "retryable": false, "detail": "remove-exact-owned: nlink 2 != 1 (state owned)" }));
         assert_eq!(items[0]["resultCode"], "unsafe-owned-path", "the result code is unchanged");
-        assert_eq!(items[1]["failure"], json!({ "code": "source-changed", "retryable": false }), "only unsafe-owned-path shows a detail");
+        assert_eq!(items[1]["failure"], json!({ "code": "decode-failed", "retryable": false }), "only unsafe-owned-path and source-changed show a detail");
         // the stored job and the manifest itself carry no detail
         assert!(m.items[0].value()["failure"].get("detail").is_none());
         let stored = std::fs::read_to_string(root.join(&job).join("job.json")).unwrap_or_default() + &std::fs::read_to_string(root.join(&job).join("job.journal")).unwrap_or_default();

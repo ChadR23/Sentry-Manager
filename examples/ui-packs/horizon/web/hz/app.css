@@ -229,6 +229,10 @@ kbd { font: 700 12px var(--mono); padding: 2px 6px; border-radius: 3px; border: 
 .tbl td { padding: 9px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
 .tbl .r { text-align: right; }
 .tbl tr.hi td { background: rgba(93, 255, 176, 0.06); }
+/* a failed clip's reason, under its state */
+.tbl .why { margin-top: 6px; max-width: 380px; padding: 6px 9px; border-left: 2px solid var(--red); background: rgba(255, 90, 120, 0.1); font-size: 12.5px; line-height: 1.45; color: var(--text); white-space: normal; overflow-wrap: anywhere; }
+.tbl .why code { display: block; margin-top: 3px; font: 11.5px/1.4 var(--mono); color: var(--dim); font-variant-ligatures: none; }
+@media (max-width: 760px) { .tbl .why { max-width: none; } }
 @media (max-width: 760px) {
   .tbl.stack, .tbl.stack tbody, .tbl.stack tr, .tbl.stack td { display: block; width: 100%; }
   .tbl.stack thead { display: none; }
