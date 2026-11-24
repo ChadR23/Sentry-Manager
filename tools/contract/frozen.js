@@ -207,7 +207,7 @@ async function main() {
     const bin = path.resolve(arg('bin', process.env.LEAN_BIN || path.join(REPO, 'lean', 'target', 'release', 'sentry-lean')));
     server = await startLean(bin, dir, Number(arg('settle', 75)) * 1000);
   }
-  const stop = () => { if (server.child && server.child.exitCode === null) server.child.kill('SIGTERM'); };
+  const stop = () => { if (server.child && server.child.exitCode === null && server.child.signalCode === null) server.child.kill('SIGTERM'); };
   process.on('exit', stop);
   try {
     const goldens = path.join(FROZEN, 'goldens');
@@ -267,8 +267,20 @@ async function main() {
     console.log(`\n${failed ? 'FAIL' : 'PASS'}: ${failed ? `${count('different')} routes differ, ${lost.length + gone.length} no longer compared` : 'every compared route answers as the Node server did'}`);
     return failed ? 1 : 0;
   } finally {
-    stop();
-    if (!flag('keep') && !arg('dir') && !arg('base')) fs.rmSync(dir, { recursive: true, force: true });
+    // Shutdown can still write files: wait for exit before removing the folder.
+    const child = server.child;
+    if (child && child.exitCode === null && child.signalCode === null) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => child.kill('SIGKILL'), 10000);
+        child.once('exit', () => { clearTimeout(timer); resolve(); });
+        stop();
+      });
+    }
+    if (!flag('keep') && !arg('dir') && !arg('base')) {
+      try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+      // A leftover temp folder must not change the comparison's verdict.
+      catch (err) { console.warn(`Warning: could not remove ${dir} (${err.code || err.message})`); }
+    }
   }
 }
 
