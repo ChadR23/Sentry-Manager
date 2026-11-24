@@ -1,5 +1,7 @@
 //! Measured, first-attempt previews. Source footage is only read.
 mod frames;
+#[cfg(test)]
+mod real_clips;
 use super::{planner, process::{BoundedRunner, ProcResult, RunOptions, Runner}, service::{tools::{RealTools, Tools}, work::initial_plan, EncodeRequest}, snapshot::Registry, verifier};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
