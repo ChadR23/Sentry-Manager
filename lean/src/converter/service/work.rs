@@ -242,7 +242,12 @@ impl Service {
                 }
                 Cleanup { cleaned: r.cleaned, recovery_required, pending: r.cleanup_pending, own: result_own }
             }
-            Err(e) => Cleanup { cleaned: false, recovery_required: false, pending: e.cleanup_pending.unwrap_or(keys), own: own.clone() },
+            Err(e) => {
+                // (the files stay owned and a Retry failed waits for them: say why)
+                let rel = m.item(item_id).and_then(|i| i.str("relativePath").map(str::to_string)).unwrap_or_default();
+                super::log_line(format!("[CONVERTER] Cleanup kept the files of clip {rel:?} ({} {item_id}): {}{}", m.id(), e.code, e.detail.as_deref().map(|d| format!(": {d}")).unwrap_or_default()));
+                Cleanup { cleaned: false, recovery_required: false, pending: e.cleanup_pending.unwrap_or(keys), own: own.clone() }
+            }
         }
     }
 
@@ -643,6 +648,9 @@ impl Service {
             } || rt.aborted();
             if !controlled {
                 let code = stable_failure(&e, "discovery-failed");
+                if code == super::UNSAFE_OWNED_PATH_RESULT {
+                    super::log_line(format!("[CONVERTER] UNSAFE_OWNED_PATH job {} failed: {}", rt.manifest().id(), e.detail.as_deref().unwrap_or(super::DETAIL_NOT_RECORDED)));
+                }
                 let retryable = Self::is_retryable_network(&e);
                 self.update(rt, |_| Some(Patch::new().state(JobState::Failed).set("activeItemId", Value::Null).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", json!({ "code": code, "retryable": retryable }))))?;
                 return Err(e);
@@ -1005,6 +1013,9 @@ impl Service {
             };
             if let (Some(e), false, false) = (&rejected, state_failed, controlled) {
                 let code = stable_failure(e, "operation-failed");
+                if code == super::UNSAFE_OWNED_PATH_RESULT {
+                    super::log_line(format!("[CONVERTER] UNSAFE_OWNED_PATH job {} failed: {}", rt2.manifest().id(), e.detail.as_deref().unwrap_or(super::DETAIL_NOT_RECORDED)));
+                }
                 let _ = me.update(&rt2, |_| Some(Patch::new().state(JobState::Failed).set("activeItemId", Value::Null).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", json!({ "code": code, "retryable": false }))));
             } else {
                 let _ = me.finalize(&rt2);
@@ -1662,8 +1673,15 @@ impl Service {
     pub fn fail_item(&self, rt: &Arc<Runtime>, item_id: &str, e: &Fail) -> SResult<()> {
         let retryable = e.retryable || Self::is_retryable_network(e);
         let code = stable_failure(e, "operation-failed");
-        // why an unsafe-owned-path refusal fired, shown as failure.detail in the snapshot (never stored)
-        super::set_failure_detail(rt.manifest().id(), item_id, e.detail.as_deref().filter(|_| code == super::UNSAFE_OWNED_PATH_RESULT));
+        // why an unsafe-owned-path refusal fired: logged with the clip's name,
+        // shown as failure.detail in the snapshot (never stored)
+        if code == super::UNSAFE_OWNED_PATH_RESULT {
+            let m = rt.manifest();
+            let rel = m.item(item_id).and_then(|i| i.str("relativePath").map(str::to_string)).unwrap_or_default();
+            super::note_clip_refusal(m.id(), item_id, &rel, e);
+        } else {
+            super::set_failure_detail(rt.manifest().id(), item_id, None);
+        }
         if e.code.is_none() {
             eprintln!("[CONVERTER] Unexpected clip failure: {e:?}");
         }

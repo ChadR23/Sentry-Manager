@@ -241,7 +241,29 @@ function setDisabled(element, disabled) {
     if (element) element.disabled = Boolean(disabled);
 }
 
-function createRow(container, primary, secondary = '') {
+// Why a clip was refused (failure.detail of an unsafe-owned-path failure),
+// in plain words, with the server's own words kept for a report. The checks
+// guard the original footage: a file that is not exactly the one the
+// converter made or recorded is never removed or replaced.
+const REFUSAL_REASONS = [
+    [/^not known/i, 'refusalNotKnown', 'The reason is not known: this clip failed before the server last restarted. Run it again (Retry failed, or a new Encoder job if Retry failed is refused) and the reason shows here and in the server log.'],
+    [/nlink \d+ != 1/, 'refusalHardLink', 'The file has a second name (a hard link, often left by a backup or deduplication), so it was not touched.'],
+    [/realpath|linked folder|symlink/i, 'refusalLinkedFolder', 'Its folder is reached through a linked folder (a symlink), so it was not touched.'],
+    [/outside/i, 'refusalOutside', 'The file is outside the folder chosen for this conversion, so it was not touched.'],
+    [/not a regular file/i, 'refusalNotFile', 'It is not a plain file, so it was not touched.'],
+    [/\b(dev|ino) \S+ != /, 'refusalReplaced', 'Something else replaced or moved the file while it was being converted, so it was not touched.'],
+    [/\bsize \S+ != |sha256|changed/i, 'refusalChanged', 'The file changed while it was being converted, so it was not touched.'],
+];
+
+function refusalWhy(failure, message = (_key, fallback) => fallback) {
+    const detail = typeof failure?.detail === 'string' ? failure.detail.trim() : '';
+    if (!detail) return null;
+    const hit = REFUSAL_REASONS.find(([pattern]) => pattern.test(detail));
+    const plain = hit ? message(hit[1], hit[2]) : message('refusalOther', 'A safety check on the file did not pass, so it was not touched.');
+    return { plain, detail: hit?.[1] === 'refusalNotKnown' ? '' : detail };
+}
+
+function createRow(container, primary, secondary = '', why = null) {
     const documentApi = container?.ownerDocument;
     if (!container || !documentApi?.createElement) return null;
     const row = documentApi.createElement('div');
@@ -249,12 +271,26 @@ function createRow(container, primary, secondary = '') {
     const label = documentApi.createElement('span');
     label.classList.add('converter-row-primary');
     label.textContent = primary;
+    label.title = primary;
     row.append(label);
     if (secondary) {
         const detail = documentApi.createElement('span');
         detail.classList.add('converter-row-secondary');
         detail.textContent = secondary;
         row.append(detail);
+    }
+    if (why?.plain) {
+        const box = documentApi.createElement('span');
+        box.classList.add('converter-row-why');
+        box.textContent = why.plain;
+        if (why.detail) {
+            const raw = documentApi.createElement('small');
+            raw.classList.add('converter-row-why-detail');
+            raw.textContent = why.detail;
+            box.append(raw);
+            row.title = why.detail;
+        }
+        row.append(box);
     }
     return row;
 }
@@ -265,7 +301,7 @@ const heldRows = new Map();
 
 function renderRows(container, rows) {
     if (!container) return;
-    const text = rows.map(([primary, secondary]) => `${primary}${secondary ? ` — ${secondary}` : ''}`).join('\n');
+    const text = rows.map(([primary, secondary, why]) => `${primary}${secondary ? ` — ${secondary}` : ''}${why?.plain ? ` — ${why.plain} ${why.detail || ''}` : ''}`).join('\n');
     watchHighlights(container.ownerDocument);
     if (highlighted(container)) {
         heldRows.set(container, rows);
@@ -275,7 +311,7 @@ function renderRows(container, rows) {
     if (container.dataset && container.dataset.rendered === text) return;
     if (typeof container.replaceChildren === 'function') {
         const top = container.scrollTop;
-        container.replaceChildren(...rows.map(([primary, secondary]) => createRow(container, primary, secondary)).filter(Boolean));
+        container.replaceChildren(...rows.map(([primary, secondary, why]) => createRow(container, primary, secondary, why)).filter(Boolean));
         if (top) container.scrollTop = top;
     } else {
         container.textContent = text;
@@ -1351,7 +1387,7 @@ function createFootageConverterController(options = {}) {
                 file: message(cleanupPendingCount === 1 ? 'cleanupFileSingular' : 'cleanupFilePlural', cleanupPendingCount === 1 ? 'file' : 'files')
             }));
         }
-        renderRows(elements.errorRows, failedItems.map((item) => [item.relativePath || item.id, item.failure?.code || 'operation-failed']));
+        renderRows(elements.errorRows, failedItems.map((item) => [item.relativePath || item.id, item.failure?.code || 'operation-failed', refusalWhy(item.failure, message)]));
         setHidden(elements.errorRows, failedItems.length === 0);
         // clips kept off their size target (the option under Compression profile)
         const offTargetItems = items.filter((item) => item.state === 'completed' && item.offTarget);
@@ -2408,5 +2444,6 @@ export {
     createFootageConverterController,
     createSidebarPanelSwitcher,
     formatBytes,
-    initFootageConverter
+    initFootageConverter,
+    refusalWhy
 };
