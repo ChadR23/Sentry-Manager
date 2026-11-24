@@ -7,12 +7,12 @@
 
 use super::owned::errno_code;
 use super::tesla_sei::sha256_hex;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 
 pub const SNAPSHOT_PREFIX: &str = "sentry-six-verification-";
 
@@ -78,6 +78,7 @@ pub struct Snapshot {
     trusted: bool,
     cleaned: bool,
     pub transferred: bool,
+    registry: Weak<Mutex<HashMap<String, Artifact>>>,
 }
 
 fn mkdtemp(root: &Path, prefix: &str) -> io::Result<PathBuf> {
@@ -125,7 +126,7 @@ impl Snapshot {
             let _ = remove_snapshot_file(&dir, &path);
             return Err(e);
         }
-        Ok(Snapshot { dir, path, token, size, sha256: sha256.to_string(), trusted, cleaned: false, transferred: false })
+        Ok(Snapshot { dir, path, token, size, sha256: sha256.to_string(), trusted, cleaned: false, transferred: false, registry: Weak::new() })
     }
 
     /// read(): the persisted bytes, checked against size and digest.
@@ -146,7 +147,14 @@ impl Snapshot {
         }
         remove_snapshot_file(&self.dir, &self.path)?;
         self.cleaned = true;
+        self.forget_registration();
         Ok(())
+    }
+
+    fn forget_registration(&self) {
+        if let Some(live) = self.registry.upgrade() {
+            live.lock().unwrap().remove(&self.token);
+        }
     }
 
     /// transfer(): the snapshot becomes the publication artifact.
@@ -167,6 +175,16 @@ impl Snapshot {
     }
 }
 
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        // Failed/abandoned verification grants no publication capability. A transferred
+        // snapshot stays live until publication consumes it, even after this handle ends.
+        if !self.transferred {
+            self.forget_registration();
+        }
+    }
+}
+
 /// What publication receives of a verified snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Artifact {
@@ -179,8 +197,7 @@ pub struct Artifact {
 /// createVerificationSnapshotRegistry
 pub struct Registry {
     pub temp_root: PathBuf,
-    live: Mutex<HashMap<String, Artifact>>,
-    consumed: Mutex<HashSet<String>>,
+    live: Arc<Mutex<HashMap<String, Artifact>>>,
 }
 
 fn resolve(p: &Path) -> PathBuf {
@@ -204,7 +221,7 @@ pub enum Validate<'a> {
 
 impl Registry {
     pub fn new(temp_root: PathBuf) -> Registry {
-        Registry { temp_root: resolve(&temp_root), live: Mutex::new(HashMap::new()), consumed: Mutex::new(HashSet::new()) }
+        Registry { temp_root: resolve(&temp_root), live: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     /// structurallyOwnedSnapshot
@@ -234,13 +251,23 @@ impl Registry {
             return Err(io::Error::new(io::ErrorKind::Other, "INVALID_PUBLICATION_ARTIFACT"));
         }
         self.live.lock().unwrap().insert(a.token.clone(), a);
+        s.registry = Arc::downgrade(&self.live);
         Ok(s)
     }
 
     /// A snapshot this process made earlier, known again (tests, and a
     /// runtime that hands over its own artifacts).
+    #[cfg(test)]
     pub fn insert_live(&self, a: Artifact) {
         self.live.lock().unwrap().insert(a.token.clone(), a);
+    }
+
+    /// Ownership cleanup can discard a transferred snapshot before publication consumes it.
+    pub(crate) fn forget(&self, a: &Artifact) {
+        let mut live = self.live.lock().unwrap();
+        if live.get(&a.token) == Some(a) {
+            live.remove(&a.token);
+        }
     }
 
     /// validate(artifact, { mode })
@@ -250,12 +277,12 @@ impl Registry {
         }
         match mode {
             Validate::Consume => {
-                let live = self.live.lock().unwrap();
-                let mut consumed = self.consumed.lock().unwrap();
-                if live.get(&a.token) != Some(a) || consumed.contains(&a.token) {
+                let mut live = self.live.lock().unwrap();
+                if live.get(&a.token) != Some(a) {
                     return false;
                 }
-                consumed.insert(a.token.clone());
+                // Removing the capability is the one-use guard; no tombstone per clip.
+                live.remove(&a.token);
                 true
             }
             Validate::Reconcile(persisted) => a == persisted,
@@ -266,6 +293,39 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finished_snapshots_release_registry_entries_without_allowing_reuse() {
+        let root = super::super::testutil::tempdir().unwrap();
+        let reg = Registry::new(root.path().to_path_buf());
+        let bytes = b"generated snapshot";
+        let sha = sha256_hex(bytes);
+        for consume in [false, true] {
+            for _ in 0..32 {
+                let mut s = reg.create(bytes, &sha, None, false).unwrap();
+                let a = Artifact { path: s.path.to_string_lossy().into(), token: s.token.clone(), sha256: sha.clone(), size: bytes.len() as u64 };
+                if consume {
+                    s.transfer().unwrap();
+                    let mut forged = a.clone();
+                    forged.sha256 = "0".repeat(64);
+                    assert!(!reg.validate(&forged, Validate::Consume));
+                    assert!(reg.validate(&a, Validate::Consume), "a forged request must not remove the real capability");
+                }
+                s.cleanup().unwrap();
+                assert!(!reg.validate(&a, Validate::Consume), "cleaned or consumed artifacts cannot be reused");
+                assert!(reg.live.lock().unwrap().is_empty(), "completed verification must release its registry entry");
+            }
+        }
+        for transfer in [false, true] {
+            let mut s = reg.create(bytes, &sha, None, false).unwrap();
+            let a = Artifact { path: s.path.to_string_lossy().into(), token: s.token.clone(), sha256: sha.clone(), size: bytes.len() as u64 };
+            if transfer { s.transfer().unwrap(); }
+            drop(s);
+            assert_eq!(reg.validate(&a, Validate::Consume), transfer, "only transferred capabilities outlive the verification handle");
+            assert!(!reg.validate(&a, Validate::Consume));
+            assert!(reg.live.lock().unwrap().is_empty());
+        }
+    }
 
     #[test]
     fn snapshot_lifecycle_and_registry() {

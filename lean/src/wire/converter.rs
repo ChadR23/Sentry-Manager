@@ -171,7 +171,10 @@ fn vehicle_of(srv: &Server, src: &str) -> Option<crate::footage::vehicles::Vehic
 
 /// index.js slimJob: a job as kept, its counts without its clip list
 fn slim(s: &Value) -> Value {
-    let mut out = s.clone();
+    let Some(m) = s.as_object() else { return s.clone() };
+    let mut out = Value::Object(m.iter().map(|(k, v)| {
+        (k.clone(), if k == "items" && v.is_array() { json!([]) } else { v.clone() })
+    }).collect());
     if s["items"].as_array().is_some_and(|a| !a.is_empty()) {
         let (converted, skipped, failed) = counts(s);
         let (clips, _) = job_progress(s);
@@ -470,6 +473,55 @@ struct Stream {
     client: String,
 }
 
+// A slow browser reconnects and fetches current state instead of retaining the job's
+// history. Include the SSE/envelope overhead above the bridge's snapshot size limit.
+const EVENT_QUEUE_FRAMES: usize = 4;
+const MAX_EVENT_FRAME_BYTES: usize = crate::converter::ipc::MAX_SNAPSHOT_BYTES + 1024;
+
+fn event_queue() -> (crate::converter::ipc::Sink, tokio::sync::mpsc::Receiver<String>) {
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(EVENT_QUEUE_FRAMES);
+    let _ = tx.try_send("event: hello\ndata: {}\n\n".into());
+    let sender = Mutex::new(Some(tx));
+    (Box::new(move |text: &str| {
+        let mut sender = sender.lock().unwrap();
+        if text.len() <= MAX_EVENT_FRAME_BYTES && sender.as_ref().is_some_and(|tx| tx.try_send(text.to_string()).is_ok()) {
+            return true;
+        }
+        // Close even though the bridge's ping task may still hold this sink.
+        sender.take();
+        false
+    }), rx)
+}
+
+#[cfg(test)]
+mod event_queue_tests {
+    use super::*;
+
+    #[test]
+    fn slow_progress_client_is_disconnected_instead_of_queuing_forever() {
+        let (sink, mut rx) = event_queue();
+        assert_eq!(rx.try_recv().unwrap(), "event: hello\ndata: {}\n\n");
+        let mut refused = false;
+        for _ in 0..64 {
+            if !sink("event: converter:progress\ndata: {}\n\n") { refused = true; break; }
+        }
+        assert!(refused, "a stalled browser must not retain every update of a long job");
+        while rx.try_recv().is_ok() {}
+        assert_eq!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Disconnected));
+        assert!(!sink("later"), "an overflowed connection stays closed");
+        let (oversized, _large_rx) = event_queue();
+        assert!(!oversized(&"x".repeat(1024 * 1024)), "one oversized frame cannot bypass the queue's byte bound");
+        let (fast, mut rx) = event_queue();
+        rx.try_recv().unwrap();
+        for _ in 0..1000 {
+            assert!(fast("progress"));
+            assert_eq!(rx.try_recv().unwrap(), "progress");
+        }
+        drop(rx);
+        assert!(!fast("closed"));
+    }
+}
+
 impl Drop for Stream {
     fn drop(&mut self) {
         self.conv.bridge.detach(&self.client);
@@ -489,9 +541,8 @@ pub async fn events(srv: Arc<Server>, a: ApiRaw) -> Res {
         *n += 1;
     }
     let client: String = a.ctx.query.get("client").map(|c| c.encode_utf16().take(64).collect::<Vec<u16>>()).map(|u| String::from_utf16_lossy(&u)).unwrap_or_default();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let _ = tx.send("event: hello\ndata: {}\n\n".into());
-    conv.bridge.attach_events(&client, Box::new(move |text: &str| tx.send(text.to_string()).is_ok()));
+    let (sink, rx) = event_queue();
+    conv.bridge.attach_events(&client, sink);
     let guard = Stream { conv, client };
     // (the stream ends when the page goes: the receiver is dropped, the bridge forgets the client)
     let body = futures_util::stream::unfold((rx, guard), |(mut rx, guard)| async move {

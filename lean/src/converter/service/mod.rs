@@ -23,6 +23,8 @@ pub mod lanes_tests;
 mod node_tests;
 #[cfg(test)]
 mod refusal_tests;
+#[cfg(test)]
+mod memory_tests;
 
 pub use encode::{parse_progress_line, Progress};
 pub(crate) use encode::EncodeRequest;
@@ -486,6 +488,7 @@ pub struct RtState {
     pub last_progress: Option<Value>,
     pub suppress_launch: bool,
     pub snapshot_pending: bool,
+    pub snapshot_dirty: bool,
     pub workers: Vec<std::thread::JoinHandle<SResult<()>>>,
     pub release_recovery: Option<bool>,
     /// workers per lane (None: the default lane of a job without lanes): (live, retiring)
@@ -545,6 +548,7 @@ impl Runtime {
                 last_progress: None,
                 suppress_launch: false,
                 snapshot_pending: false,
+                snapshot_dirty: false,
                 workers: vec![],
                 release_recovery: None,
                 lane_counters: HashMap::new(),
@@ -738,6 +742,7 @@ impl Service {
         }
         {
             let mut s = rt.lock();
+            s.snapshot_dirty = true;
             if s.snapshot_pending {
                 return;
             }
@@ -746,12 +751,23 @@ impl Service {
         let me = self.clone();
         let rt = rt.clone();
         let ms = self.0.o.snapshot_interval_ms;
-        std::thread::spawn(move || {
+        // Keep one delivery worker for the running job. Full snapshots allocated on
+        // short-lived threads otherwise leave large free heaps in many glibc arenas.
+        // Keep the pending guard through delivery, and coalesce updates made meanwhile.
+        std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_millis(ms));
-            rt.lock().snapshot_pending = false;
-            if me.has_listeners() {
-                let snap = public_snapshot(&rt.manifest());
-                me.emit(&rt, "snapshot", vec![("snapshot", snap)]);
+            let dirty = {
+                let mut s = rt.lock();
+                std::mem::take(&mut s.snapshot_dirty)
+            };
+            if dirty && me.has_listeners() {
+                // Drop the full copy before waiting for another update.
+                me.emit(&rt, "snapshot", vec![("snapshot", public_snapshot(&rt.manifest()))]);
+            }
+            let mut s = rt.lock();
+            if !s.running && !s.snapshot_dirty {
+                s.snapshot_pending = false;
+                break;
             }
         });
     }
@@ -1016,7 +1032,8 @@ impl Service {
             (m.id().to_string(), summary_of(&m))
         }).collect();
         let mut out = Vec::new();
-        for s in self.0.o.store.summaries().map_err(Fail::from)? {
+        let known = live.iter().cloned().collect();
+        for s in self.0.o.store.summaries_with_live(&known).map_err(Fail::from)? {
             let id = s["id"].as_str().unwrap_or("").to_string();
             if let Some(i) = live.iter().position(|(l, _)| *l == id) {
                 out.push(live.remove(i).1);

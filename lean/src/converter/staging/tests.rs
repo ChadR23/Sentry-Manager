@@ -11,6 +11,14 @@ use std::sync::Arc;
 const JOB: &str = "job-1";
 const ITEM: &str = "item-000001";
 
+#[test]
+fn memory_bound_cleaned_publication_releases_its_capability() {
+    let e = setup("cleaned-capability");
+    assert!(e.tx.cleanup_publication(Some(&e.artifact), None).unwrap());
+    assert!(!Path::new(&e.artifact.path).exists());
+    assert!(!e.registry.validate(&e.artifact, crate::converter::snapshot::Validate::Consume), "cleanup before publication must release the live capability too");
+}
+
 fn sha(b: &[u8]) -> String {
     crate::converter::tesla_sei::sha256_hex(b)
 }

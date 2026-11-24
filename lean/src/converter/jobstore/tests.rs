@@ -43,6 +43,27 @@ fn quiet(root: &Path) -> JobStore {
     JobStore::new(root).unwrap().with_unreadable(Box::new(|_, _| {}))
 }
 
+#[test]
+fn live_summaries_do_not_read_or_replay_the_live_job_on_each_poll() {
+    let root = tmp("live-summaries");
+    let store = quiet(&root);
+    let live = store.create(&initial("job-a", (0..10).map(clip).collect())).unwrap();
+    store.create(&initial("job-b", vec![clip(0)])).unwrap();
+    let summary = summarize(&live);
+    // A live service already has the accepted manifest. Listing must not try to
+    // replay this disk copy just to replace its answer with that live summary.
+    let manifest = root.join("job-a/job.json");
+    fs::write(&manifest, b"unreadable stored manifest").unwrap();
+    let out = store.summaries_with_live(&HashMap::from([("job-a".into(), summary.clone())])).unwrap();
+    assert_eq!(out.len(), 2, "live jobs use memory, inactive jobs still use the store");
+    assert_eq!(*out[0], summary);
+    assert_eq!(out[1]["id"], "job-b");
+    assert_eq!(fs::read(&manifest).unwrap(), b"unreadable stored manifest", "a status poll must not replay or quarantine the live job");
+    // Without a live override, normal validation/quarantine is unchanged.
+    assert_eq!(store.summaries().unwrap().len(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn changed(item: &Arc<Item>, changes: Value) -> ItemIn {
     let mut m = item.to_map();
     for (k, v) in changes.as_object().unwrap() {

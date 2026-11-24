@@ -956,9 +956,20 @@ impl JobStore {
 
     /// summaries(): every job without its clip list, the clip results counted.
     pub fn summaries(&self) -> R<Vec<Arc<Value>>> {
+        self.summaries_with_live(&HashMap::new())
+    }
+
+    /// The service already has live jobs' accepted state. Do not parse their full
+    /// manifests and replay journals on a polling thread just to discard the answer.
+    /// Inactive jobs keep the normal disk validation and summary cache, in folder order.
+    pub fn summaries_with_live(&self, live: &HashMap<String, Value>) -> R<Vec<Arc<Value>>> {
         let names = self.job_folders()?;
         let mut out = Vec::new();
         for name in &names {
+            if let Some(summary) = live.get(name) {
+                out.push(Arc::new(summary.clone()));
+                continue;
+            }
             let r = (|| -> R<Option<Arc<Value>>> {
                 let stamp = self.stamp_of(name)?;
                 if let Some((s, v)) = self.summary_cache.lock().unwrap().get(name) {

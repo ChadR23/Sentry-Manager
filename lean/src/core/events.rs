@@ -12,10 +12,11 @@ use tokio::sync::mpsc;
 pub const MAX_EVENT_CLIENTS: usize = 200;
 pub const BATCH_MS: u64 = 400;
 pub const PING_MS: u64 = 20_000;
+const QUEUED_CHANGES: usize = 64;
 
 #[derive(Default)]
 struct Inner {
-    clients: Vec<(u64, mpsc::UnboundedSender<Bytes>)>,
+    clients: Vec<(u64, mpsc::Sender<Bytes>)>,
     next: u64,
     pending: IndexSet<String>,
     timer: bool,
@@ -30,7 +31,7 @@ pub struct Hub {
 pub struct Subscription {
     hub: Arc<Hub>,
     id: u64,
-    pub rx: mpsc::UnboundedReceiver<Bytes>,
+    pub rx: mpsc::Receiver<Bytes>,
 }
 
 impl Drop for Subscription {
@@ -58,7 +59,7 @@ impl Hub {
         if i.clients.len() >= MAX_EVENT_CLIENTS {
             return None;
         }
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(QUEUED_CHANGES);
         i.next += 1;
         let id = i.next;
         i.clients.push((id, tx));
@@ -99,7 +100,9 @@ impl Hub {
             return;
         }
         let frame = Bytes::from(changed_frame(&topics));
-        i.clients.retain(|(_, tx)| tx.send(frame.clone()).is_ok());
+        // A stalled client reconnects for current state, rather than retaining every
+        // inventory/job change for the rest of a long conversion.
+        i.clients.retain(|(_, tx)| tx.try_send(frame.clone()).is_ok());
     }
 
     /// Server shutting down: every stream ends.
@@ -125,6 +128,19 @@ pub fn stream_body(sub: Subscription) -> axum::body::Body {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn memory_bound_slow_change_client_does_not_retain_job_history() {
+        let hub = Hub::new();
+        let _slow = hub.subscribe().unwrap();
+        let mut fast = hub.subscribe().unwrap();
+        for _ in 0..128 {
+            hub.announce("inventory");
+            hub.flush();
+            assert_eq!(&fast.rx.try_recv().unwrap()[..], b"event: changed\ndata: {\"topics\":[\"inventory\"]}\n\n");
+        }
+        assert_eq!(hub.clients(), 1, "the slow client must be disconnected; the draining client stays connected");
+    }
 
     #[tokio::test(start_paused = true)]
     async fn batches_within_400ms() {

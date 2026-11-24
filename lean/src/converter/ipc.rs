@@ -259,7 +259,8 @@ pub fn sanitize_snapshot(snapshot: &Value) -> R<Value> {
             add(i, &mut selected);
         }
         selected.sort_unstable();
-        let mut prepared = m.clone();
+        // Do not clone the whole clip list just to replace it with the selected rows.
+        let mut prepared: Map<String, Value> = m.iter().filter(|(k, _)| k.as_str() != "items").map(|(k, v)| (k.clone(), v.clone())).collect();
         prepared.insert("items".into(), Value::Array(selected.iter().map(|n| items[*n].clone()).collect()));
         prepared.insert("itemCount".into(), json!(count));
         prepared.insert("itemStateCounts".into(), Value::Object(state_counts.clone()));

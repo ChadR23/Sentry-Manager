@@ -1330,7 +1330,10 @@ impl Tx {
             return Err(txe("INVALID_PUBLICATION_ARTIFACT"));
         }
         match self.remove_private_snapshot(a, m) {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                self.registry.forget(a);
+                Ok(true)
+            }
             Err(e) if e.tx && e.code == "OWNED_CLEANUP_FAILED" => Ok(false),
             Err(e) => Err(e),
         }
