@@ -197,6 +197,12 @@ impl EncodeRequest<'_> {
         args.push(r.source.into());
         args.extend(encode_args);
         if let Some((start, end)) = r.window {
+            // Preview comparisons require the source's exact VFR presentation times,
+            // including non-reordered CPU and hardware encoders. Whole clips keep
+            // their existing planner policy; Smallest already sets this option.
+            if !args.iter().any(|a| a == "-enc_time_base") {
+                args.extend(["-enc_time_base".into(), "demux".into()]);
+            }
             args.extend(["-t".into(), format!("{}us", end - start)]);
         }
         for a in ["-an", "-sn", "-dn", "-progress", "pipe:1", "-nostats", "-f", "mp4"] {
@@ -610,6 +616,28 @@ impl Service {
 mod tests {
     use super::*;
     use crate::converter::{planner::{Selected, Smallest}, runtime::{Converter, RuntimeOptions}, testutil::tempdir};
+
+    #[test]
+    fn windowed_encoders_keep_demux_time_base() {
+        for (family, codec) in [("h265", "libx265"), ("h265", "hevc_nvenc"), ("h265", "hevc_qsv"),
+            ("h265", "hevc_vaapi"), ("h265", "hevc_amf"), ("h265", "hevc_videotoolbox"),
+            ("av1", "libsvtav1"), ("av1", "libaom-av1"), ("av1", "av1_nvenc"), ("av1", "av1_qsv"),
+            ("av1", "av1_amf"), ("av1", "av1_vaapi"), ("av1", "av1_videotoolbox")] {
+            let encoder = Selected { family: family.into(), codec: codec.into(), hardware: !codec.starts_with("lib"),
+                remote: false, timed_out: false, device: None };
+            for (smallest, keep_order) in [(None, false), (Some(Smallest::default()), false), (Some(Smallest::default()), true)] {
+                if smallest.is_some() && codec != "libx265" { continue; }
+                let mut request = EncodeRequest { source: "source.mp4", target: "preview.mp4", codec: family, encoder: &encoder,
+                    bitrate: Some(200_000.0), quality: None, duration_us: Some(6_000_000), window: Some((2_000_000, 8_000_000)),
+                    hold_frames: 0, smallest, keep_order, decode: None, lane_id: None };
+                let args = request.local_args().unwrap();
+                assert_eq!(args.windows(2).filter(|w| *w == ["-enc_time_base", "demux"]).count(), 1, "{codec}, smallest={smallest:?}, keep_order={keep_order}");
+                request.window = None;
+                let full = request.local_args().unwrap();
+                assert_eq!(full.iter().any(|a| a == "-enc_time_base"), smallest.is_some() && !keep_order, "production arguments stay unchanged");
+            }
+        }
+    }
 
     #[test]
     fn segment_encode_is_bounded() {

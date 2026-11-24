@@ -260,6 +260,80 @@ mod tests {
         serde_json::from_slice(&r.stdout).unwrap()
     }
 
+    fn vfr_fixture(root: &Path, rate: u32) -> PreviewClip {
+        let source = root.join("vfr.mp4");
+        let generated = Command::new("ffmpeg").args(["-v", "error", "-nostdin", "-f", "lavfi", "-i",
+            &format!("testsrc2=size=320x240:rate={rate}:duration=12"),
+            "-vf", &format!("settb=1/10000,setpts=N*10000/{rate}+20*sin(N*1.7)"),
+            "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast", "-crf", "18",
+            "-fps_mode", "passthrough", "-enc_time_base", "1/10000",
+            "-video_track_timescale", "10000", "-g", &(rate * 2).to_string(), "-bf", "0"])
+            .arg(&source).output().unwrap();
+        assert!(generated.status.success(), "{}", String::from_utf8_lossy(&generated.stderr));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frames = frames::probe("ffprobe", &source, false, &cancel).unwrap();
+        assert!(frames.times.windows(3).any(|w| w[2] - w[1] != w[1] - w[0]), "fixture must be VFR");
+        PreviewClip { source, center_ms: 7500, kind: "saved", event_id: "synthetic-vfr".into(), when: "2026-01-01T00:00:00Z".into() }
+    }
+
+    #[test]
+    fn preview_preserves_vfr_at_24_and_36_fps() {
+        for rate in [24, 36] {
+            let dir = tempdir().unwrap();
+            let clip = vfr_fixture(dir.path(), rate);
+            let cancel = Arc::new(AtomicBool::new(false));
+            let results = run_preview(&clip, &levels(), &dir.path().join("work"), &cancel, &|_| {})
+                .unwrap_or_else(|e| panic!("{rate} fps VFR preview: {e}"));
+            let original = frames::probe("ffprobe", &results[0].frame.with_extension("mp4"), false, &cancel).unwrap();
+            for result in &results[1..] {
+                let output = frames::probe("ffprobe", &result.frame.with_extension("mp4"), false, &cancel).unwrap();
+                output.matches(&original.times, original.width, original.height).unwrap();
+            }
+        }
+    }
+
+    /// Diagnostic only: records the unchanged whole-clip path's timing and verdict.
+    #[test]
+    #[ignore = "manual production VFR investigation; no hardware qualification"]
+    fn production_vfr_timing_diagnostic() {
+        for rate in [24, 36] {
+            let dir = tempdir().unwrap();
+            let clip = vfr_fixture(dir.path(), rate);
+            let cancel = Arc::new(AtomicBool::new(false));
+            let tools = RealTools::new("ffmpeg", "ffprobe", Arc::new(Registry::new(dir.path().to_path_buf())));
+            let src = clip.source.to_str().unwrap();
+            let inspected = tools.inspect_video(src, &cancel).unwrap();
+            let timeline = tools.read_timeline(src, &cancel).unwrap();
+            let original = frames::probe("ffprobe", &clip.source, false, &cancel).unwrap();
+            let header = Command::new("ffprobe").args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate,avg_frame_rate,time_base", "-of", "json", src]).output().unwrap();
+            eprintln!("fixture {rate}: {}", String::from_utf8_lossy(&header.stdout));
+            for profile in ["balanced", "aggressive"] {
+                let plan = initial_plan(&json!({"codec":"h265", "profileId":profile, "keepOffTarget":true}), fs::metadata(src).unwrap().len(), &inspected, &timeline,
+                    tools.select_cpu_fallback("h265").unwrap(), vec![]).unwrap();
+                let target = dir.path().join(format!("{profile}.mp4"));
+                let args = EncodeRequest { source:src, target:target.to_str().unwrap(), codec:&plan.codec, encoder:&plan.selected,
+                    bitrate:plan.bitrate, quality:plan.quality.as_deref(), duration_us:plan.duration_us, window:None,
+                    hold_frames:plan.hold_frames, smallest:plan.smallest, keep_order:plan.keep_order, decode:None, lane_id:None }.local_args().unwrap();
+                eprintln!("{rate} {profile} args: {args:?}");
+                command("ffmpeg", &args, &cancel).unwrap();
+                tools.write_telemetry(&plan.codec, target.to_str().unwrap(), &timeline, &cancel).unwrap();
+                let output = frames::probe("ffprobe", &target, false, &cancel).unwrap();
+                let off = output.times.iter().zip(&original.times).filter(|(a,b)| a.abs_diff(**b) > 2).count();
+                eprintln!("{rate} {profile}: source_frames={}, output_frames={}, timestamps_off_by_more_than_2us={off}; first source={:?}, output={:?}", original.times.len(), output.times.len(), &original.times[..6], &output.times[..6]);
+                for mode in ["quick", "full"] {
+                    let registry = Registry::new(dir.path().to_path_buf());
+                    let verdict = verifier::verify_candidate(&verifier::VerifyOptions { source:clip.source.clone(), candidate:target.clone(), codec:super::super::adapters::Codec::H265,
+                        profile_id:profile.into(), verify_mode:Some(mode.into()), keep_off_target:true, allow_larger:false, trusted_snapshot:false,
+                        adopt_candidate:false, decode_accel:vec![], source_duration_us:plan.duration_us.map(|d| d as f64), source_timeline:Some(&timeline),
+                        ffprobe_path:"ffprobe".into(), ffmpeg_path:"ffmpeg".into(), run_ffprobe:&tools.runner, run_full_decode:&tools.runner,
+                        registry:&registry, on_decode_accel_fallback:None, cancel:Some(cancel.clone()) });
+                    eprintln!("{rate} {profile} {mode}: {}", verdict.to_json());
+                    assert_ne!(verdict.reason, Some("snapshot-failed"), "diagnostic snapshot setup");
+                }
+            }
+        }
+    }
+
     #[test]
     fn preview_measures_each_level() {
         let dir = tempdir().unwrap();
