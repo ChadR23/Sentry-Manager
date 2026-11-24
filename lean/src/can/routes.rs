@@ -604,12 +604,13 @@ impl Can {
         rec
     }
     /// A copy of a log deleted here on purpose, sent again (either half here). Deleted by the
-    /// owner (by name, or with its footage), or older than all the footage its car keeps (see
+    /// owner (by name, or with its footage), by a rule for good (not linked to footage, its
+    /// footage deleted for good), or older than all the footage its car keeps (see
     /// CanLogs::buried_older): judged as any log (SHA-256, signature, chain), the result kept
     /// on its tombstone, and the copy deleted again (never indexed: CanTrust::usable). Deleted
-    /// by an automatic rule and inside the footage kept: kept as a new log (its tombstone goes;
-    /// None: judged as usual). While the footage is not known: judged, kept unindexed, and
-    /// decided by a later pass. (Another copy than the tombstone's never gets here: the upload
+    /// by a rule that goes by the footage kept ("old", "before-tombstones") and inside it: kept
+    /// as a new log (its tombstone goes; None: judged as usual). While the footage is not
+    /// known: judged, kept unindexed, and decided by a later pass. (Another copy than the tombstone's never gets here: the upload
     /// answers it 409 exists_different, see CanLogs::plan.)
     fn judge_buried(self: &Arc<Self>, key: &str, name: &str, tomb: &Value) -> Option<Value> {
         let here = self.logs.size_of(name);
@@ -641,7 +642,7 @@ impl Can {
                 if let Some((check, reason)) = self.trust.rebury(key, name, size, side.map(|sd| (sd, self.side_sha(key, name)))) {
                     self.logs.discard(name);
                     self.drop_log(key, name);
-                    self.ctx.log("info", &format!("CAN Bridge {}: {} ({}) was sent again: checked ({}{}) and deleted again", key, name, if self.trust.tombs(key, &[name.to_string()]).into_iter().next().flatten().as_ref().and_then(|t| t.get("why")).and_then(|w| w.as_str()).is_some_and(|w| super::logs::OWNER_WHYS.contains(&w)) { "deleted here by the owner" } else { "deleted here, older than the car's footage" }, check, reason.map(|r| format!(": {r}")).unwrap_or_default()));
+                    self.ctx.log("info", &format!("CAN Bridge {}: {} ({}) was sent again: checked ({}{}) and deleted again", key, name, CanLogs::buried_why(self.trust.tombs(key, &[name.to_string()]).into_iter().next().flatten().as_ref()), check, reason.map(|r| format!(": {r}")).unwrap_or_default()));
                     self.ctx.announce("can");
                 }
                 Some(rec)

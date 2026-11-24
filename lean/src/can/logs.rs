@@ -67,9 +67,17 @@ pub enum Kept {
 
 /// Why a tombstone's log was deleted, for the owner's own deletes: by name in the Nerd
 /// settings, or with its footage ("Also delete its CAN data"). Those are never asked for again
-/// whatever footage the car keeps; the automatic rules ("unlinked", "footage", "old",
-/// "before-tombstones") go by the footage kept.
+/// whatever footage the car keeps.
 pub const OWNER_WHYS: [&str; 2] = ["owner", "with-footage"];
+
+/// The automatic rules (*Keeping logs*) whose reason holds for good, so their logs are never
+/// asked for again either: "unlinked" (not linked to footage after N days: a copy sent again
+/// would be kept, linked to nothing, and deleted again N days later, every time) and "footage"
+/// (its footage deleted for good: that footage never comes back). The others go by the footage
+/// kept: "old" (older than all of it: delivered unless older footage is kept again, and then
+/// its log is wanted again) and "before-tombstones" (an older server's delete, its rule not
+/// known: it may have been one that goes by the footage).
+pub const FOR_GOOD_WHYS: [&str; 2] = ["unlinked", "footage"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Name {
@@ -239,6 +247,16 @@ impl CanLogs {
         self.footage.get().map_or(Kept::Nothing, |f| f(key))
     }
 
+    /// How a tombstone's log was deleted, for the server's log.
+    pub fn buried_why(tomb: Option<&Value>) -> &'static str {
+        match tomb.and_then(|t| t.get("why")).and_then(|w| w.as_str()) {
+            Some(w) if OWNER_WHYS.contains(&w) => "deleted here by the owner",
+            Some("unlinked") => "deleted here, not linked to footage",
+            Some("footage") => "deleted here, its footage deleted for good",
+            _ => "deleted here, older than the car's footage",
+        }
+    }
+
     /// Whether a deleted log that ended at `end` is older than all the footage its car keeps,
     /// with rule "old"'s margin (prune::MARGIN_MS: clip names are read in the car's time zone,
     /// which may be wrong or missing): None while that is not known.
@@ -252,9 +270,10 @@ impl CanLogs {
 
     /// Whether a tombstone's log counts as delivered for good (Some(true)), may be sent again
     /// (Some(false): its time still has footage), or is not known yet (None). The owner's own
-    /// deletes (OWNER_WHYS) count as delivered whatever footage is kept.
+    /// deletes (OWNER_WHYS) and the rules whose reason holds for good (FOR_GOOD_WHYS) count as
+    /// delivered whatever footage is kept.
     pub fn buried_older(tomb: &Value, kept: Kept) -> Option<bool> {
-        if tomb.get("why").and_then(|w| w.as_str()).is_some_and(|w| OWNER_WHYS.contains(&w)) {
+        if tomb.get("why").and_then(|w| w.as_str()).is_some_and(|w| OWNER_WHYS.contains(&w) || FOR_GOOD_WHYS.contains(&w)) {
             return Some(true);
         }
         let end = tomb.get("end").and_then(|x| x.as_f64()).unwrap_or(f64::INFINITY);
@@ -406,7 +425,8 @@ impl CanLogs {
     }
 
     /// The status entry of a name not here whose log was deleted here on purpose (None:
-    /// `missing`, send it). A log the owner deleted (by name or with its footage), or one older
+    /// `missing`, send it). A log the owner deleted (by name or with its footage), one a rule
+    /// deleted for good (not linked to footage, or its footage deleted for good), or one older
     /// than all the footage its car keeps (see `buried_older`), counts as delivered:
     /// `complete` with the size it had and the check it had (or its re-upload got, see
     /// `CanTrust::rebury`). Its sidecar answers the same with the sidecar's size, when known

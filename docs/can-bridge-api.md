@@ -405,30 +405,34 @@ chain and marked `lost`, never tombstoned.
 For a name with a tombstone and no file here, `status` answers:
 
 - **deleted by the owner** (by name in the Nerd settings, or with its
-  footage: "Also delete its CAN data"): never asked for again, whatever
-  footage the car keeps: `complete`, with the size it had (`received`,
-  `length` and `size`) and its `check`: `verified` counts as delivered (the
-  bridge may delete its copy); `failed` with its `check_reason` (the bridge
-  keeps it and lists it; only a *Resend all* sends it again, see below). A
-  check that was never made answers `missing`. Its sidecar answers the same,
-  with the sidecar's size (`missing` when its size is not known);
-- **deleted by an automatic rule** (*Keeping logs*: footage deleted for
-  good, older than the footage, not linked to footage; and the tombstones
-  worked out for logs deleted before this update, below): by the car's
-  **oldest footage kept** (its clips on the share in the footage index, and
-  its protected clips; not the Recycle Bin, which counts as deleted here; the
-  car is the one the key is chosen for, or the only car):
+  footage: "Also delete its CAN data"), or **by a rule whose reason holds
+  for good** (*Keeping logs*: not linked to footage after N days, or with its
+  footage deleted for good): never asked for again, whatever footage the car
+  keeps: `complete`, with the size it had (`received`, `length` and `size`)
+  and its `check`: `verified` counts as delivered (the bridge may delete its
+  copy); `failed` with its `check_reason` (the bridge keeps it and lists it;
+  only a *Resend all* sends it again, see below). A check that was never
+  made answers `missing`. Its sidecar answers the same, with the sidecar's
+  size (`missing` when its size is not known). (A log not linked to footage
+  that was sent again would be kept, still linked to nothing, and deleted
+  again by the same rule N days later, every time; footage deleted for good
+  never comes back. Before this version these went by the footage kept, as
+  below, and answered `missing` inside it);
+- **deleted by a rule that goes by the footage kept** (*Keeping logs*:
+  older than the car's oldest footage; and the tombstones worked out for
+  logs deleted before this update, below, whose rule is not known): by the
+  car's **oldest footage kept** (its clips on the share in the footage
+  index, and its protected clips; not the Recycle Bin, which counts as
+  deleted here; the car is the one the key is chosen for, or the only car):
   - the log ended **at least an hour before** the start of that oldest clip
     (the margin of the rule "older than the car's oldest footage": clip
     names are read in the car's time zone, which may be wrong or missing),
     or its car has no footage at all:
     `complete`, as above;
-  - otherwise, **inside** the footage kept (footage of its time may still
-    be here): `missing`, so the bridge may send it again. It is then stored
-    and checked as a new log, and its tombstone goes (a log deleted as not
-    linked to footage, or with footage deleted for good in the middle of
-    what is kept, is such a log: a bridge that still has it sends it again,
-    and the same rule deletes it again later);
+  - otherwise, **inside** the footage kept (footage of its time may be kept
+    again, for example a clip restored from the Recycle Bin): `missing`, so
+    the bridge may send it again. It is then stored and checked as a new
+    log, and its tombstone goes;
   - while that cannot be told (the share away, a scan running or failed,
     the settings unreadable, or no car is the key's: not chosen with two or
     more cars, chosen for a car since removed, or no car to be seen at all,
@@ -728,8 +732,9 @@ logs with their footage" (Nerd settings, *Keeping logs*; on by default):
 - At most 500 logs a run (the rest a minute later), each deleted as a delete in
   the Nerd settings is (the file and sidecar, its minutes in the index, the
   sync, its trust record kept as deleted for the chain, and a tombstone so
-  the bridge is not asked for it again while it is older than the footage
-  kept: see "Logs deleted here"; a log already gone gets none), with one audit line a
+  the bridge is not asked for it again (a log not linked to footage or with
+  its footage deleted for good: never; one older than the footage: while it
+  is older than the footage kept): see "Logs deleted here"; a log already gone gets none), with one audit line a
   run ("CAN logs deleted (car …): N (… with their footage deleted, … older
   than the car's oldest footage, … not linked to footage after 7 days)").
 
