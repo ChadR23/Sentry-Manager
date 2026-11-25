@@ -89,7 +89,8 @@ impl Fail {
 
 impl From<CError> for Fail {
     fn from(e: CError) -> Fail {
-        Fail { code: if e.code.is_empty() { None } else { Some(e.code) }, ..Default::default() }
+        let detail=(e.code == "INVALID_H264").then(||match e.path {Some(p)=>format!("{p}: {}",e.message),None=>e.message});
+        Fail { code: if e.code.is_empty() { None } else { Some(e.code) }, detail, ..Default::default() }
     }
 }
 
@@ -1230,7 +1231,10 @@ impl Service {
     }
 
     fn queued_ids(m: &Manifest) -> Vec<String> {
-        m.items.iter().filter(|i| i.state() == ItemState::Queued).map(|i| i.id().to_string()).collect()
+        let (mut retries, normal):(Vec<_>,Vec<_>)=m.items.iter().filter(|i|i.state()==ItemState::Queued)
+            .partition(|i|i.str("resultCode")==Some("gpu-memory-retry"));
+        retries.extend(normal);
+        retries.into_iter().map(|i|i.id().to_string()).collect()
     }
 
     /// relaunch without waiting for the run
@@ -1309,7 +1313,7 @@ impl Service {
         self.mutate(|| {
             if self.speed_test_active() {return Err(service_error("SPEED_TEST_RUNNING"));}
             if self.preview_active() {return Err(service_error("JOB_ACTIVE"));}
-            let rt=self.live_runtime(id)?;
+            let rt=self.ensure_runtime(id)?;
             let m=rt.manifest();
             let paused=m.state()==JobState::Paused;
             {
@@ -1318,10 +1322,13 @@ impl Service {
                     return Err(service_error("RECOVERY_REQUIRED"));
                 }
                 if paused {
-                    if !s.pause_requested || s.preview_pause.is_some() || (s.running && (!s.producer_done || s.parked_workers<s.live_workers))
-                        || !s.in_flight.is_empty() || !s.children.is_empty() || s.commit_holder.is_some() {return Err(service_error("JOB_ACTIVE"));}
+                    let drained=if s.running {s.pause_requested && s.producer_done && s.parked_workers>=s.live_workers} else {s.live_workers==0};
+                    if !drained || s.preview_pause.is_some() || s.cancel_requested || s.stop_requested
+                        || !s.in_flight.is_empty() || !s.children.is_empty() || !s.encodes.is_empty() || s.commit_holder.is_some()
+                        || s.node_checks.values().any(|n|*n>0) {return Err(service_error("JOB_ACTIVE"));}
                 } else if s.running || !matches!(m.state(),JobState::Completed|JobState::Failed) {return Err(service_error("JOB_ACTIVE"));}
             }
+            let rt=self.live_runtime(id)?;
             let selected:Vec<String>=m.items.iter().filter(|i|temporary_retry(i.value())).map(|i|i.id().to_string()).collect();
             if selected.is_empty() {return Err(service_error("NO_FAILED_ITEMS"));}
             let selected_ids:std::collections::HashSet<String>=selected.iter().cloned().collect();
@@ -1340,7 +1347,7 @@ impl Service {
             })?;
             if paused {
                 let mut s=rt.lock();
-                for id in selected {if !s.queue.contains(&id) {s.queue.push_back(id);}}
+                for id in selected.into_iter().rev() {if !s.queue.contains(&id) {s.queue.push_front(id);}}
             } else {
                 {let mut s=rt.lock();s.queue.clear();s.queue_closed=false;s.producer_done=false;}
                 self.launch(&rt,false,Self::queued_ids(&rt.manifest()));

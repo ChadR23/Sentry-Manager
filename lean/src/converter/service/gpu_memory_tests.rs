@@ -67,15 +67,110 @@ fn gpu_memory_legacy_retry_keeps_pause_and_excludes_invalid_h264() {
         }).collect();
     let manifest=h.service().store().create(json!({"state":"paused","config":finished["config"],"discoveryComplete":true,"items":items}).as_object().unwrap()).unwrap();
     let id=manifest.id().to_string();
-    let rt=h.service().ensure_runtime(&id).unwrap();
-    rt.lock().pause_requested=true;
-    let original=h.service().get(&id).unwrap();
-    let queued=h.service().retry_temporary(&id).unwrap();
+    let mut options=h.service().0.o.clone();
+    options.store=Arc::new(JobStore::new(h.conv.jobs_root()).unwrap());
+    let restarted=Service::new(options);
+    assert!(restarted.runtime_of(&id).is_none());
+    let original=restarted.get(&id).unwrap();
+    let queued=restarted.retry_temporary(&id).unwrap();
     assert_eq!(queued["state"],"paused");
     assert_eq!(queued["items"][0]["state"],"queued");
     assert_eq!(queued["items"][0]["resultCode"],"gpu-memory-retry");
     assert_eq!(queued["items"][1],original["items"][1]);
+    assert!(!restarted.runtime_of(&id).unwrap().lock().running);
+    assert_eq!(public_snapshot(&restarted.store().load(&id).unwrap().unwrap()),queued);
     assert_eq!(h.spawned().len(),2,"the retry action never resumes the owner pause");
+}
+
+#[test]
+fn gpu_memory_retry_at_queue_tail_drains_busy_device_before_normal_work() {
+    let mut options = gpu_options(12); options.hold = true;
+    options.gpu_memory = Some(Arc::new(Gate::new(Arc::new(|_| None))));
+    let h = Harness::new(options);
+    let first = h.service().start(&gpu_config(&h, 3)).unwrap();
+    let done = h.finish_job(&first);
+    let mut items = done["items"].as_array().unwrap().clone();
+    for item in &mut items {
+        item["state"] = json!("queued"); item["attempts"] = json!(0); item["resultCode"] = Value::Null;
+    }
+    items.last_mut().unwrap()["resultCode"] = json!("gpu-memory-retry");
+    let retry_path = items.last().unwrap()["sourcePath"].as_str().unwrap().to_string();
+    let mut config=done["config"].clone();
+    fs::create_dir_all(h.dir.path().join("retry-out")).unwrap();
+    config["destinationRoot"]=json!(h.dir.path().join("retry-out"));
+    let m = h.service().store().create(json!({"state":"paused", "config":config, "discoveryComplete":true, "items":items}).as_object().unwrap()).unwrap();
+    let before = h.spawned().len();
+    h.service().resume(m.id()).unwrap();
+    assert!(until(|| !h.held().is_empty()));
+    // Let the retry finish its source inspection and register the serial
+    // turn before releasing normal children. A queued-at-tail retry cannot
+    // reach this barrier while the first normal children are held.
+    let device = super::super::devices::device_of(&t400());
+    assert!(until(|| h.service().0.o.gpu_memory.draining(&device)));
+    let mut normal = std::collections::HashSet::new();
+    loop {
+        let held = h.held();
+        if let Some(retry) = held.iter().find(|s| s.args.contains(&retry_path)) {
+            assert_eq!(held.len(), 1, "a memory retry must encode alone");
+            h.finish(retry);
+            break;
+        }
+        // finish() releases asynchronously; a child still visible in the
+        // next poll is the same admitted encode, not another normal start.
+        normal.extend(held.iter().map(|s| s.pid.clone()));
+        assert!(normal.len() <= 2, "a queued retry must run after at most the other already-admitted workers, not after the backlog");
+        for child in &held { h.finish(child); }
+        assert!(until(|| h.held().iter().any(|s| !held.iter().any(|old| old.pid == s.pid))));
+    }
+    let job = h.finish_job(m.id());
+    assert_eq!(h.spawned().len() - before, 12);
+    assert!(job["items"].as_array().unwrap().iter().all(|i| i["state"] == "completed"), "{job}");
+}
+
+#[test]
+fn gpu_memory_retry_refuses_activity_in_a_persisted_pause() {
+    let h = Harness::new(gpu_options(0));
+    let m = h.service().store().create(json!({"state":"paused", "config":gpu_config(&h,1), "items":[]}).as_object().unwrap()).unwrap();
+    let rt = h.service().ensure_runtime(m.id()).unwrap();
+    // Even an idle runtime must not hide active encode or node-check state.
+    for block in [0, 1, 2, 3, 4] {
+        { let mut s = rt.lock(); s.pause_requested = true;
+          match block { 0 => s.encodes.push(("clip".into(), json!({}))), 1 => {s.node_checks.insert("node".into(),1);},
+              2 => s.live_workers = 1, 3 => s.cancel_requested = true, _ => s.stop_requested = true }
+        }
+        assert_eq!(h.service().retry_temporary(m.id()).unwrap_err().code.as_deref(), Some("JOB_ACTIVE"), "block {block}");
+        { let mut s = rt.lock(); s.encodes.clear(); s.node_checks.clear(); s.live_workers = 0; s.cancel_requested = false; s.stop_requested = false; }
+    }
+}
+
+#[test]
+fn gpu_memory_waiting_retry_prevents_new_normal_encodes_until_it_runs_alone() {
+    let mut options = gpu_options(12); options.hold = true;
+    options.gpu_memory = Some(Arc::new(Gate::new(Arc::new(|_| None))));
+    let h = Harness::new(options);
+    let id = h.service().start(&gpu_config(&h, 3)).unwrap();
+    assert!(until(|| h.held().len() == 3));
+    let rt = h.service().ensure_runtime(&id).unwrap();
+    assert!(until(|| !rt.lock().queue.is_empty()));
+    let retry_id = rt.lock().queue.front().unwrap().clone();
+    h.service().item_patch(&rt, &retry_id, vec![("resultCode",Some(json!("gpu-memory-retry")))], vec![]).unwrap();
+    let initial = h.held();
+    h.finish(&initial[0]);
+    assert!(until(|| rt.lock().item(&retry_id).is_some_and(|i| i["attempts"] == 1)));
+    // The retry is now waiting behind two actual encode leases.
+    std::thread::sleep(Duration::from_millis(250));
+    h.finish(&initial[1]);
+    assert!(until(|| !h.held().iter().any(|s| s.pid == initial[1].pid)));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(h.spawned().len(), 3, "normal work must not refill the device while a serial retry drains it");
+    h.finish(&initial[2]);
+    assert!(until(|| h.spawned().len() == 4));
+    let held = h.held();
+    assert_eq!(held.len(), 1);
+    assert!(held[0].args.contains(&rt.lock().item(&retry_id).unwrap()["sourcePath"].as_str().unwrap().to_string()));
+    h.finish(&held[0]);
+    let job = h.finish_job(&id);
+    assert!(job["items"].as_array().unwrap().iter().all(|i| i["state"] == "completed"));
 }
 
 fn memory_benchmark(free_mib: u64, total_mib: u64) -> Value {

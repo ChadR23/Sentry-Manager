@@ -131,17 +131,17 @@ async function renderStatus(mount, ctx, initial, show) {
     retry.hidden = !(issues.temporary || issues.legacyGpu);
     retry.disabled = busy || (current && !['paused','completed','failed'].includes(current.state)) || Object.values(status.speedTests || {}).some((s) => s.phase === 'running');
     retry.title = current && !['paused','completed','failed'].includes(current.state) ? 'Pause shrinking before retrying these clips.' : '';
-    const nextKeptKey = `${current?.id || ''}:${JSON.stringify(current?.itemFailureCounts || current?.items?.filter((i) => i.state === 'failed'))}`;
+    const nextKeptKey = `${current?.id || ''}:${issues.tooShort}:${JSON.stringify(current?.itemFailureCounts || current?.items?.filter((i) => i.state === 'failed' || i.resultCode === 'too-short'))}`;
     if (nextKeptKey !== keptKey) { keptKey = nextKeptKey; keptRows = []; keptNext = 0; keptError = ''; }
     const byPath = new Map([...keptRows, ...(current?.items || [])].map((i) => [i.relativePath, i]));
     const shown = clipFailures({...current, items:[...byPath.values()]}).items;
-    mount.querySelector('[data-kept]').hidden = !issues.damaged;
+    mount.querySelector('[data-kept]').hidden = !issues.kept;
     update('[data-kept-summary]', esc(issues.keptText));
     update('[data-kept-explanation]', esc(issues.explanation));
     update('[data-kept-list]', shown.map((i) => `<li><span>${esc(i.relativePath)}</span><small>${esc(i.reason)}</small></li>`).join(''));
-    update('[data-kept-note]', esc(keptError || (shown.length < issues.damaged ? `Showing ${shown.length.toLocaleString()} of ${issues.damaged.toLocaleString()} kept ${statusNoun(issues.damaged, 'clip')}.` : '')));
+    update('[data-kept-note]', esc(keptError || (shown.length < issues.kept ? `Showing ${shown.length.toLocaleString()} of ${issues.kept.toLocaleString()} kept ${statusNoun(issues.kept, 'clip')}.` : '')));
     const more = mount.querySelector('[data-kept-more]');
-    more.hidden = shown.length >= issues.damaged || keptNext == null;
+    more.hidden = shown.length >= issues.kept || keptNext == null;
     more.disabled = keptLoading; more.textContent = keptLoading ? 'Loading clips…' : keptError ? 'Try listing clips again' : 'Show more clips';
     if (issues.attention) problems.push(issues.attentionText);
     for (const job of jobs.filter((j) => j.vehicleId === vehicle.id && ['conversion', 'convert'].includes(j.type) && j.status === 'failed')) {
@@ -167,9 +167,9 @@ async function renderStatus(mount, ctx, initial, show) {
     const key = keptKey;
     keptLoading = true; keptError = ''; draw();
     try {
-      const page = await invoke('failedClips', {jobId:job.id, offset:keptNext});
+      const page = await invoke('keptClips', {jobId:job.id, offset:keptNext});
       if (valid() && keptKey === key) {
-        keptRows.push(...page.items.map((i) => ({...i, state:'failed'})));
+        keptRows.push(...page.items);
         keptNext = page.nextOffset;
       }
     } catch (error) { if (valid() && keptKey === key) keptError = `Could not list the clips. ${errorText(error)}`; }

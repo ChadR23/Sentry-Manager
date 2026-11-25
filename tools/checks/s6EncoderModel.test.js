@@ -19,6 +19,21 @@ const groups = ['SavedClips', 'SentryClips', 'RecentClips'];
 const simple = { codec: 'h265', outputMode: 'replace', profileId: 'aggressive' };
 const choice = (patch = {}) => ({ ...structuredClone(model.DEFAULTS), ...patch });
 
+test('single-frame clips are listed as kept, without damage or a problem', () => {
+  const items = ['skipped', 'completed'].map((state, n) => ({state, resultCode:'too-short', relativePath:`RecentClips/stub-${n}.mp4`}));
+  for (const snapshot of [{items}, {items:items.slice(0,1), itemTooShortCount:301, itemStateCounts:{failed:0}}]) {
+    const result = model.clipFailures(snapshot);
+    assert.equal(result.attention, 0);
+    assert.equal(result.damaged, 0);
+    assert.equal(result.kept, snapshot.itemTooShortCount || 2);
+    assert.match(result.keptText, /kept as recorded/);
+    assert.match(result.explanation, /too short to shrink/);
+    assert.doesNotMatch(result.explanation, /damaged/);
+    assert.equal(result.items.length, snapshot.items.length);
+    assert.match(result.items[0].reason, /too short to shrink/i);
+  }
+});
+
 test('GPU memory retries and older GPU shortfalls are not described as damaged video', () => {
   const legacy = {state:'failed',encoder:'hevc_nvenc',resultCode:'frame-count-mismatch',failure:{code:'frame-count-mismatch',retryable:false}};
   const temporary = {state:'failed',encoder:'hevc_nvenc',resultCode:'gpu-memory-exhausted',failure:{code:'gpu-memory-exhausted',retryable:true}};

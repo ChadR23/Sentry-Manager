@@ -108,6 +108,11 @@ pub fn parse_video_probe(r: &ProcResult) -> CResult<Inspected> {
         Some("av1") => "av1",
         _ => return Err(fail()),
     };
+    // Recorder shutdown stubs can have no duration at all. They are kept,
+    // never submitted to an encoder; an unknown/zero frame count is not proof.
+    if codec == "h264" && stream.and_then(|s| s.get("nb_frames")).is_some_and(|v| v == "1" || v == 1) {
+        return Err(CError::code("SOURCE_TOO_SHORT"));
+    }
     // Number(stream.duration || format.duration)
     let pick = |v: Option<&Value>| -> Option<Value> { v.filter(|x| super::super::jobstore::normalize::truthy(x)).cloned() };
     let raw = pick(stream.and_then(|s| s.get("duration"))).or_else(|| pick(parsed.get("format").and_then(|f| f.get("duration"))));
@@ -123,7 +128,7 @@ pub fn parse_video_probe(r: &ProcResult) -> CResult<Inspected> {
 }
 
 pub fn probe_args(source: &str) -> Vec<String> {
-    ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,duration:format=duration", "-of", "json", source].iter().map(|s| s.to_string()).collect()
+    ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,duration,nb_frames:format=duration", "-of", "json", source].iter().map(|s| s.to_string()).collect()
 }
 
 /// createRecoveryInspector(manifest): the facts of the job's active clip.

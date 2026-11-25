@@ -16,13 +16,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-pub const CHANNELS: [&str; 29] = [
+pub const CHANNELS: [&str; 30] = [
     "converter:chooseFolder", "converter:start", "converter:getCurrent", "converter:pause", "converter:setConcurrency", "converter:resume", "converter:cancel", "converter:discard", "converter:retryFailed", "converter:dismissSummary",
     "converter:getCapabilities", "converter:subscribeProgress", "converter:unsubscribeProgress", "converter:runBenchmark", "converter:cancelBenchmark", "converter:getAuto", "converter:setAuto", "converter:checkAutoNow",
     "converter:saveVehicle", "converter:forgetVehicle", "converter:devices", "converter:setLanes",
     "converter:previewStart", "converter:previewGet", "converter:previewCancel",
     "converter:requestSpeedTest", "converter:applySpeedTest",
     "converter:failedClips",
+    "converter:keptClips",
     "converter:retryTemporary",
 ];
 const GROUPS: [&str; 3] = ["RecentClips", "SavedClips", "SentryClips"];
@@ -253,6 +254,7 @@ pub fn sanitize_snapshot(snapshot: &Value) -> R<Value> {
     let failure_counts = json!(failures.into_iter().map(|((code,result,retryable,encoder),count)|
         json!({"code":code,"resultCode":result,"retryable":retryable,"encoder":encoder,"count":count})).collect::<Vec<_>>());
     let gpu_retries=items.iter().filter(|i| (i["state"]=="queued" || i["state"]=="processing") && i["resultCode"]=="gpu-memory-retry").count();
+    let too_short=items.iter().filter(|i| (i["state"]=="skipped" || i["state"]=="completed") && i["resultCode"]=="too-short").count();
     let mut limit = 256usize;
     loop {
         let mut selected: Vec<usize> = Vec::new();
@@ -283,6 +285,7 @@ pub fn sanitize_snapshot(snapshot: &Value) -> R<Value> {
         prepared.insert("itemStateCounts".into(), Value::Object(state_counts.clone()));
         prepared.insert("itemFailureCounts".into(), failure_counts.clone());
         prepared.insert("itemGpuRetryCount".into(),json!(gpu_retries));
+        prepared.insert("itemTooShortCount".into(),json!(too_short));
         prepared.insert("cleanupPendingCount".into(), json!(cleanup_pending));
         prepared.insert("itemsTruncated".into(), json!(true));
         match bounded(&Value::Object(prepared), MAX_SNAPSHOT_BYTES, true, true) {
@@ -826,15 +829,20 @@ impl Bridge {
                 no_payload(p)?;
                 self.current_job()
             }
-            "failedClips" => {
+            "failedClips" | "keptClips" => {
                 let Some(m) = p.and_then(Value::as_object).filter(|m| m.len() == 2 && m.contains_key("jobId")) else { return fail("INVALID_REQUEST") };
                 let Some(offset) = m.get("offset").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()) else { return fail("INVALID_REQUEST") };
                 let job = self.service.get(&safe_job_id(m.get("jobId"))?)?;
-                let failed: Vec<&Value> = job["items"].as_array().into_iter().flatten().filter(|i| i["state"] == "failed").collect();
-                let items: Vec<Value> = failed.iter().skip(offset).take(100).map(|i| json!({
+                let failed: Vec<&Value> = job["items"].as_array().into_iter().flatten().filter(|i| i["state"] == "failed" ||
+                    (name == "keptClips" && (i["state"] == "skipped" || i["state"] == "completed") && i["resultCode"] == "too-short")).collect();
+                let items: Vec<Value> = failed.iter().skip(offset).take(100).map(|i| {
+                    let mut row=json!({
                     "relativePath":i["relativePath"],"resultCode":i["resultCode"],"encoder":i["encoder"],
                     "failure":{"code":i["failure"]["code"],"retryable":i["failure"]["retryable"]}
-                })).collect();
+                    });
+                    if name == "keptClips" {row["state"]=i["state"].clone();}
+                    row
+                }).collect();
                 let next = offset.saturating_add(items.len());
                 bounded(&json!({"total":failed.len(),"nextOffset":if next < failed.len() {Some(next)} else {None},"items":items}), MAX_SNAPSHOT_BYTES, true, true)
             }
@@ -1437,6 +1445,27 @@ mod tests {
         assert_eq!(groups.iter().find(|g| g["code"] == "invalid-h264").unwrap()["retryable"], false);
         assert_eq!(groups.iter().find(|g| g["code"] == "EIO").unwrap()["retryable"], true);
         assert_eq!(out["items"].as_array().unwrap().len(), 256);
+    }
+
+    #[test]
+    fn status_short_clips_are_counted_and_paginated_outside_the_snapshot_window() {
+        let (bridge, base, fake) = keep_recent_bridge("short-clips");
+        let items: Vec<Value> = (0..400).map(|i| json!({"state":if i < 300 {"skipped"} else {"completed"},
+            "relativePath":format!("RecentClips/stub-{i}.mp4"),"sourcePath":"/private/stub.mp4", "resultCode":if i < 300 {"too-short"} else {"converted"}})).collect();
+        let original = json!({"id":"job-1","state":"completed","items":items});
+        let snapshot = sanitize_snapshot(&original).unwrap();
+        assert_eq!(snapshot["itemTooShortCount"], 300);
+        assert_eq!(snapshot["itemStateCounts"]["failed"], 0);
+        fake.0.lock().unwrap().1.push(("job-1".into(),original.clone()));
+        let out = bridge.invoke("keptClips", Some(json!({"jobId":"job-1","offset":100})), None);
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["value"]["total"], 300);
+        assert_eq!(out["value"]["nextOffset"], 200);
+        assert_eq!(out["value"]["items"][0]["state"], "skipped");
+        assert!(out["value"]["items"][0].get("sourcePath").is_none());
+        assert_eq!(bridge.invoke("failedClips", Some(json!({"jobId":"job-1","offset":0})), None)["value"]["total"], 0);
+        assert_eq!(fake.get_("job-1").unwrap(), original);
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

@@ -115,10 +115,12 @@ pub(crate) fn initial_plan(
     let custom = profile_id == "custom";
     let quality: Option<String> = if profile_id == "quality" { config["qualityLevel"].as_str().map(str::to_string) } else { None };
     // Smallest (CPU only): libx265 here, peaks at 60% of this clip's own average
-    // bitrate. A clip given back the original's timing keeps its frame order.
+    // bitrate. A clip given back the original's timing, or one with tiny
+    // intervals that must survive exactly, keeps its frame order.
     let cpu_only = profile_id == contracts::SMALLEST_PROFILE_ID;
     let smallest = cpu_only.then(|| planner::Smallest { maxrate: contracts::smallest_maxrate(source_bytes as f64, inspected.duration_seconds) });
-    let keep_order = cpu_only && super::super::lead_in::source_timing_for(Some(&timeline.lead_in), Some(&timeline.undecodable)).is_some();
+    let keep_order = cpu_only && (super::super::lead_in::source_timing_for(Some(&timeline.lead_in), Some(&timeline.undecodable)).is_some()
+        || timeline.samples.iter().any(|s| s.duration_us > 0 && s.duration_us < 1_000));
     let no_target = !contracts::has_size_target(&profile_id);
     let target_bytes = if no_target { None } else { Some(contracts::target_output_bytes(source_bytes, &profile_id)) };
     let mut bitrate: Option<f64> = if quality.is_some() || cpu_only {
@@ -1146,6 +1148,7 @@ impl Service {
 
     fn keep_original_when_no_savings(&self, rt: &Arc<Runtime>, item: &Value, lane: Option<&lanes::Lane>) -> SResult<()> {
         match self.process_video(rt, item, lane) {
+            Err(e) if e.is("SOURCE_TOO_SHORT") => self.process_asset(rt, item, ("too-short", "too-short")),
             Err(e) if e.is("KEEP_ORIGINAL") && Self::ownership_for(rt, item["id"].as_str().unwrap()).map_or(true, |o| o.paths.is_empty()) => {
                 let current = rt.lock().item(item["id"].as_str().unwrap()).unwrap_or_else(|| item.clone());
                 self.process_asset(rt, &current, ("no-savings", "no-savings"))
@@ -1686,6 +1689,13 @@ impl Service {
     pub fn fail_item(&self, rt: &Arc<Runtime>, item_id: &str, e: &Fail) -> SResult<()> {
         let retryable = e.retryable || Self::is_retryable_network(e);
         let code = stable_failure(e, "operation-failed");
+        if code == "invalid-h264" {
+            if let Some(detail) = &e.detail {
+                let m = rt.manifest();
+                let relative = m.item(item_id).and_then(|i| i.str("relativePath")).unwrap_or("");
+                super::log_line(format!("[CONVERTER] INVALID_H264 clip {relative:?} ({} {item_id}) failed: {detail}", m.id()));
+            }
+        }
         // why an unsafe-owned-path or source-changed refusal fired: logged
         // with the clip's name, shown as failure.detail in the snapshot (never stored)
         if super::detailed_failure(&code).is_some() {

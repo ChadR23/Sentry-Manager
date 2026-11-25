@@ -704,10 +704,14 @@ fn read_source_authority(o: &VerifyOptions, sb: Option<u64>, ob: Option<u64>) ->
     if Some(bytes.len() as u64) != sb {
         return Err(failure(R::SOURCE_CHANGED, sb, ob, json!({ "statBytes": sb, "readBytes": bytes.len() })));
     }
-    let invalid = || failure(R::SOURCE_INVALID, sb, ob, json!({ "kind": "h264-container" }));
-    let timeline = extract(&bytes).map_err(|_| invalid())?;
+    let invalid = || failure(R::SOURCE_INVALID, sb, ob, json!({ "kind": "sample-timing" }));
+    let timeline = extract(&bytes).map_err(|e| failure(R::SOURCE_INVALID, sb, ob,
+        json!({"kind":if e.code == "INVALID_H264" {"h264-nal"} else {"h264-container"}, "code":e.code, "check":e.message, "sample":e.path})))?;
+    if let Some(s) = timeline.samples.iter().find(|s| s.duration_us < 0 || (s.duration_us == 0 && s.sample_index + 1 < timeline.samples.len())) {
+        return Err(failure(R::SOURCE_INVALID, sb, ob, json!({"kind":"nonpositive-sample-duration", "sampleIndex":s.sample_index, "durationUs":s.duration_us})));
+    }
     if !normalize_ok(&timeline) {
-        return Err(invalid());
+        return Err(failure(R::SOURCE_INVALID, sb, ob, json!({"kind":"timeline-metadata"})));
     }
     let lead_in_frames = timeline.lead_in.frames.unwrap_or(0);
     let mut timing = read_output_timing(&bytes).ok_or_else(invalid)?;
@@ -722,7 +726,7 @@ fn read_source_authority(o: &VerifyOptions, sb: Option<u64>, ob: Option<u64>) ->
         ts.pop();
     }
     if ts != timing.samples {
-        return Err(invalid());
+        return Err(failure(R::SOURCE_INVALID, sb, ob, json!({"kind":"timeline-container-mismatch"})));
     }
     if let Some(cached) = o.source_timeline {
         if !normalize_ok(cached) {
@@ -1042,7 +1046,10 @@ fn verify_owned_snapshot(o: &VerifyOptions, profile_id: &str, sb: u64, ob: u64, 
         );
     }
     let vfr = prove_vfr(&probe, &out);
-    let tol_frames = if vfr.is_some() { 1 } else { 0 };
+    // A guessed nominal rate is not evidence that a short sample may be
+    // rounded away. These clips need every frame and every tiny interval.
+    let tiny_samples = st.min_us < 1_000;
+    let tol_frames = if vfr.is_some() && !tiny_samples { 1 } else { 0 };
     let frame_delta = (src.expected.len() as i64 - n as i64).abs();
     let undecodable = |m: &mut Map<String, Value>| {
         if src.undecodable_frames > 0 {
@@ -1065,7 +1072,7 @@ fn verify_owned_snapshot(o: &VerifyOptions, profile_id: &str, sb: u64, ob: u64, 
         }
         return failure(R::FRAME_COUNT_MISMATCH, s, b, Value::Object(m));
     }
-    if src.lead_in_frames > 0 || src.undecodable_frames > 0 {
+    if src.lead_in_frames > 0 || src.undecodable_frames > 0 || tiny_samples {
         if let Some(Value::Object(mm)) = frame_timing_mismatch(&src.expected, &out.samples) {
             let mut m = Map::new();
             m.insert("kind".into(), json!("source-output-frame-timing"));
@@ -1240,6 +1247,10 @@ pub fn verify_candidate(o: &VerifyOptions) -> Verdict {
         ..v
     }
 }
+
+#[cfg(test)]
+#[path = "source_checks_tests.rs"]
+mod source_checks_tests;
 
 #[cfg(test)]
 mod tests {

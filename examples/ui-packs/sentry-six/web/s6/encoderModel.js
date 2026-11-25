@@ -18,19 +18,22 @@ export function clipFailures(snapshot) {
   const groups = snapshot?.itemFailureCounts || rows.map((i) => ({...i, count:1}));
   const sum = (accept) => groups.filter(accept).reduce((n, g) => n + (Number(g.count) || 0), 0);
   const kept = sum(damaged), gpu = sum(temporary), legacy = sum(legacyGpu);
+  const shortRows = (snapshot?.items || []).filter((i) => ['skipped','completed'].includes(i.state) && codeOf(i) === 'too-short');
+  const tooShort = snapshot?.itemTooShortCount ?? shortRows.length;
   const retrying = snapshot?.itemGpuRetryCount ?? (snapshot?.items || []).filter((i) => ['queued','processing'].includes(i.state) && i.resultCode === 'gpu-memory-retry').length;
   const total = snapshot?.itemStateCounts?.failed ?? snapshot?.itemCounts?.failed ?? rows.length;
   const attention = Math.max(0, total - kept);
   const n = kept.toLocaleString();
   return {
-    damaged:kept, attention, temporary:gpu, legacyGpu:legacy, retrying,
+    damaged:kept, tooShort, kept:kept + tooShort, attention, temporary:gpu, legacyGpu:legacy, retrying,
     retryingText:`${retrying.toLocaleString()} ${statusNoun(retrying, 'clip')} will be retried (the GPU ran out of memory)${['paused','paused_network'].includes(snapshot?.state) ? ' when you resume shrinking' : ''}.`,
-    keptText:`${n} damaged ${statusNoun(kept, 'clip')} kept as recorded`,
-    explanation:`${n} ${statusNoun(kept, 'clip')} ${kept === 1 ? 'has' : 'have'} damaged video. Shrinking would lose frames or produce unreadable video. ${kept === 1 ? 'The original was' : 'The originals were'} kept as recorded; nothing to do.`,
+    keptText:tooShort ? `${(kept + tooShort).toLocaleString()} ${statusNoun(kept + tooShort, 'clip')} kept as recorded` : `${n} damaged ${statusNoun(kept, 'clip')} kept as recorded`,
+    explanation:[kept ? `${n} ${statusNoun(kept, 'clip')} ${kept === 1 ? 'has' : 'have'} damaged video. Shrinking would lose frames or produce unreadable video. ${kept === 1 ? 'The original was' : 'The originals were'} kept as recorded; nothing to do.` : '',
+      tooShort ? `${tooShort.toLocaleString()} ${statusNoun(tooShort, 'clip')} ${tooShort === 1 ? 'is' : 'are'} too short to shrink. Kept as recorded; nothing to do.` : ''].filter(Boolean).join(' '),
     attentionText:[gpu ? `${gpu.toLocaleString()} ${statusNoun(gpu, 'clip')} could not finish because the GPU ran out of memory. ${gpu === 1 ? 'The original was' : 'The originals were'} kept. Retry with less pressure on the GPU.` : '', legacy ? `${legacy.toLocaleString()} ${statusNoun(legacy, 'clip')} lost frames during GPU encoding. The GPU may have been too busy; ${legacy === 1 ? 'the original was' : 'the originals were'} kept. Retry with less pressure to check.` : '',
       attention > gpu + legacy ? `${(attention-gpu-legacy).toLocaleString()} ${statusNoun(attention-gpu-legacy, 'clip')} could not be shrunk. ${attention-gpu-legacy === 1 ? 'The original was' : 'The originals were'} kept. Open Expert to review or retry ${attention-gpu-legacy === 1 ? 'it' : 'them'}.` : ''].filter(Boolean).join(' '),
-    items:rows.filter(damaged).map((i) => ({relativePath:i.relativePath || 'Unknown clip', code:codeOf(i),
-      reason:codeOf(i) === 'frame-count-mismatch' ? 'A smaller copy could not preserve every video frame.' : 'Some of the recorded video cannot be read.'})),
+    items:[...rows.filter(damaged), ...shortRows].map((i) => ({relativePath:i.relativePath || 'Unknown clip', code:codeOf(i),
+      reason:codeOf(i) === 'too-short' ? 'Kept as recorded (too short to shrink).' : codeOf(i) === 'frame-count-mismatch' ? 'A smaller copy could not preserve every video frame.' : 'Some of the recorded video cannot be read.'})),
   };
 }
 

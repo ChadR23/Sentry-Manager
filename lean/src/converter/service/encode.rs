@@ -251,11 +251,19 @@ impl Service {
         let _memory = if let Some(device)=&gpu {
             let budget=super::super::gpu_memory::estimate_mib(self.0.o.tools.video_dimensions(r.source,&rt.signal()));
             let serial=rt.lock().item(item_id).is_some_and(|i|i["resultCode"]=="gpu-memory-retry");
-            let started=Instant::now();
+            let waiting=serial.then(||self.0.o.gpu_memory.wait_serial(device));
+            let mut started=Instant::now();
             Some(loop {
                 if rt.lock().stopped() {return Err("cancelled");}
-                if let Some(lease)=self.0.o.gpu_memory.try_reserve(device,budget,serial) {break lease;}
+                let lease=match &waiting {
+                    Some(w)=>w.try_reserve(budget),
+                    None=>self.0.o.gpu_memory.try_reserve(device,budget,false),
+                };
+                if let Some(lease)=lease {break lease;}
                 if rt.lock().pause_requested {return Err("gpu-memory-paused");}
+                // Draining other encodes is not evidence of an out-of-memory
+                // failure. Start the memory timeout only once this turn is free.
+                if waiting.as_ref().map_or_else(||self.0.o.gpu_memory.draining(device),|w|w.waiting_on_encodes()) {started=Instant::now();}
                 if started.elapsed()>=Duration::from_secs(30) {return Err("gpu-memory-exhausted");}
                 std::thread::sleep(Duration::from_millis(200));
             })

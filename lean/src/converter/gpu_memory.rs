@@ -2,7 +2,7 @@
 //! preserves the existing concurrency behavior.
 use super::planner::Device;
 use std::sync::{Arc,Mutex};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration,Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -37,9 +37,24 @@ pub fn read_nvidia(runner: &dyn super::process::Runner, device: &Device) -> Opti
 }
 pub type Sampler = Arc<dyn Fn(&Device) -> Option<Reading> + Send + Sync>;
 #[derive(Default)]
-struct Usage { mib:u64, active:usize, serial:usize, pressure_until:Option<Instant> }
+struct Usage { mib:u64, active:usize, serial:usize, pressure_until:Option<Instant>, next_waiter:u64, waiters:VecDeque<u64> }
 pub struct Gate { sample: Sampler, usage:Mutex<HashMap<String,Usage>> }
 pub struct Lease { gate:Arc<Gate>, id:String, mib:u64, serial:bool }
+/// A queued retry closes normal admission before waiting for existing encodes.
+/// Dropping it on pause, cancellation or timeout always reopens admission.
+pub struct SerialWait { gate:Arc<Gate>, device:Device, ticket:u64 }
+impl SerialWait {
+    pub fn try_reserve(&self, mib:u64)->Option<Lease> { self.gate.reserve(&self.device,mib,true,Some(self.ticket)) }
+    pub fn waiting_on_encodes(&self)->bool {
+        self.gate.usage.lock().unwrap().get(&self.device.id)
+            .is_some_and(|u|u.active>0 || u.waiters.front()!=Some(&self.ticket))
+    }
+}
+impl Drop for SerialWait {
+    fn drop(&mut self) {
+        if let Some(u)=self.gate.usage.lock().unwrap().get_mut(&self.device.id) { u.waiters.retain(|t|*t!=self.ticket); }
+    }
+}
 impl Drop for Lease {
     fn drop(&mut self) {
         let mut usage=self.gate.usage.lock().unwrap();
@@ -62,12 +77,26 @@ impl Gate {
     pub fn pressured(&self, device:&Device)->bool {
         self.usage.lock().unwrap().get(&device.id).and_then(|u|u.pressure_until).is_some_and(|t|t>Instant::now())
     }
+    pub fn wait_serial(self:&Arc<Self>, device:&Device)->SerialWait {
+        let mut usage=self.usage.lock().unwrap();
+        let u=usage.entry(device.id.clone()).or_default();
+        let ticket=u.next_waiter; u.next_waiter+=1; u.waiters.push_back(ticket);
+        SerialWait{gate:self.clone(),device:device.clone(),ticket}
+    }
+    pub fn draining(&self, device:&Device)->bool {
+        self.usage.lock().unwrap().get(&device.id).is_some_and(|u|
+            !u.waiters.is_empty() || u.serial>0 || (u.active>0 && u.pressure_until.is_some_and(|t|t>Instant::now())))
+    }
     pub fn try_reserve(self: &Arc<Self>, device: &Device, mib: u64, serial: bool) -> Option<Lease> {
+        self.reserve(device,mib,serial,None)
+    }
+    fn reserve(self: &Arc<Self>, device: &Device, mib: u64, serial: bool, ticket:Option<u64>) -> Option<Lease> {
         // Query and reserve under one lock: simultaneous starts cannot all use
         // the same reading. Count our estimates as well as reported usage;
         // this intentionally leaves headroom while allocations are still rising.
         let mut usage=self.usage.lock().unwrap();
         let u=usage.entry(device.id.clone()).or_default();
+        if !u.waiters.is_empty() && ticket!=u.waiters.front().copied() {return None;}
         if u.active>0 && (serial || u.serial>0 || u.pressure_until.is_some_and(|t|t>Instant::now())) {return None;}
         if self.reading(device).is_some_and(|r|r.free_mib.saturating_sub(128)<u.mib.saturating_add(mib)) {return None;}
         u.active+=1;u.mib=u.mib.saturating_add(mib);if serial {u.serial+=1;}
@@ -135,5 +164,29 @@ mod tests {
         let retry = gate.try_reserve(&gpu,1000,true).unwrap();
         assert!(gate.try_reserve(&gpu,1000,false).is_none());
         drop(retry);
+    }
+
+    #[test]
+    fn gpu_memory_serial_waiters_are_fifo_and_release_admission_on_drop() {
+        let gpu = device_of(&json!({"id":"pci:0000:01:00.0","kind":"nvidia"}));
+        let other = device_of(&json!({"id":"pci:0000:02:00.0","kind":"nvidia"}));
+        let gate = Arc::new(Gate::new(Arc::new(|_| None)));
+        let busy = gate.try_reserve(&gpu,1000,false).unwrap();
+        let first = gate.wait_serial(&gpu);
+        let second = gate.wait_serial(&gpu);
+        assert!(gate.try_reserve(&gpu,1000,false).is_none());
+        assert!(gate.try_reserve(&other,1000,false).is_some(), "another device is independent");
+        assert!(first.try_reserve(1000).is_none());
+        drop(busy);
+        assert!(second.try_reserve(1000).is_none(), "a newer retry cannot overtake its predecessor");
+        let running = first.try_reserve(1000).unwrap();
+        drop(first);
+        assert!(second.try_reserve(1000).is_none(), "a retry runs alone even after its wait registration ends");
+        drop(running);
+        // Cancellation/pause while waiting must remove the reservation, not
+        // leave an invisible serial gate permanently blocking this device.
+        drop(second);
+        assert!(!gate.draining(&gpu));
+        assert!(gate.try_reserve(&gpu,1000,false).is_some());
     }
 }

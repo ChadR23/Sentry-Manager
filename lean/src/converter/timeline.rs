@@ -258,7 +258,7 @@ pub fn extract(buf: &[u8]) -> CResult<Timeline> {
     for s in &samples {
         let start = to_number(s.offset, "Sample offset").map_err(|_| terr("UNSUPPORTED_CONTAINER", "Sample offset cannot be represented safely"))?;
         let au = &buf[start..start + s.size as usize];
-        let nals = parse_length_prefixed(au, ls)?;
+        let nals = parse_length_prefixed(au, ls).map_err(|e| e.with_path(format!("samples[{}]", s.index)))?;
         frames.add(&nals);
         let mut seis = Vec::new();
         for n in &nals {
