@@ -408,7 +408,7 @@ fn stat_at_once(dir: &OwnedFd, name: &str) -> io::Result<St> {
     Ok(St {
         dev: st.st_dev,
         ino: st.st_ino,
-        nlink: st.st_nlink,
+        nlink: u64::from(st.st_nlink),
         size: st.st_size as u64,
         regular: fmt == libc::S_IFREG,
         link: fmt == libc::S_IFLNK,
