@@ -279,8 +279,11 @@ impl CanPrune {
         if self.untrusted(v).is_some() {
             return None;
         }
-        let bin: Vec<String> = self.ctx.bin_rels(&v.id).ok()?.into_iter().filter(|r| is_mp4(r)).collect();
-        let protected: Vec<String> = self.ctx.protected_rels(&v.id).ok()?.into_iter().filter(|r| is_mp4(r)).collect();
+        let mut bin: Vec<String> = self.ctx.bin_rels(&v.id).ok()?.into_iter().filter(|r| is_mp4(r)).collect();
+        let mut protected: Vec<String> = self.ctx.protected_rels(&v.id).ok()?.into_iter().filter(|r| is_mp4(r)).collect();
+        // (sorted: the protected clips come from a set, in another order each time they are read)
+        bin.sort_unstable();
+        protected.sort_unstable();
         let generation = self.ctx.scan_generation(&v.id)?;
         let sig: KeptSig = (generation, v.timezone.clone(), bin, protected);
         if let Some((sg, starts)) = self.kept.lock().unwrap().get(&v.id) {
@@ -633,7 +636,8 @@ impl CanPrune {
                 break;
             }
             // (with its tombstone: see CanLogs::delete_log)
-            if let Err(e) = self.logs.delete_log(&t.1, t.4) {
+            // (with the span the rule judged: see CanLogs::buried_older)
+            if let Err(e) = self.logs.delete_log_span(&t.1, t.4, Some(t.3)) {
                 if e.status != 404 {
                     self.ctx.log("warn", &format!("CAN log {}: not deleted: {}", t.1, e.message));
                     continue;

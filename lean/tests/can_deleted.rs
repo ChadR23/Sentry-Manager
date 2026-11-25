@@ -837,3 +837,38 @@ fn a_derived_tombstones_sidecar_stays_missing_without_a_recorded_size() {
     assert_eq!(f[&nm(0)]["check"], "verified");
     assert_eq!(f[&side(&nm(0))], json!({ "state": "missing", "received": 0, "length": null, "size": 0 }));
 }
+
+#[test]
+fn a_log_deleted_as_unlinked_is_asked_for_again_once_a_clip_covers_any_minute_of_its_span() {
+    // log 0 (14:00) runs to the next log (14:09); a clip of 14:05 turns up after the rule
+    // deleted both as linked to nothing
+    let src = tmp("span-bridge");
+    let (can, ctx, dir) = area("span", &[clip(13, 0)]);
+    ctx.settings.lock().unwrap().insert("can-keep".into(), json!({ "withFootage": false, "deleteUnlinked": true, "unlinkedDays": 0 }));
+    let mut b = Bridge::new(61);
+    let f0 = uploaded(&can, &src, &mut b, 0..1).pop().unwrap();
+    uploaded(&can, &src, &mut b, 9..10);
+    std::thread::sleep(Duration::from_millis(20));
+    let out = can.prune.check("car1").unwrap();
+    assert!(!dir.join(KEY).join(nm(0)).exists() && !dir.join(KEY).join(nm(9)).exists(), "{out}");
+    assert_eq!(can.trust.tomb(KEY, &nm(0)).unwrap()["why"], "unlinked");
+    let f = ask(&can.logs, &[nm(0), nm(9)]);
+    assert_eq!((f[&nm(0)]["check"].as_str(), f[&nm(9)]["check"].as_str()), (Some("verified"), Some("verified")), "{f}");
+    // the late clip: log 0 is asked for again, log 9 (14:09-14:10) is not
+    ctx.clips.lock().unwrap().push(clip(14, 5));
+    let f = ask(&can.logs, &[nm(0), nm(9)]);
+    assert_eq!(f[&nm(0)]["state"], "missing", "{f}");
+    assert_eq!(f[&nm(9)]["check"], "verified", "{f}");
+    // sent again: kept as a new log
+    send(&can.logs, &nm(0), &f0.0).unwrap();
+    send(&can.logs, &side(&nm(0)), &f0.1).unwrap();
+    can.backfill(4, Duration::ZERO);
+    assert!(dir.join(KEY).join(nm(0)).exists() && can.trust.tomb(KEY, &nm(0)).is_none());
+    // its neighbour gone, the rule now judges it over its first minute only and deletes it
+    // again: that span is stored, so it answers delivered for good (no loop)
+    std::thread::sleep(Duration::from_millis(20));
+    can.prune.check("car1").unwrap();
+    let t0 = can.trust.tomb(KEY, &nm(0)).unwrap();
+    assert_eq!(t0["linkedTo"].as_f64(), Some(at(1)), "{t0}");
+    assert_eq!(ask(&can.logs, &[nm(0)])[&nm(0)]["check"], "verified");
+}

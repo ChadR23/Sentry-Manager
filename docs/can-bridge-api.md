@@ -417,12 +417,14 @@ For a name with a tombstone and no file here, `status` answers:
   both delete a log no clip the car keeps covers (its clips on the share,
   in the Recycle Bin and protected, as the rules link logs), so they go by
   those clips:
-  - while still **no clip covers the log's first minute**: `complete`, as
-    above, never asked for again. (Sent again, it would be kept, still
-    linked to nothing, and deleted again by the same rule N days later,
-    every time. Before this version these answered `missing` inside the
-    footage kept.) The first minute is the least a log runs, so a log the
-    rule found linked to nothing is never found covered by the same clips;
+  - while still **no clip covers the span the rule judged** (from the log's
+    start to the next log's start, 1 to 10 minutes, kept on its tombstone;
+    the log's first minute for logs deleted before this version):
+    `complete`, as above, never asked for again. (Sent again, it would be
+    kept, still linked to nothing, and deleted again by the same rule N days
+    later, every time. Before this version these answered `missing` inside
+    the footage kept.) It is the same span the rule found linked to
+    nothing, so the same clips never count as covering it;
   - once a clip **covers it** (clips that came late, or the car's time zone
     set right): `missing`, so the bridge may send it again. It is then
     stored and checked as a new log, and its tombstone goes;
