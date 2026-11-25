@@ -29,6 +29,8 @@ mod memory_tests;
 mod speed_tests;
 #[cfg(test)]
 mod gpu_memory_tests;
+#[cfg(test)]
+mod manifest_tests;
 
 pub use encode::{parse_progress_line, Progress};
 pub(crate) use encode::EncodeRequest;
@@ -60,6 +62,7 @@ fn temporary_retry(item:&Value)->bool {
 }
 pub const QUICK_RETRY_LIMIT: u32 = 2;
 pub const SOURCE_READS_AT_ONCE: usize = 2;
+pub const DEFAULT_JOB_CLIP_LIMIT: usize = 40_000;
 
 /// An error as the service sees it: a code, and what Node attaches to one.
 #[derive(Debug, Clone, Default)]
@@ -89,7 +92,7 @@ impl Fail {
 
 impl From<CError> for Fail {
     fn from(e: CError) -> Fail {
-        let detail=(e.code == "INVALID_H264").then(||match e.path {Some(p)=>format!("{p}: {}",e.message),None=>e.message});
+        let detail=Some(match e.path {Some(p)=>format!("{p}: {}",e.message),None=>e.message});
         Fail { code: if e.code.is_empty() { None } else { Some(e.code) }, detail, ..Default::default() }
     }
 }
@@ -352,6 +355,9 @@ pub fn compose(base: &Own, incoming: &Value, clear: &[String]) -> Own {
     if incoming.get("clearPublicationArtifact") == Some(&Value::Bool(true)) {
         publication = None;
     }
+    if !paths.contains_key("publicationSnapshot") && clear.iter().chain(incoming_clears.iter()).any(|k| k == "publicationSnapshot") {
+        publication = None;
+    }
     Own { paths, arts, publication }
 }
 
@@ -514,7 +520,7 @@ impl Options {
             backoff_max_ms: 30_000,
             encode_stall_ms: 10 * 60_000,
             snapshot_interval_ms: 250,
-            job_clip_limit: 40_000,
+            job_clip_limit: DEFAULT_JOB_CLIP_LIMIT,
             // (runtime.js: 200 at a time, every 250 ms while workers wait)
             discovery_batch_size: 200,
             discovery_flush_ms: 250,
@@ -1117,6 +1123,9 @@ impl Service {
 
     /// start(config): the new job's id
     pub fn start(&self, config: &Value) -> SResult<String> {
+        let mut config = config.clone();
+        if let Some(c) = config.as_object_mut() { c.shift_remove("deviceSettingsSource"); }
+        let config = &config;
         self.mutate(|| {
             if self.speed_test_active() { return Err(service_error("SPEED_TEST_RUNNING")); }
             if self.preview_active() { return Err(service_error("JOB_ACTIVE")); }

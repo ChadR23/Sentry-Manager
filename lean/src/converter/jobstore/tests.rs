@@ -44,6 +44,39 @@ fn quiet(root: &Path) -> JobStore {
 }
 
 #[test]
+fn manifest_budget_refusals_name_the_limit_and_observed_value() {
+    use normalize::*;
+    for (budget, name, value, maximum) in [
+        (Budget {nodes:LIMIT_NODES+1,..Default::default()},"LIMIT_NODES",LIMIT_NODES+1,LIMIT_NODES),
+        (Budget {string_units:LIMIT_STRING_UNITS+1,..Default::default()},"LIMIT_STRING_UNITS",LIMIT_STRING_UNITS+1,LIMIT_STRING_UNITS),
+        (Budget {estimated:LIMIT_BYTES+1,..Default::default()},"LIMIT_BYTES",LIMIT_BYTES+1,LIMIT_BYTES),
+    ] {
+        let e = Budget::default().add(&budget).unwrap_err();
+        assert!(e.path.unwrap().contains(name));
+        assert!(e.message.contains(&value.to_string()) && e.message.contains(&maximum.to_string()));
+    }
+    let e = preflight(&json!(vec![Value::Null; LIMIT_ITEMS+1])).unwrap_err();
+    assert_eq!(e.path.as_deref(),Some("LIMIT_ITEMS"));
+    let mut nested=Value::Null;
+    for _ in 0..=LIMIT_DEPTH {nested=json!([nested]);}
+    let e=preflight(&nested).unwrap_err();
+    assert_eq!(e.path.as_deref(),Some("LIMIT_DEPTH"));
+}
+
+#[test]
+fn manifest_corrupt_journal_logs_the_exact_rule_before_quarantine() {
+    let root=tmp("manifest-replay-reason");
+    let store=quiet(&root);
+    let id=format!("job-{}",random_uuid().unwrap());
+    let m=store.create(&initial(&id,vec![clip(0)])).unwrap();
+    let mut top=m.top.clone(); top.insert("revision".into(),json!(2));
+    fs::write(root.join(&id).join("job.journal"),format!("{}\n",json!({"r":2,"top":top,"set":[]}))).unwrap();
+    assert_eq!(store.load(&id).unwrap_err().code,"CORRUPT_MANIFEST");
+    assert!(crate::converter::service::LOGGED.lock().unwrap().iter().any(|l|l.contains(&id)&&l.contains("journal.line1")&&l.contains("revisions must be consecutive")));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn live_summaries_do_not_read_or_replay_the_live_job_on_each_poll() {
     let root = tmp("live-summaries");
     let store = quiet(&root);

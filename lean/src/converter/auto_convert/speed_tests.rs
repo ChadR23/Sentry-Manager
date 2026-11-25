@@ -39,6 +39,23 @@ fn enable(auto: &Arc<Auto>, config: Value) { auto.configure(&json!({"enabled":tr
 fn state(auto: &Auto) -> Value { auto.get_state()["status"]["speedTests"]["/generated"].clone() }
 
 #[test]
+fn manifest_apply_speed_result_saves_a_valid_job_configuration() {
+    let (d,auto,_)=rig();
+    let mut c=tested_config();
+    c["sourceRoot"]=json!("/generated"); c["concurrency"]=json!(1);
+    for k in ["lanes","deviceSettingsSource","keepRecent"] {c.as_object_mut().unwrap().remove(k);}
+    enable(&auto,c);
+    assert_eq!(state(&auto)["settingsSource"],"test");
+    assert_eq!(auto.get_state()["settings"]["configs"][0]["deviceSettingsSource"],"test");
+    let saved:Value=serde_json::from_slice(&std::fs::read(d.path().join(SETTINGS_FILE)).unwrap()).unwrap();
+    let config=&saved["configs"][0];
+    assert_eq!(config["concurrency"],2);
+    assert!(config.get("deviceSettingsSource").is_none());
+    crate::converter::jobstore::normalize_manifest(&json!({"schemaVersion":1,"id":"tested-new-job","state":"discovering","revision":0,
+        "config":config,"items":[],"summary":null,"counters":crate::converter::contracts::create_empty_counters()})).unwrap();
+}
+
+#[test]
 fn speed_test_forgotten_queue_cannot_bypass_another_vehicles_test() {
     let (_d, auto, backend) = rig();
     auto.lock().status["speedTests"] = json!({"/forgotten":{"phase":"queued","source":"automatic"}});

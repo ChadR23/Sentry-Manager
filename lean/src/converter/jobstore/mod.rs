@@ -45,8 +45,9 @@ pub struct Item {
 
 impl Item {
     fn normalize(raw: &Value) -> R<Arc<Item>> {
-        let value = normalize::normalize_item(raw)?;
-        let budget = normalize::preflight(&value)?;
+        let scope = format!("items.{}", normalize::field_name(raw.get("id").and_then(Value::as_str).unwrap_or("unknown")));
+        let value = normalize::normalize_item(raw).map_err(|e| normalize::at(&scope, e))?;
+        let budget = normalize::preflight(&value).map_err(|e| normalize::at(&scope, e))?;
         Ok(Arc::new(Item { value, budget }))
     }
     pub fn value(&self) -> &Value {
@@ -192,6 +193,16 @@ fn items_json(items: &[Arc<Item>]) -> String {
     s
 }
 
+fn report_refusal(id: &str, operation: &str, e: &CError) {
+    super::service::log_line(format!("[CONVERTER] Job {} manifest {operation} refused: {} at {}: {}",
+        normalize::field_name(id), e.code, e.path.as_deref().unwrap_or("manifest"), e.message));
+}
+
+fn diagnosed<T>(id: &str, operation: &str, result: R<T>) -> R<T> {
+    if let Err(e) = &result { report_refusal(id, operation, e); }
+    result
+}
+
 /// A change of a job (store.transition's patch): top-level fields, and the
 /// whole clip list when it changes. `Value::Null` clears a field where Node's
 /// `null` does.
@@ -242,12 +253,10 @@ impl Patch {
 /// create/save).
 pub fn normalize_manifest(value: &Value) -> R<Manifest> {
     normalize::preflight(value)?;
-    let Some(m) = value.as_object() else { return Err(se("INVALID_MANIFEST")) };
+    let Some(m) = value.as_object() else { return Err(normalize::refused("manifest", "expected object")) };
     let (top, items) = normalize::normalize_top(m, || {
-        let Some(list) = m.get("items").and_then(Value::as_array) else { return Err(se("INVALID_MANIFEST")) };
-        if list.len() > normalize::LIMIT_ITEMS {
-            return Err(se("INVALID_MANIFEST"));
-        }
+        let Some(list) = m.get("items").and_then(Value::as_array) else { return Err(normalize::refused("items", "expected array")) };
+        normalize::limit("LIMIT_ITEMS", list.len() as u64, normalize::LIMIT_ITEMS as u64)?;
         list.iter().map(Item::normalize).collect()
     })?;
     Ok(Manifest { top, items })
@@ -279,9 +288,7 @@ fn normalize_parts(top: &Map<String, Value>, items: &[ItemIn]) -> R<Manifest> {
         x.walk(v, 1)?;
         b.add(&x)?;
     }
-    if items.len() > normalize::LIMIT_ITEMS {
-        return Err(se("INVALID_MANIFEST"));
-    }
+    normalize::limit("LIMIT_ITEMS", items.len() as u64, normalize::LIMIT_ITEMS as u64)?;
     b.add(&Budget { nodes: 1, string_units: 0, estimated: items.len() as u64 + 2 })?;
     for it in items {
         match it {
@@ -592,9 +599,7 @@ impl JobStore {
 
     fn atomic_write(paths: &Paths, manifest: &Manifest) -> R<()> {
         let serialized = format!("{}\n", manifest.to_json());
-        if serialized.len() as u64 > normalize::LIMIT_BYTES {
-            return Err(se("INVALID_MANIFEST"));
-        }
+        normalize::limit("LIMIT_BYTES (serialized)", serialized.len() as u64, normalize::LIMIT_BYTES)?;
         let result = (|| -> io::Result<()> {
             let mut f = Self::open_temporary(&paths.temporary)?;
             f.write_all(serialized.as_bytes())?;
@@ -675,44 +680,44 @@ impl JobStore {
         let text = String::from_utf8_lossy(bytes);
         let mut lines: Vec<&str> = text.split('\n').collect();
         lines.pop();
-        let bad = || se("INVALID_MANIFEST");
         let mut top = base.top.clone();
         let mut revision = base.revision();
         let mut items: Vec<ItemIn> = base.items.iter().cloned().map(ItemIn::Trusted).collect();
         let mut replayed = false;
-        for line in lines {
-            let record: Value = serde_json::from_str(line).map_err(|_| bad())?;
-            let Some(rm) = record.as_object() else { return Err(bad()) };
-            let Some(r) = rm.get("r").and_then(normalize::safe_int_of) else { return Err(bad()) };
-            let Some(rtop) = rm.get("top").and_then(Value::as_object) else { return Err(bad()) };
-            let Some(set) = rm.get("set").and_then(Value::as_array) else { return Err(bad()) };
+        for (line_index, line) in lines.into_iter().enumerate() {
+            let bad = |rule| normalize::refused(&format!("journal.line{}", line_index + 1), rule);
+            let record: Value = serde_json::from_str(line).map_err(|_| bad("invalid JSON"))?;
+            let Some(rm) = record.as_object() else { return Err(bad("expected object")) };
+            let Some(r) = rm.get("r").and_then(normalize::safe_int_of) else { return Err(bad("r: expected safe integer revision")) };
+            let Some(rtop) = rm.get("top").and_then(Value::as_object) else { return Err(bad("top: expected object")) };
+            let Some(set) = rm.get("set").and_then(Value::as_array) else { return Err(bad("set: expected array")) };
             if rtop.get("revision").and_then(Value::as_f64) != Some(r as f64) || rtop.contains_key("items") {
-                return Err(bad());
+                return Err(bad("top.revision must equal r; top must not contain items"));
             }
             if r <= revision {
                 continue;
             }
             if r != revision + 1 {
-                return Err(bad());
+                return Err(bad("r: revisions must be consecutive"));
             }
             let mut next = items.clone();
             for entry in set {
-                let Some(pair) = entry.as_array() else { return Err(bad()) };
+                let Some(pair) = entry.as_array() else { return Err(bad("set entry: expected array")) };
                 if pair.len() != 2 {
-                    return Err(bad());
+                    return Err(bad("set entry: expected index and item pair"));
                 }
-                let Some(index) = normalize::safe_int_of(&pair[0]).filter(|i| *i >= 0 && (*i as usize) < next.len()) else { return Err(bad()) };
+                let Some(index) = normalize::safe_int_of(&pair[0]).filter(|i| *i >= 0 && (*i as usize) < next.len()) else { return Err(bad("set index: outside item array")) };
                 let index = index as usize;
                 let incoming_id = pair[1].as_object().and_then(|o| o.get("id"));
                 if next[index].id_value() != incoming_id || incoming_id.is_none() {
-                    return Err(bad());
+                    return Err(bad("set item.id must match the item at its index"));
                 }
                 next[index] = ItemIn::Raw(pair[1].clone());
             }
             if let Some(add) = rm.get("add") {
                 match add.as_array() {
                     Some(a) if !a.is_empty() => next.extend(a.iter().cloned().map(ItemIn::Raw)),
-                    _ => return Err(bad()),
+                    _ => return Err(bad("add: expected nonempty item array")),
                 }
             }
             items = next;
@@ -793,21 +798,28 @@ impl JobStore {
     fn read_manifest(&self, id: &str) -> R<Option<Manifest>> {
         let Some(paths) = self.open_existing_job_directory(id)? else { return Ok(None) };
         for _ in 0..2 {
-            let (read, _) = Self::bounded_read(&paths.manifest)?;
+            let (read, identity) = Self::bounded_read(&paths.manifest)?;
             let bytes = match read {
                 ReadOutcome::Missing => return Ok(None),
                 ReadOutcome::Changed => continue,
-                ReadOutcome::Oversized => return Err(se("MANIFEST_READ_FAILED")),
+                ReadOutcome::Oversized => {
+                    let e = normalize::refused("LIMIT_BYTES (file)", format!("value {} exceeds limit {}", identity.map(|i| i.size).unwrap_or(0), normalize::LIMIT_BYTES));
+                    report_refusal(id, "read", &e);
+                    return Err(se("MANIFEST_READ_FAILED"));
+                }
                 ReadOutcome::Bytes(b) => b,
             };
-            let base = serde_json::from_str::<Value>(&String::from_utf8_lossy(&bytes)).ok().and_then(|v| normalize_manifest(&v).ok()).filter(|m| m.id() == id);
-            if let Some(base) = base {
+            let base = serde_json::from_str::<Value>(&String::from_utf8_lossy(&bytes))
+                .map_err(|e| normalize::refused("manifest", format!("invalid JSON at line {} column {}", e.line(), e.column())))
+                .and_then(|v| normalize_manifest(&v))
+                .and_then(|m| if m.id() == id { Ok(m) } else { Err(normalize::refused("id", "must match job directory")) });
+            if let Ok(base) = diagnosed(id, "read", base) {
                 let journal = Self::read_journal(&paths)?;
                 let Some(journal) = journal.filter(|j| !j.is_empty()) else { return Ok(Some(base)) };
-                if let Ok(m) = Self::replay_journal(&base, &journal) {
-                    if m.id() == id {
-                        return Ok(Some(m));
-                    }
+                let replay = Self::replay_journal(&base, &journal)
+                    .and_then(|m| if m.id() == id { Ok(m) } else { Err(normalize::refused("journal.top.id", "must match job directory")) });
+                if let Ok(m) = diagnosed(id, "replay", replay) {
+                    return Ok(Some(m));
                 }
                 if self.quarantine(&paths, &journal)? {
                     return Err(se("CORRUPT_MANIFEST"));
@@ -823,10 +835,15 @@ impl JobStore {
 
     /// create(initial): `initial` holds top-level fields and `items` (raw).
     pub fn create(&self, initial: &Map<String, Value>) -> R<Manifest> {
+        diagnosed(initial.get("id").and_then(Value::as_str).unwrap_or("new"), "create", self.create_inner(initial))
+    }
+
+    fn create_inner(&self, initial: &Map<String, Value>) -> R<Manifest> {
         for k in initial.keys() {
             if !TOP_FIELDS.contains(&k.as_str()) {
                 let mut e = se(if is_sensitive_field(k) { "SENSITIVE_MANIFEST_DATA" } else { "INVALID_MANIFEST" });
                 e.path = Some(normalize::field_name(k));
+                e.message = "field is not allowed".into();
                 return Err(e);
             }
         }
@@ -878,6 +895,10 @@ impl JobStore {
 
     /// save(manifest): a whole job (newer revision only).
     pub fn save(&self, manifest: &Value) -> R<Manifest> {
+        diagnosed(manifest.get("id").and_then(Value::as_str).unwrap_or("unknown"), "save", self.save_inner(manifest))
+    }
+
+    fn save_inner(&self, manifest: &Value) -> R<Manifest> {
         let safe = normalize_manifest(manifest)?;
         let id = safe.id().to_string();
         self.exclusive(&id, || {
@@ -898,7 +919,7 @@ impl JobStore {
 
     pub fn load(&self, id: &str) -> R<Option<Manifest>> {
         assert_safe_job_id(id)?;
-        self.exclusive(id, || self.read_manifest(id))
+        diagnosed(id, "load", self.exclusive(id, || self.read_manifest(id)))
     }
 
     fn job_folders(&self) -> R<Vec<String>> {
@@ -1169,13 +1190,19 @@ impl JobStore {
 
     /// transition(id, patch): the job with these changes, one revision on.
     pub fn transition(&self, id: &str, patch: Patch) -> R<Manifest> {
+        diagnosed(id, "transition", self.transition_inner(id, patch))
+    }
+
+    fn transition_inner(&self, id: &str, patch: Patch) -> R<Manifest> {
         assert_safe_job_id(id)?;
         for k in patch.top.keys() {
             if ["id", "schemaVersion", "revision", "items"].contains(&k.as_str()) {
-                return Err(se("INVALID_MANIFEST"));
+                return Err(normalize::refused(&normalize::field_name(k), "field cannot be changed by a transition"));
             }
             if !TOP_FIELDS.contains(&k.as_str()) {
-                return Err(se(if is_sensitive_field(k) { "SENSITIVE_MANIFEST_DATA" } else { "INVALID_MANIFEST" }));
+                let mut e = normalize::refused(&normalize::field_name(k), "field is not allowed");
+                if is_sensitive_field(k) { e.code = "SENSITIVE_MANIFEST_DATA".into(); }
+                return Err(e);
             }
         }
         let previous = self.hooks.as_ref().and_then(|_| self.last_seen.lock().unwrap().get(id).cloned());
@@ -1195,10 +1222,7 @@ impl JobStore {
                 None => current.items.iter().cloned().map(ItemIn::Trusted).collect(),
             };
             let next = normalize_parts(&top, &items)?;
-            if let Err(e) = check_moves(&current, &next) {
-                eprintln!("[CONVERTER] A change of job {} was refused: {}{}", id, e.message, e.path.as_deref().map(|p| format!(" (clip {p})")).unwrap_or_default());
-                return Err(e);
-            }
+            check_moves(&current, &next)?;
             let paths = self.ensure_job_directory(id)?;
             let line = journal.filter(|j| j.records < JOURNAL_LIMIT_RECORDS).and_then(|_| Self::journal_record(&current, &next));
             let written = match (&line, journal) {

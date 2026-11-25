@@ -10,6 +10,7 @@ mod speed_tests;
 
 #[derive(Default)]
 struct FakeService {
+    validate_manifest: bool,
     jobs: Mutex<IndexMap<String, Value>>,
     started: Mutex<Vec<Value>>,
     paused: Mutex<Vec<String>>,
@@ -26,6 +27,10 @@ impl AutoService for FakeService {
         self.start_attempts.fetch_add(1, Ordering::SeqCst);
         if let Some(code) = self.start_error.lock().unwrap().as_deref() {
             return Err(Fail::code(code));
+        }
+        if self.validate_manifest {
+            crate::converter::jobstore::normalize_manifest(&json!({"schemaVersion":1,"id":"generated-check","state":"discovering","revision":0,
+                "config":c,"items":[],"summary":null,"counters":crate::converter::contracts::create_empty_counters()})).map_err(Fail::from)?;
         }
         let mut st = self.started.lock().unwrap();
         let id = self.fixed_id.clone().unwrap_or_else(|| format!("job-{}", st.len() + 1));
@@ -89,6 +94,85 @@ fn opts(service: Arc<FakeService>, scanner: Arc<Scanner>, dir: &Path) -> AutoOpt
 
 fn clip(rel: &str, size: i64) -> Value {
     json!({ "relativePath": rel, "sourceBytes": size, "mtimeMs": 5 })
+}
+
+fn tested_config() -> Value {
+    json!({"verifyMode":"quick","networkMode":"auto","concurrency":14,"sourceRoot":"/generated/sourceRoot","destinationRoot":null,
+        "codec":"h265","profileId":"aggressive","keepOffTarget":true,"outputMode":"replace",
+        "includedGroups":["SavedClips","SentryClips","RecentClips"],"groupOrder":["SavedClips","SentryClips","RecentClips"],
+        "replacementConfirmed":true,"lanes":[{"device":"pci:0000:0d:00.0","concurrency":8},{"device":"pci:0000:01:00.0","concurrency":6}],
+        "keepRecent":{"days":30,"zone":"America/New_York"},"deviceSettingsSource":"test"})
+}
+
+fn old_generated_clip(rel: &str) -> Value {
+    let mut d=clip(rel,100); d["timestampKey"]=json!("2020-01-01_00-00-00"); d["kind"]=json!("video"); d["group"]=json!("RecentClips"); d
+}
+
+fn tested_options(service: Arc<FakeService>, scanner: Arc<Scanner>, dir: &Path) -> AutoOptions {
+    let mut o=opts(service,scanner,dir);
+    o.devices=Some(Arc::new(||Ok(vec![json!({"id":"pci:0000:0d:00.0"}),json!({"id":"pci:0000:01:00.0"})])));
+    o
+}
+
+#[test]
+fn manifest_tested_settings_migrate_and_dispatch_without_ui_metadata() {
+    let d=tempdir().unwrap();
+    let c=tested_config();
+    let settings=json!({"enabled":true,"intervalMinutes":1440,"window":null,"holdManual":false,"keepRunning":false,"openAtLogin":false,
+        "configs":[c],"schedule":{"kind":"daily","hour":6,"zone":"America/New_York"},"catchUp":true});
+    std::fs::write(d.path().join(SETTINGS_FILE),settings.to_string()).unwrap();
+    std::fs::write(d.path().join(SAVED_FILE),json!([c]).to_string()).unwrap();
+    std::fs::write(d.path().join(STATE_FILE),json!({"catchUp":{"/generated/sourceRoot":{"since":1}}}).to_string()).unwrap();
+    let service=Arc::new(FakeService{validate_manifest:true,..Default::default()});
+    let auto=Auto::new(tested_options(service.clone(),Arc::new(|_,_,out|{out(old_generated_clip("RecentClips/old.mp4"));Ok(())}),d.path()));
+    auto.start();
+    assert_eq!(service.started().len(),1,"{:?}",auto.get_state());
+    let job=service.get("job-1").unwrap();
+    assert_eq!(job["config"]["concurrency"],14,"14 is within the 1..64 concurrency range");
+    assert!(job["config"].get("deviceSettingsSource").is_none());
+    assert_eq!(auto.get_state()["settings"]["configs"][0]["deviceSettingsSource"],"test","UI still identifies tested lanes");
+    for file in [SETTINGS_FILE,SAVED_FILE] {
+        let disk:Value=serde_json::from_slice(&std::fs::read(d.path().join(file)).unwrap()).unwrap();
+        let configs=if file==SETTINGS_FILE {&disk["configs"]} else {&disk};
+        assert!(configs[0].get("deviceSettingsSource").is_none(),"{file}");
+        assert_eq!(configs[0]["lanes"],c["lanes"]);
+    }
+    assert_eq!(auto.get_state()["status"]["checking"],false);
+}
+
+#[test]
+fn manifest_automatic_sweep_stops_at_one_batch_on_a_779239_item_source() {
+    let d=tempdir().unwrap();
+    let visited=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen=visited.clone();
+    let scanner:Arc<Scanner>=Arc::new(move|_,_,out|{
+        for n in 0..779_239 {
+            seen.fetch_add(1,Ordering::SeqCst);
+            if !out(old_generated_clip(&format!("RecentClips/{n}.mp4"))) {break;}
+        }
+        Ok(())
+    });
+    let auto=Auto::new(opts(Arc::new(FakeService::default()),scanner,d.path()));
+    assert_eq!(auto.sweep(&tested_config()).unwrap(),40_000);
+    assert_eq!(visited.load(Ordering::SeqCst),40_000);
+}
+
+#[test]
+fn manifest_rejected_start_clears_checking_logs_reason_and_retries() {
+    let d=tempdir().unwrap();
+    let service=Arc::new(FakeService{validate_manifest:true,..Default::default()});
+    let auto=Auto::new(tested_options(service.clone(),Arc::new(|_,_,out|{out(old_generated_clip("RecentClips/old.mp4"));Ok(())}),d.path()));
+    let mut c=tested_config(); c.as_object_mut().unwrap().remove("deviceSettingsSource");
+    c["unexpectedGeneratedField"]=json!("never log this value");
+    auto.configure(&json!({"enabled":true,"catchUp":true,"config":c})).unwrap();
+    assert_eq!(auto.get_state()["status"]["checking"],false);
+    assert_eq!(auto.get_state()["status"]["sources"]["/generated/sourceRoot"]["error"],"INVALID_MANIFEST");
+    assert!(crate::converter::service::LOGGED.lock().unwrap().iter().any(|l|l.contains("/generated/sourceRoot")&&l.contains("unexpectedGeneratedField")&&l.contains("field is not allowed")&&!l.contains("never log this value")));
+    assert!(auto.lock().catch_up_retry.contains_key("/generated/sourceRoot"));
+    auto.lock().settings["configs"][0].as_object_mut().unwrap().remove("unexpectedGeneratedField");
+    auto.check_now();
+    assert_eq!(service.started().len(),1);
+    assert_eq!(auto.get_state()["status"]["checking"],false);
 }
 
 #[test]
@@ -184,6 +268,52 @@ fn three_failed_runs_give_up_and_a_version_1_index_starts_over() {
     assert_eq!(saved["gaveUp"]["RecentClips/repeater.mp4"], json!([100, 5, CONVERTER_REVISION]));
     assert!(saved["files"].get("RecentClips/repeater.mp4").is_none());
     assert!(!auto.is_known(&c, &clip("RecentClips/repeater.mp4", 101)));
+}
+
+#[test]
+fn manifest_failed_job_remembers_finished_clips_and_keeps_unfinished_work_eligible() {
+    let d=tempdir().unwrap();
+    let c=give_up_config(d.path());
+    let path=d.path().join("converted.mp4");
+    std::fs::write(&path,b"generated converted file").unwrap();
+    let (auto,s)=give_up_setup(d.path(),json!({"id":"manifest-job","state":"encoding","config":c,"items":[]}));
+    s.set("manifest-job",|j|{
+        j["state"]=json!("failed");
+        j["failure"]=json!({"code":"invalid-manifest","retryable":false});
+        j["moreAfter"]=json!("SentryClips/generated/thumb.png");
+        j["items"]=json!([
+            {"state":"completed","relativePath":"RecentClips/converted.mp4","sourcePath":path,"sourceBytes":100,"mtimeMs":5},
+            {"state":"skipped","resultCode":"already-converted","relativePath":"RecentClips/known.mp4","sourceBytes":100,"mtimeMs":5},
+            {"state":"skipped","resultCode":"no-savings","relativePath":"RecentClips/kept.mp4","sourceBytes":100,"mtimeMs":5},
+            {"state":"failed","relativePath":"RecentClips/failed.mp4","sourceBytes":100,"mtimeMs":5},
+            {"state":"processing","relativePath":"RecentClips/processing.mp4","sourceBytes":100,"mtimeMs":5},
+            {"state":"queued","resultCode":"gpu-memory-retry","encoder":"hevc_nvenc","relativePath":"RecentClips/retry.mp4","sourceBytes":100,"mtimeMs":5},
+            {"state":"skipped","resultCode":"auto-deferred","relativePath":"RecentClips/young.mp4","sourceBytes":100,"mtimeMs":5}
+        ]);
+    });
+    auto.tick();
+    let st=std::fs::metadata(&path).unwrap();
+    assert!(auto.is_known(&c,&json!({"relativePath":"RecentClips/converted.mp4","sourceBytes":st.len(),"mtimeMs":crate::converter::jobstore::normalize::num(crate::converter::jobstore::mtime_ms(&st))})));
+    for name in ["known","kept"] {assert!(auto.is_known(&c,&clip(&format!("RecentClips/{name}.mp4"),100)));}
+    for name in ["failed","processing","retry","young"] {assert!(!auto.is_known(&c,&clip(&format!("RecentClips/{name}.mp4"),100)),"{name}");}
+    let saved:Value=serde_json::from_slice(&std::fs::read(d.path().join(format!("index-{}.json",setup_key(&c)))).unwrap()).unwrap();
+    assert_eq!(saved["failures"]["RecentClips/failed.mp4"],1);
+    assert!(saved["failures"].get("RecentClips/processing.mp4").is_none());
+}
+
+#[test]
+fn manifest_failed_catch_up_can_check_now_before_the_next_schedule() {
+    let t0=utc_ms(2026,11,21,10);
+    let (t,_)=sched_off_peak(t0,false);
+    t.auto.configure(&shared(json!({"enabled":true,"window":{"follow":"off-peak"},"schedule":nightly(),"catchUp":true,"config":car("/cars/a","h265")}))).unwrap();
+    t.s.set("job-1",|j|{j["state"]=json!("failed");j["failure"]=json!({"code":"invalid-manifest","retryable":false});j["moreAfter"]=json!("SentryClips/generated/thumb.png");});
+    t.auto.tick();
+    assert_eq!(t.s.started().len(),1);
+    t.auto.check_now();
+    assert_eq!(t.s.started().len(),2);
+    assert!(t.s.resumed.lock().unwrap().is_empty(),"a fresh job, not resume of the nonretryable failed one");
+    let next=t.s.get("job-2").unwrap();
+    assert!(next["config"].get("resumeAfter").is_none(),"failed batches must rescan before moreAfter too");
 }
 
 struct Cars {

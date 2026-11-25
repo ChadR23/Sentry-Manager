@@ -654,9 +654,7 @@ impl Service {
             } || rt.aborted();
             if !controlled {
                 let code = stable_failure(&e, "discovery-failed");
-                if let Some(label) = super::detailed_failure(&code) {
-                    super::log_line(format!("[CONVERTER] {label} job {} failed: {}", rt.manifest().id(), e.detail.as_deref().unwrap_or(super::DETAIL_NOT_RECORDED)));
-                }
+                super::log_line(format!("[CONVERTER] Job {} discovery failed: {code}: {}", rt.manifest().id(), e.detail.as_deref().unwrap_or(super::DETAIL_NOT_RECORDED)));
                 let retryable = Self::is_retryable_network(&e);
                 self.update(rt, |_| Some(Patch::new().state(JobState::Failed).set("activeItemId", Value::Null).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", json!({ "code": code, "retryable": retryable }))))?;
                 return Err(e);
@@ -1072,9 +1070,7 @@ impl Service {
             };
             if let (Some(e), false, false) = (&rejected, state_failed, controlled) {
                 let code = stable_failure(e, "operation-failed");
-                if let Some(label) = super::detailed_failure(&code) {
-                    super::log_line(format!("[CONVERTER] {label} job {} failed: {}", rt2.manifest().id(), e.detail.as_deref().unwrap_or(super::DETAIL_NOT_RECORDED)));
-                }
+                super::log_line(format!("[CONVERTER] Job {} worker failed: {code}: {}", rt2.manifest().id(), e.detail.as_deref().unwrap_or(super::DETAIL_NOT_RECORDED)));
                 let _ = me.update(&rt2, |_| Some(Patch::new().state(JobState::Failed).set("activeItemId", Value::Null).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", json!({ "code": code, "retryable": false }))));
             } else {
                 let _ = me.finalize(&rt2);
@@ -1746,6 +1742,13 @@ impl Service {
     pub fn fail_item(&self, rt: &Arc<Runtime>, item_id: &str, e: &Fail) -> SResult<()> {
         let retryable = e.retryable || Self::is_retryable_network(e);
         let code = stable_failure(e, "operation-failed");
+        // Log the initiating error before cleanup or its manifest write can
+        // fail too. Encode/save/cancellation errors may have no other log.
+        if code != "invalid-h264" && super::detailed_failure(&code).is_none() {
+            let m = rt.manifest();
+            let relative = m.item(item_id).and_then(|i| i.str("relativePath")).unwrap_or("");
+            super::log_line(format!("[CONVERTER] Clip {relative:?} ({} {item_id}) operation ended: {code}{}", m.id(), e.detail.as_deref().map(|d| format!(": {d}")).unwrap_or_default()));
+        }
         if code == "invalid-h264" {
             if let Some(detail) = &e.detail {
                 let m = rt.manifest();
@@ -1802,7 +1805,7 @@ impl Service {
         let withdrawn = (e.is("NODE_WITHDRAWN") || memory_paused) && !cancel_requested && cleanup.cleaned;
         let stopped = (stop_requested || halted_by_recovery || withdrawn) && !cancel_requested;
         let terminally = cancel_requested;
-        let own = ownership.clone().unwrap_or_default();
+        let own = cleanup.own.clone();
         let next = if stopped { ItemState::Queued } else if terminally { ItemState::Cancelled } else { ItemState::Failed };
         let changes: Changes = vec![
             ("state", Some(next.into())),
@@ -1810,6 +1813,8 @@ impl Service {
             ("resultCode", if memory_paused {Some(json!("gpu-memory-retry"))} else if stopped && cleanup.cleaned { None } else { Some(json!(if !cleanup.cleaned { "cleanup-pending".to_string() } else { code.clone() })) }),
             ("ownedPaths", if !cleanup.cleaned { Some(Value::Object(own.paths.clone())) } else { None }),
             ("ownedArtifacts", if !cleanup.cleaned { Some(Value::Object(own.arts.clone())) } else { None }),
+            ("publicationArtifact", if !cleanup.cleaned { own.publication.clone() } else { None }),
+            ("replacementPhase", if !cleanup.cleaned { rt.lock().item(item_id).and_then(|i| i.get("replacementPhase").cloned()) } else { None }),
         ];
         let phase = rt.manifest().replacement_phase().map(Value::from).unwrap_or(Value::Null);
         self.item_patch(rt, item_id, changes, vec![
@@ -2198,6 +2203,41 @@ fn verify_source_detail(details: &Value) -> String {
 #[cfg(test)]
 pub(super) fn verify_source_detail_for_test(read: u64, stat: u64) -> String {
     verify_source_detail(&json!({ "statBytes": stat, "readBytes": read }))
+}
+
+#[cfg(test)]
+mod manifest_discovery_tests {
+    use super::*;
+    use super::super::lanes_tests::{Harness,HarnessOptions};
+
+    #[test]
+    fn manifest_discovery_chunks_a_source_larger_than_the_manifest_item_limit() {
+        let h=Harness::new(HarnessOptions{clips:0,..Default::default()});
+        let folder=h.dir.path().join("footage/RecentClips");
+        // Header-free placeholders are never encoded; this test runs discovery only.
+        for n in 0..50_001 {
+            let name=format!("2026-01-01_{:02}-{:02}-{:02}-front.mp4",n/3600,(n/60)%60,n%60);
+            std::fs::write(folder.join(name),b"generated").unwrap();
+        }
+        let c=h.config(json!({"autoConvert":true,"outputMode":"replace","destinationRoot":null,"replacementConfirmed":true}));
+        let m=h.service().store().create(json!({"state":"discovering","config":c,"discoveryComplete":false}).as_object().unwrap()).unwrap();
+        let rt=h.service().ensure_runtime(m.id()).unwrap();
+        h.service().produce(&rt).unwrap();
+        let first=rt.manifest();
+        assert_eq!(first.items.len(),40_000);
+        assert_eq!(first.get("discoveryComplete"),Some(&json!(true)));
+        assert_eq!(first.str("moreAfter"),first.items.last().unwrap().str("relativePath"));
+        assert_eq!(first.str("moreAfter"),Some("RecentClips/2026-01-01_11-06-39-front.mp4"));
+        let mut next=c; next["resumeAfter"]=json!(first.str("moreAfter").unwrap());
+        let m2=h.service().store().create(json!({"state":"discovering","config":next,"discoveryComplete":false}).as_object().unwrap()).unwrap();
+        let rt2=h.service().ensure_runtime(m2.id()).unwrap();
+        h.service().produce(&rt2).unwrap();
+        let second=rt2.manifest();
+        assert_eq!(second.items.len(),10_001);
+        assert!(second.get("moreAfter").is_none());
+        assert_eq!(second.items[0].str("relativePath"),Some("RecentClips/2026-01-01_11-06-40-front.mp4"));
+        assert_eq!(std::fs::read_dir(folder).unwrap().count(),50_001,"discovery keeps every source");
+    }
 }
 
 #[cfg(test)]

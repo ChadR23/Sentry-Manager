@@ -78,13 +78,37 @@ impl Auto {
         Self::config_for(s, root).or_else(|| s.saved.iter().find(|c| c["sourceRoot"] == root).cloned())
     }
 
-    pub(super) fn inherit_speed_source(&self, config: &mut Value) {
+    /// UI annotation only; never part of a job or a saved encoding config.
+    pub(super) fn with_speed_source(s: &Inner, config: &mut Value) {
         let root = config["sourceRoot"].as_str().unwrap_or("");
-        let s = self.lock();
         let e = &s.status["speedTests"][root];
         let tested = e["settingsSource"] == "test" && e["deviceSettings"] == device_settings(config);
         config.as_object_mut().unwrap().shift_remove("deviceSettingsSource");
         if tested { config["deviceSettingsSource"] = json!("test"); }
+    }
+
+    /// Older builds persisted the UI annotation into settings/vehicles. Keep
+    /// its provenance in speed-tests.json and atomically repair those files.
+    pub(super) fn repair_legacy_device_settings(&self, file: &str, mut stored: Value) -> Value {
+        let configs = if stored.is_array() { stored.as_array_mut() } else { stored.get_mut("configs").and_then(Value::as_array_mut) };
+        let mut changed = false;
+        for c in configs.into_iter().flatten() {
+            let marker = c.as_object_mut().and_then(|m| m.shift_remove("deviceSettingsSource"));
+            changed |= marker.is_some();
+            if marker == Some(json!("test")) {
+                let Some(root) = c["sourceRoot"].as_str() else { continue };
+                let mut s = self.lock();
+                if !s.status["speedTests"].is_object() { s.status["speedTests"] = json!({}); }
+                if s.status["speedTests"][root].is_null() {
+                    s.status["speedTests"][root] = json!({"settingsSource":"test","deviceSettings":device_settings(c)});
+                }
+            }
+        }
+        if changed {
+            let result = self.save_speed().and_then(|_| self.write_json(file, &stored).map_err(|e| super::super::owned::code_of(&e).to_string()));
+            if let Err(e) = result { super::super::service::log_line(format!("[CONVERTER] {file} device settings migration could not be saved: {e}")); }
+        }
+        stored
     }
 
     pub fn request_speed_test(self: &Arc<Self>, root: &str) -> Result<Value, String> {
@@ -126,7 +150,7 @@ impl Auto {
         let lanes = json!(devices.iter().map(|d| json!({"device":d["id"],"concurrency":d["concurrency"]})).collect::<Vec<_>>());
         let lanes = normalize_lanes(&lanes).map_err(|e| e.code)?.ok_or("SPEED_TEST_FAILED")?;
         c["concurrency"] = json!(lanes_total(&lanes)); c["lanes"] = lanes;
-        c["deviceSettingsSource"] = json!("test");
+        c.as_object_mut().unwrap().shift_remove("deviceSettingsSource");
         let mut settings = s.settings.clone();
         if let Some(slot) = settings["configs"].as_array_mut().unwrap().iter_mut().find(|v| v["sourceRoot"] == root) {
             *slot = c.clone();

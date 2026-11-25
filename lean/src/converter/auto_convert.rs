@@ -119,6 +119,7 @@ pub fn normalize_configs(value: &Value) -> Vec<Value> {
             continue;
         }
         let mut copy = c.as_object().unwrap().clone();
+        copy.shift_remove("deviceSettingsSource");
         if copy.get("keepOffTarget") != Some(&json!(true)) {
             copy.shift_remove("keepOffTarget");
         }
@@ -592,7 +593,9 @@ impl Auto {
                 return true;
             }
             new_files += 1;
-            true
+            // A check only needs enough work for the next manifest. The job's
+            // discovery and moreAfter handle subsequent batches.
+            new_files < super::service::DEFAULT_JOB_CLIP_LIMIT as i64
         });
         {
             let mut a = self.sweep_abort.lock().unwrap();
@@ -647,7 +650,11 @@ impl Auto {
     }
 
     fn state_of(s: &Inner) -> Value {
-        json!({ "settings": s.settings, "status": s.status, "saved": s.saved })
+        let mut settings = s.settings.clone();
+        for c in settings["configs"].as_array_mut().into_iter().flatten() { Self::with_speed_source(s, c); }
+        let mut saved = s.saved.clone();
+        for c in &mut saved { Self::with_speed_source(s, c); }
+        json!({ "settings": settings, "status": s.status, "saved": saved })
     }
 
     /// getState()
@@ -943,6 +950,7 @@ impl Auto {
 
     fn note_source(s: &mut Inner, root: &str, fields: Value) {
         let mut cur = s.status["sources"].get(root).cloned().unwrap_or(json!({}));
+        if fields.get("error") == Some(&Value::Null) { cur.as_object_mut().unwrap().shift_remove("errorDetail"); }
         for (k, v) in fields.as_object().unwrap() {
             cur[k] = v.clone();
         }
@@ -1014,6 +1022,7 @@ impl Auto {
     fn start_job(&self, root: &str, config: &Value) -> bool {
         let mut job_config = config.as_object().cloned().unwrap_or_default();
         job_config.shift_remove("nodesOff");
+        job_config.shift_remove("deviceSettingsSource");
         job_config.insert("autoConvert".into(), json!(true));
         match self.o.service.start(&Value::Object(job_config)) {
             Ok(id) => {
@@ -1028,11 +1037,13 @@ impl Auto {
             }
             Err(e) if e.is("JOB_ACTIVE") => false,
             Err(e) => {
+                let detail = e.detail.as_deref().unwrap_or("reason not recorded").to_string();
+                super::service::log_line(format!("[CONVERTER] Automatic source {root:?} job creation refused: {}: {detail}", code_of(&e)));
                 {
                     let mut s = self.lock();
                     let code = code_of(&e);
                     s.status["error"] = json!(code);
-                    Self::note_source(&mut s, root, json!({ "error": code }));
+                    Self::note_source(&mut s, root, json!({ "error": code, "errorDetail": detail }));
                     s.status["pending"].as_object_mut().unwrap().shift_remove(root);
                     self.defer_catch_up(&mut s, root);
                 }
@@ -1332,10 +1343,11 @@ impl Auto {
     pub fn start(self: &Arc<Self>) -> Value {
         self.load_speed();
         if let Some(stored) = self.read_json(SETTINGS_FILE) {
+            let stored = self.repair_legacy_device_settings(SETTINGS_FILE, stored);
             let n = normalize_settings(&stored).unwrap_or_else(|_| default_settings());
             self.lock().settings = n;
         }
-        let saved = self.read_json(SAVED_FILE).and_then(|v| v.as_array().map(|_| normalize_configs(&json!({ "configs": v })))).unwrap_or_default();
+        let saved = self.read_json(SAVED_FILE).map(|v| self.repair_legacy_device_settings(SAVED_FILE, v)).and_then(|v| v.as_array().map(|_| normalize_configs(&json!({ "configs": v })))).unwrap_or_default();
         for c in &saved { self.note_speed_settings(c, false); }
         self.lock().saved = saved;
         let configs = self.lock().settings["configs"].as_array().cloned().unwrap_or_default();
@@ -1467,7 +1479,6 @@ impl Auto {
         let mut normalized = normalize_settings(&Value::Object(input))?;
         for c in normalized["configs"].as_array_mut().unwrap() {
             self.note_speed_settings(c, false);
-            self.inherit_speed_source(c);
         }
         let (was, calendar) = (calendar_of(&stored), calendar_of(&normalized));
         for c in normalized["configs"].as_array().unwrap() {
@@ -1712,8 +1723,8 @@ impl Auto {
         sent.shift_remove("nodesOff");
         inherit_keep_recent(&mut sent, saved.iter().find(|c| c["sourceRoot"] == config["sourceRoot"]));
         let mut list: Vec<Value> = saved.into_iter().filter(|c| c["sourceRoot"] != config["sourceRoot"]).collect();
-        let mut sent = Value::Object(sent);
-        self.inherit_speed_source(&mut sent);
+        sent.shift_remove("deviceSettingsSource");
+        let sent = Value::Object(sent);
         list.push(sent);
         self.write_saved(list);
         self.changed();
