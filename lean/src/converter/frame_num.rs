@@ -423,7 +423,14 @@ pub fn dropped_pictures(pictures: &[Picture], max_frame_num: u64, poc_type: u64)
             return Err(gap("Non-reference pictures are not supported"));
         }
         if p.frame_num == pr {
-            return Err(gap("Repeated frame_num"));
+            if poc_type != 2 || p.slice_type % 5 != 0 {
+                return Err(gap("Repeated frame_num"));
+            }
+            // A reference P picture with POC type 2 repeats the previous POC,
+            // not its timestamp. FFmpeg outputs equal POCs (only a lower POC
+            // is out of order), so both pictures and their telemetry survive.
+            // It is not a gap and must not invalidate proven drops elsewhere.
+            continue;
         }
         if p.frame_num != (pr + 1) % max_frame_num {
             if poc_type != 2 {
@@ -632,6 +639,32 @@ mod tests {
         // the last one dropped
         assert!(dropped_pictures(&p[..15], 16, 2).is_err());
         assert!(dropped_pictures(&[pic(false, 1)], 16, 2).is_err());
+    }
+
+    #[test]
+    fn repeated_reference_pictures_keep_other_gaps_provable_only_for_poc_two() {
+        // A normal wrap, then two reference P pictures numbered 1. Both
+        // display; the later forward gap also displays. Only 15 -> 1 drops.
+        let mut p: Vec<_> = (0..18).map(|n| pic(n == 0, n % 16)).collect();
+        p.extend([pic(false, 1), pic(false, 2), pic(false, 4)]);
+        p.extend((5..16).map(|n| pic(false, n)));
+        p.extend([pic(false, 1), pic(true, 0), pic(false, 1)]);
+        assert_eq!(dropped_pictures(&p, 16, 2).unwrap(), vec![32]);
+        p[18].slice_type = 0; // Both encodings of a P slice (0 and 5).
+        assert_eq!(dropped_pictures(&p, 16, 2).unwrap(), vec![32]);
+        for poc in [0, 1] { assert!(dropped_pictures(&p, 16, poc).is_err()); }
+        for bad in [
+            Picture { ref_idc: 0, ..p[18].clone() },
+            Picture { field: 1, ..p[18].clone() },
+            Picture { resets: true, ..p[18].clone() },
+            Picture { slice_type: 1, ..p[18].clone() },
+        ] {
+            let mut unknown = p.clone();
+            unknown[18] = bad;
+            assert!(dropped_pictures(&unknown, 16, 2).is_err());
+        }
+        p[33] = pic(false, 2);
+        assert!(dropped_pictures(&p, 16, 2).is_err(), "a picture after a wrap gap remains unknown");
     }
 
     #[test]

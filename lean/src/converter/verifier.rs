@@ -1251,6 +1251,9 @@ pub fn verify_candidate(o: &VerifyOptions) -> Verdict {
 #[cfg(test)]
 #[path = "source_checks_tests.rs"]
 mod source_checks_tests;
+#[cfg(test)]
+#[path = "frame_num_tests.rs"]
+mod frame_num_tests;
 
 #[cfg(test)]
 mod tests {

@@ -9,6 +9,10 @@ fn generate(path: &Path, ticks: &[u64]) {
         "-bsf:v", "filter_units=remove_types=6,h264_metadata=tick_rate=20000/1:fixed_frame_rate_flag=0:sei_user_data=42424242-4242-4242-4242-424242426942+generated",
         "-video_track_timescale", "10000", "-use_editlist", "0"]).arg(path).output().unwrap();
     assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    retime_generated(path, ticks);
+}
+
+pub(super) fn retime_generated(path: &Path, ticks: &[u64]) {
     let mut bytes = fs::read(path).unwrap();
     if ticks.len() == 1 {
         // A fixed-size stsz is valid for a one-sample stub. No sample-index
@@ -47,7 +51,7 @@ fn encode(source: &Path, target: &Path) {
     encode_profile(source, target, "custom");
 }
 
-fn encode_profile(source: &Path, target: &Path, profile: &str) {
+pub(super) fn encode_profile(source: &Path, target: &Path, profile: &str) {
     use crate::converter::service::{tools::Inspected, work::initial_plan};
     let source_bytes = fs::read(source).unwrap();
     let timeline = extract(&source_bytes).unwrap();
@@ -68,7 +72,7 @@ fn verify(source: &Path, candidate: &Path, mode: &str) -> Verdict {
     verify_profile(source, candidate, mode, "custom")
 }
 
-fn verify_profile(source: &Path, candidate: &Path, mode: &str, profile: &str) -> Verdict {
+pub(super) fn verify_profile(source: &Path, candidate: &Path, mode: &str, profile: &str) -> Verdict {
     let dir = tempdir().unwrap();
     let registry = Registry::new(dir.path().to_path_buf());
     let runner = BoundedRunner::host();
