@@ -51,6 +51,20 @@ fn real_now() -> f64 {
     super::super::jobstore::now_ms() as f64
 }
 
+#[test]
+fn speed_test_recommendation_chooses_lightest_within_five_percent() {
+    let (d, clips) = one();
+    let clock = Mutex::new(0.0);
+    let level = |r: &LevelRequest, _: &Arc<AtomicBool>| {
+        let rate = match r.level {1 => 8.0, 2 => 9.6, 4 => 10.0, 6 => 9.8, _ => 9.9};
+        *clock.lock().unwrap() += (r.level.max(2) as f64) / rate * 60_000.0;
+        Ok(items(r.source_root, done))
+    };
+    let result = run(&clips, d.path(), &level, &|| *clock.lock().unwrap(), None).unwrap();
+    assert_eq!(result["best"]["level"], 2);
+    assert_eq!(result["best"]["filesPerMinute"], 9.6);
+}
+
 fn done(n: &str) -> Value {
     json!({ "state": "completed", "relativePath": format!("RecentClips/{n}") })
 }

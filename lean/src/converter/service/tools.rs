@@ -53,6 +53,9 @@ pub trait Tools: Send + Sync {
         self.select(codec)
     }
     fn ffmpeg_path(&self) -> &str;
+    /// Dimensions for the local GPU memory budget. Missing metadata uses the
+    /// conservative UHD estimate; it does not weaken source verification.
+    fn video_dimensions(&self, _source:&str, _cancel:&Arc<AtomicBool>)->Option<(u64,u64)> { None }
     /// network.checkPath(target, { allowAncestor })
     fn check_path(&self, target: &str, allow_ancestor: bool) -> bool {
         let mut probe = super::super::owned::resolve(Path::new(target));
@@ -210,6 +213,14 @@ fn codec_of(c: &str) -> CResult<Codec> {
 }
 
 impl Tools for RealTools {
+    fn video_dimensions(&self, source:&str, cancel:&Arc<AtomicBool>)->Option<(u64,u64)> {
+        let args=["-v","error","-select_streams","v:0","-show_entries","stream=width,height","-of","json",source].map(str::to_string);
+        let r=self.runner.run(&self.ffprobe,&args,&RunOptions{timeout_ms:Some(5000),cancel:Some(cancel.clone()),..Default::default()}).ok()?;
+        if r.status!=Some(0)||r.timed_out||r.aborted||r.output_limit_exceeded {return None;}
+        let v:Value=serde_json::from_str(&r.stdout).ok()?;
+        let (w,h)=(v["streams"][0]["width"].as_u64()?,v["streams"][0]["height"].as_u64()?);
+        (w>0&&h>0&&w<=32768&&h<=32768).then_some((w,h))
+    }
     fn inspect_video(&self, source: &str, cancel: &Arc<AtomicBool>) -> CResult<Inspected> {
         let run = |timeout: u64| self.runner.run(&self.ffprobe, &probe_args(source), &RunOptions { timeout_ms: Some(timeout), cancel: Some(cancel.clone()), cwd: None }).map_err(|_| CError::code("VIDEO_INSPECTION_FAILED"));
         let first = run(30_000)?;

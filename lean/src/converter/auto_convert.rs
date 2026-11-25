@@ -12,6 +12,7 @@
 use super::contracts::{lanes_total, node_key_of, normalize_lanes};
 use super::service::SResult;
 use indexmap::IndexMap;
+pub mod speed;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -421,6 +422,9 @@ pub struct Auto {
     st: Mutex<Inner>,
     ticking: Mutex<()>,
     sweep_abort: Mutex<Option<Arc<AtomicBool>>>,
+    speed_backend: Mutex<Option<Arc<dyn speed::Backend>>>,
+    speed_write: Mutex<()>,
+    settings_edit: Mutex<()>,
 }
 
 fn num_eq(a: &Value, b: &Value) -> bool {
@@ -442,7 +446,7 @@ impl Auto {
             "activeSource": null, "round": [], "sources": {}, "pending": {}, "active": {},
             "heldManual": [], "handledManual": []
         });
-        Arc::new(Auto { o, st: Mutex::new(Inner { settings: default_settings(), saved: vec![], status, indexes: Default::default(), timer: None, calendar: [Value::Null, Value::Null], round_open: false, round_at: None, catch_up_retry: Default::default() }), ticking: Mutex::new(()), sweep_abort: Mutex::new(None) })
+        Arc::new(Auto { o, st: Mutex::new(Inner { settings: default_settings(), saved: vec![], status, indexes: Default::default(), timer: None, calendar: [Value::Null, Value::Null], round_open: false, round_at: None, catch_up_retry: Default::default() }), ticking: Mutex::new(()), sweep_abort: Mutex::new(None), speed_backend: Mutex::new(None), speed_write: Mutex::new(()), settings_edit: Mutex::new(()) })
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -1135,10 +1139,12 @@ impl Auto {
     }
 
     fn tick_once(&self) -> Result<(), String> {
+        let speed_waiting = self.speed_tick();
         let time = (self.o.now)();
         let inside = self.inside_window_at(time);
         self.hold_manual_jobs(inside);
         self.follow_active_jobs(inside)?;
+        if speed_waiting { return Ok(()); }
         if self.lock().settings["enabled"] != true {
             return Ok(());
         }
@@ -1324,14 +1330,17 @@ impl Auto {
 
     /// start(): the saved settings, the automatic jobs still running when the app closed, the ticks
     pub fn start(self: &Arc<Self>) -> Value {
+        self.load_speed();
         if let Some(stored) = self.read_json(SETTINGS_FILE) {
             let n = normalize_settings(&stored).unwrap_or_else(|_| default_settings());
             self.lock().settings = n;
         }
         let saved = self.read_json(SAVED_FILE).and_then(|v| v.as_array().map(|_| normalize_configs(&json!({ "configs": v })))).unwrap_or_default();
+        for c in &saved { self.note_speed_settings(c, false); }
         self.lock().saved = saved;
         let configs = self.lock().settings["configs"].as_array().cloned().unwrap_or_default();
         for c in &configs {
+            self.note_speed_settings(c, false);
             self.load_index(c);
         }
         if let Ok(jobs) = self.o.service.list_summaries() {
@@ -1426,6 +1435,7 @@ impl Auto {
 
     /// configure(next): the shared schedule and window, plus one vehicle's folder
     pub fn configure(self: &Arc<Self>, next: &Value) -> Result<Value, String> {
+        let edit = self.settings_edit.lock().unwrap();
         let mut configs: Vec<Value> = self.lock().settings["configs"].as_array().cloned().unwrap_or_default();
         let mut keep: Option<Value> = None;
         if let Some(a) = next.get("configs").and_then(Value::as_array) {
@@ -1454,7 +1464,11 @@ impl Auto {
         input.insert("configs".into(), Value::Array(configs));
         let stored = self.lock().settings.clone();
         Self::inherit_calendar(&mut input, &stored)?;
-        let normalized = normalize_settings(&Value::Object(input))?;
+        let mut normalized = normalize_settings(&Value::Object(input))?;
+        for c in normalized["configs"].as_array_mut().unwrap() {
+            self.note_speed_settings(c, false);
+            self.inherit_speed_source(c);
+        }
         let (was, calendar) = (calendar_of(&stored), calendar_of(&normalized));
         for c in normalized["configs"].as_array().unwrap() {
             self.load_index(c);
@@ -1523,6 +1537,7 @@ impl Auto {
             }
         }
         self.changed();
+        drop(edit);
         if calendar.is_none() || !queued.is_empty() {
             self.tick_soon();
         }
@@ -1619,6 +1634,7 @@ impl Auto {
 
     /// setConcurrency(value, sourceRoot): later automatic jobs for that folder use the same number
     pub fn set_concurrency(&self, value: &Value, root: Option<&str>) -> Result<Value, String> {
+        let _edit = self.settings_edit.lock().unwrap();
         let current = Self::active_config(&self.lock(), root);
         let Some(current) = current else { return Ok(self.get_state()) };
         if current.get("concurrency") == Some(value) && current.get("lanes").is_none() {
@@ -1627,12 +1643,15 @@ impl Auto {
         let mut c = current.as_object().unwrap().clone();
         c.shift_remove("lanes");
         c.insert("concurrency".into(), value.clone());
+        c.shift_remove("deviceSettingsSource");
+        self.note_speed_settings(&Value::Object(c.clone()), true);
         self.replace_config(&current, Value::Object(c))?;
         Ok(self.get_state())
     }
 
     /// setLanes(value, sourceRoot)
     pub fn set_lanes(&self, value: &Value, root: Option<&str>) -> Result<Value, String> {
+        let _edit = self.settings_edit.lock().unwrap();
         let lanes = normalize_lanes(value).map_err(|e| e.code)?;
         let current = Self::active_config(&self.lock(), root);
         let (Some(current), Some(lanes)) = (current, lanes) else { return Ok(self.get_state()) };
@@ -1660,6 +1679,8 @@ impl Auto {
         if !off.is_empty() {
             ordered.insert("nodesOff".into(), json!(off));
         }
+        ordered.shift_remove("deviceSettingsSource");
+        self.note_speed_settings(&Value::Object(ordered.clone()), true);
         self.replace_config(&current, Value::Object(ordered))?;
         Ok(self.get_state())
     }
@@ -1682,6 +1703,8 @@ impl Auto {
             next.insert("config".into(), config.clone());
             return self.configure(&Value::Object(next));
         }
+        let _edit = self.settings_edit.lock().unwrap();
+        self.note_speed_settings(config, false);
         if !saved.iter().any(|c| c["sourceRoot"] == config["sourceRoot"]) && saved.len() >= MAX_SOURCES {
             return Err("TOO_MANY_AUTO_SOURCES".into());
         }
@@ -1689,7 +1712,9 @@ impl Auto {
         sent.shift_remove("nodesOff");
         inherit_keep_recent(&mut sent, saved.iter().find(|c| c["sourceRoot"] == config["sourceRoot"]));
         let mut list: Vec<Value> = saved.into_iter().filter(|c| c["sourceRoot"] != config["sourceRoot"]).collect();
-        list.push(Value::Object(sent));
+        let mut sent = Value::Object(sent);
+        self.inherit_speed_source(&mut sent);
+        list.push(sent);
         self.write_saved(list);
         self.changed();
         Ok(self.get_state())

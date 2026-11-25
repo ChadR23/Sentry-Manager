@@ -112,6 +112,11 @@ pub(crate) fn preview_conversion(service: &Service) -> super::service::SResult<O
 }
 
 impl Converter {
+    /// The host installs a weak backend before automatic conversion starts, so
+    /// a pending test survives closing the page without keeping the host alive.
+    pub fn install_speed_tests(self: &Arc<Self>) {
+        self.auto.install_speed_backend(Arc::new(SpeedBackend(Arc::downgrade(self))));
+    }
     pub fn open(o: RuntimeOptions) -> CResult<Converter> {
         if !o.data_path.is_absolute() || !o.temp_path.is_absolute() {
             return Err(CError::type_error("userDataPath and tempPath must be absolute"));
@@ -638,21 +643,25 @@ impl Converter {
     /// runBenchmark(request, onProgress): each requested codec in turn; with
     /// two or more GPUs every GPU by itself in turn
     pub fn run_benchmark(&self, req: &BenchRequest, on_progress: &(dyn Fn(Value) + Sync)) -> Result<Value, String> {
+        self.run_benchmark_mode(req, false, false, on_progress)
+    }
+
+    pub(crate) fn run_benchmark_mode(&self, req: &BenchRequest, requested: bool, guided: bool, on_progress: &(dyn Fn(Value) + Sync)) -> Result<Value, String> {
         if self.shut.load(Ordering::SeqCst) {
             return Err("SERVICE_SHUTDOWN".into());
         }
         let cancel = Arc::new(AtomicBool::new(false));
+        let _lease;
         {
             let mut b = self.bench.cancel.lock().unwrap();
             if b.is_some() {
                 return Err("BENCHMARK_ACTIVE".into());
             }
-            if self.service.preview_active() || has_active_job(&self.service, false) {
-                return Err("JOB_ACTIVE".into());
-            }
+            if guided && self.service.preview_active() { return Err("PREVIEW_ACTIVE".into()); }
+            _lease = self.service.try_speed_test(requested).map_err(|e| e.to_string())?.ok_or("JOB_ACTIVE")?;
             *b = Some(cancel.clone());
         }
-        let r = self.run_benchmark_inner(req, on_progress, &cancel);
+        let r = self.run_benchmark_inner(req, on_progress, &cancel, guided);
         let mut b = self.bench.cancel.lock().unwrap();
         if b.as_ref().is_some_and(|c| Arc::ptr_eq(c, &cancel)) {
             *b = None;
@@ -660,9 +669,10 @@ impl Converter {
         r
     }
 
-    fn run_benchmark_inner(&self, req: &BenchRequest, on_progress: &(dyn Fn(Value) + Sync), cancel: &Arc<AtomicBool>) -> Result<Value, String> {
+    fn run_benchmark_inner(&self, req: &BenchRequest, on_progress: &(dyn Fn(Value) + Sync), cancel: &Arc<AtomicBool>, guided: bool) -> Result<Value, String> {
         on_progress(json!({ "step": "scan" }));
         let clips = self.find_benchmark_clips(req.source_root.as_deref(), cancel);
+        if cancel.load(Ordering::SeqCst) { return Err("CANCELLED".into()); }
         if clips.is_empty() {
             return Err("BENCHMARK_SOURCE_REQUIRED".into());
         }
@@ -676,7 +686,36 @@ impl Converter {
                     continue;
                 };
                 let shown = json!({ "family": encoder.family, "codec": encoder.codec, "hardware": encoder.hardware });
-                let level = |l: &super::benchmark::LevelRequest, c: &Arc<AtomicBool>| self.run_level(current, req, device, l, c);
+                let gpu=encoder.hardware.then(|| device.map(super::devices::device_of).or_else(||encoder.device.clone()).or_else(|| {
+                    let id=(self.template.default_device.as_ref()?)(current)?;
+                    (self.template.resolve_device.as_ref()?)(&id).map(|v|super::devices::device_of(&v))
+                })).flatten();
+                let budget=if gpu.is_some() {clips.iter().map(|(p,_)|super::gpu_memory::estimate_mib(self.template.tools.video_dimensions(&p.to_string_lossy(),cancel))).max().unwrap_or(0)} else {0};
+                let memory=Mutex::new(None::<Value>);
+                let level = |l: &super::benchmark::LevelRequest, c: &Arc<AtomicBool>| {
+                    if let Some(gpu)=&gpu {
+                        if let Some(reading)=self.template.gpu_memory.reading(gpu) {
+                            let limit=reading.limit(budget).min(if self.template.gpu_memory.pressured(gpu) {1} else {64});
+                            let mut note=memory.lock().unwrap();
+                            if note.as_ref().is_none_or(|n|limit<n["limit"].as_u64().unwrap_or(64)) {
+                                *note=Some(json!({"freeMib":reading.free_mib,"totalMib":reading.total_mib,"perEncodeMib":budget,"limit":limit}));
+                            }
+                            if l.level as u64>limit {
+                                // A failed level ends the existing benchmark sweep;
+                                // its existing best/5% rule selects among measured levels.
+                                return Ok(json!({"items":[{"state":"failed","failure":{"code":"gpu-memory-limit","retryable":true}}]}));
+                            }
+                        }
+                    }
+                    let mut job = self.run_level(current, req, device, l, c)?;
+                    if guided && encoder.hardware { require_tested_encoder(&mut job, &encoder.codec); }
+                    if l.level>1 && gpu.as_ref().is_some_and(|d|self.template.gpu_memory.pressured(d)) {
+                        for i in job["items"].as_array_mut().into_iter().flatten() {
+                            if i["state"]=="completed" {i["state"]=json!("failed");i["failure"]=json!({"code":"gpu-memory-exhausted","retryable":true});}
+                        }
+                    }
+                    Ok(job)
+                };
                 let progress = |step: Value| {
                     let mut m = step.as_object().cloned().unwrap_or_default();
                     m.insert("codec".into(), json!(current));
@@ -699,7 +738,7 @@ impl Converter {
                     on_progress: &progress,
                     now: &now,
                     power_meter: self.power_meter.clone(),
-                    compare_verify_modes: vec!["quick".into(), "full".into()],
+                    compare_verify_modes: if guided { vec![] } else { vec!["quick".into(), "full".into()] },
                 });
                 match out {
                     Ok(r) => {
@@ -708,6 +747,7 @@ impl Converter {
                         for (k, v) in r.as_object().unwrap() {
                             m.insert(k.clone(), v.clone());
                         }
+                        if let Some(note)=memory.into_inner().unwrap() {m.insert("memory".into(),note);}
                         runs.push(Value::Object(m));
                     }
                     Err(e) if e == "CANCELLED" || cancel.load(Ordering::SeqCst) => return Err(e),
@@ -723,12 +763,13 @@ impl Converter {
         if cancel.load(Ordering::SeqCst) {
             return Err("CANCELLED".into());
         }
-        if gpus.len() < 2 {
+        if gpus.is_empty() || (!guided && gpus.len() < 2) {
             let tools = self.template.tools.clone();
             let runs = run_codecs(&|c: &str| if cpu_only { tools.select_cpu_fallback(c).ok() } else { tools.select(c).ok() }, None, json!({}))?;
             let first = runs.iter().find(|r| r.get("error").is_none()).or(runs.first()).cloned().unwrap_or(json!({}));
             let mut m = first.as_object().cloned().unwrap_or_default();
             m.insert("codecs".into(), Value::Array(runs));
+            if guided { m.insert("device".into(), json!({"id":"cpu","name":"CPU"})); }
             return Ok(Value::Object(m));
         }
         let mut devices = vec![];
@@ -740,6 +781,125 @@ impl Converter {
             devices.push(json!({ "device": named, "codecs": codecs }));
         }
         Ok(json!({ "devices": devices }))
+    }
+}
+
+struct SpeedBackend(std::sync::Weak<Converter>);
+
+/// GPU saturation can make the normal converter fall back to CPU. That is a
+/// useful conversion, but not a successful measurement of this GPU's capacity.
+/// Only the isolated benchmark's returned copy is adjusted, never a job store.
+fn require_tested_encoder(job: &mut Value, encoder: &str) {
+    for item in job["items"].as_array_mut().into_iter().flatten() {
+        if item["state"] == "completed" && item["encoder"] != encoder {
+            item["state"] = json!("failed");
+            item["failure"] = json!({"code":"device-fallback"});
+        }
+    }
+}
+impl super::auto_convert::speed::Backend for SpeedBackend {
+    fn devices(&self) -> Vec<Value> {
+        self.0.upgrade().map(|c| c.devices.local_devices()).unwrap_or_default()
+    }
+    fn run(&self, config: &Value, requested: bool, progress: &(dyn Fn(Value) + Sync)) -> Result<Value, String> {
+        let c = self.0.upgrade().ok_or("SERVICE_SHUTDOWN")?;
+        let req = BenchRequest { codecs:vec!["h265".into()], profile_id:config["profileId"].as_str().unwrap_or("aggressive").into(),
+            bitrate_kbps:config.get("bitrateKbps").cloned(), quality_level:config.get("qualityLevel").cloned(),
+            verify_mode:if config["verifyMode"] == "full" {"full"} else {"quick"}.into(), source_root:config["sourceRoot"].as_str().map(str::to_string) };
+        let result = c.run_benchmark_mode(&req, requested, true, progress)?;
+        speed_recommendation(&result)
+    }
+}
+
+/// Consume the benchmark's existing `best` choice. Never repeat its 5% maths,
+/// invent a rate for an unmeasured device, or adopt a failed/partial run.
+fn speed_recommendation(result: &Value) -> Result<Value, String> {
+    let entries = result["devices"].as_array().cloned().unwrap_or_else(|| vec![result.clone()]);
+    let mut devices = vec![];
+    for entry in entries {
+        let run = entry["codecs"].as_array().and_then(|a| a.iter().find(|r| r["codec"] == "h265")).unwrap_or(&entry);
+        if run["error"] == "UNSUPPORTED" { continue; }
+        let best = &run["best"];
+        let n = best["level"].as_i64().filter(|n| super::benchmark::LEVELS.contains(n)).ok_or("SPEED_TEST_FAILED")?;
+        if run["memory"]["limit"].as_u64().is_some_and(|limit|n as u64>limit) {return Err("SPEED_TEST_FAILED".into());}
+        let rate = best["filesPerMinute"].as_f64().filter(|n| n.is_finite() && *n > 0.0).ok_or("SPEED_TEST_FAILED")?;
+        if best["ok"] != true || !run["error"].is_null() || !entry["device"]["id"].is_string() { return Err("SPEED_TEST_FAILED".into()); }
+        let kwh = best["filesPerWh"].as_f64().filter(|n| n.is_finite() && *n > 0.0).map(|n| n * 1000.0);
+        let mut device=json!({"id":entry["device"]["id"],"name":entry["device"]["name"],"concurrency":n,"filesPerMinute":rate,"filesPerKwh":kwh});
+        if run["memory"].is_object() {device["memory"]=run["memory"].clone();}
+        devices.push(device);
+    }
+    if devices.is_empty() || devices.iter().map(|d| d["concurrency"].as_i64().unwrap_or(0)).sum::<i64>() > super::contracts::CONCURRENCY_MAX {
+        return Err("SPEED_TEST_FAILED".into());
+    }
+    Ok(json!({"devices":devices}))
+}
+
+#[cfg(test)]
+mod speed_tests {
+    use super::*;
+    use super::super::auto_convert::speed::{Backend, fingerprint};
+
+    #[test]
+    fn speed_test_cpu_fallback_does_not_count_as_gpu_capacity() {
+        let mut job = json!({"items":[{"state":"completed","encoder":"hevc_nvenc"},{"state":"completed","encoder":"libx265"}]});
+        require_tested_encoder(&mut job, "hevc_nvenc");
+        assert_eq!(job["items"][0]["state"], "completed");
+        assert_eq!(job["items"][1]["state"], "failed");
+        assert_eq!(job["items"][1]["failure"]["code"], "device-fallback");
+    }
+
+    #[test]
+    fn speed_test_uses_the_existing_best_per_device_and_rejects_unmeasured_results() {
+        let mut r = json!({"devices":[
+            {"device":{"id":"pci:0000:01:00.0","name":"GPU A"},"codecs":[{"codec":"h265","best":{"ok":true,"level":2,"filesPerMinute":9.6,"filesPerWh":3.2}}]},
+            {"device":{"id":"pci:0000:02:00.0","name":"GPU B"},"codecs":[{"codec":"h265","best":{"ok":true,"level":4,"filesPerMinute":8.0}}]}
+        ]});
+        let out = speed_recommendation(&r).unwrap();
+        assert_eq!(out["devices"][0]["concurrency"], 2);
+        assert_eq!(out["devices"][0]["filesPerKwh"], 3200.0);
+        assert_eq!(out["devices"][1]["concurrency"], 4);
+        assert!(out["devices"][1]["filesPerKwh"].is_null());
+        r["devices"][1]["codecs"][0]["best"]["ok"] = json!(false);
+        assert!(speed_recommendation(&r).is_err(), "a failed device does not partially overwrite settings");
+    }
+
+    #[test]
+    fn speed_test_fingerprint_ignores_enumeration_but_detects_new_devices() {
+        let a = json!({"id":"pci:0000:01:00.0","kind":"nvidia","name":"GPU A","index":0});
+        let b = json!({"id":"cpu","kind":"cpu","name":"CPU"});
+        let mut moved = a.clone(); moved["index"] = json!(1);
+        assert_eq!(fingerprint(&[a.clone(),b.clone()]), fingerprint(&[b.clone(),moved]));
+        assert_ne!(fingerprint(&[a,b.clone()]), fingerprint(&[b]));
+    }
+
+    #[test]
+    fn speed_test_generated_original_uses_real_converter_and_leaves_source_unchanged() {
+        let d = super::super::testutil::tempdir().unwrap();
+        let root = d.path().join("footage");
+        for dir in [root.join("RecentClips"),d.path().join("data"),d.path().join("temp")] { std::fs::create_dir_all(dir).unwrap(); }
+        let clip = root.join("RecentClips/2026-01-01_00-00-00-front.mp4");
+        assert!(std::process::Command::new("ffmpeg").args(["-v","error","-f","lavfi","-i","testsrc2=size=320x180:rate=24:duration=1",
+            "-c:v","libx264","-preset","ultrafast","-crf","12","-use_editlist","0"]).arg(&clip).status().unwrap().success());
+        let before = std::fs::read(&clip).unwrap();
+        let mut o = RuntimeOptions::new(d.path().join("data"),d.path().join("temp"),"ffmpeg","ffprobe");
+        o.auto_timer = false;
+        let mut discovery = super::super::devices::Discovery::new(None);
+        discovery.fixed = Some(Arc::new(|| vec![super::super::devices::cpu_device()])); o.discovery = Some(discovery);
+        let c = Arc::new(Converter::open(o).unwrap()); c.start().unwrap();
+        let backend = SpeedBackend(Arc::downgrade(&c));
+        let events = Mutex::new(vec![]);
+        let config = json!({"sourceRoot":root,"codec":"h265","profileId":"smallest","verifyMode":"quick"});
+        let result = backend.run(&config, false, &|p| events.lock().unwrap().push(p)).unwrap();
+        assert_eq!(result["devices"][0]["id"], "cpu");
+        assert!(result["devices"][0]["filesPerMinute"].as_f64().unwrap() > 0.0);
+        assert!(events.lock().unwrap().iter().any(|p| p["step"] == "run"));
+        assert!(!events.lock().unwrap().iter().any(|p| p["step"] == "verify"), "guided tests use the requested verification mode only");
+        assert_eq!(std::fs::read(&clip).unwrap(), before);
+        assert!(c.service.list().unwrap().is_empty(), "isolated test jobs never enter the owner's store");
+        std::fs::remove_file(clip).unwrap();
+        assert_eq!(backend.run(&config,false,&|_|{}).unwrap_err(),"BENCHMARK_SOURCE_REQUIRED");
+        c.shutdown();
     }
 }
 

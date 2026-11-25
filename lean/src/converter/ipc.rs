@@ -12,15 +12,18 @@ use super::contracts;
 use super::ctx::ConverterCtx;
 use super::service::{Fail, Listener, SResult, Service};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-pub const CHANNELS: [&str; 25] = [
+pub const CHANNELS: [&str; 29] = [
     "converter:chooseFolder", "converter:start", "converter:getCurrent", "converter:pause", "converter:setConcurrency", "converter:resume", "converter:cancel", "converter:discard", "converter:retryFailed", "converter:dismissSummary",
     "converter:getCapabilities", "converter:subscribeProgress", "converter:unsubscribeProgress", "converter:runBenchmark", "converter:cancelBenchmark", "converter:getAuto", "converter:setAuto", "converter:checkAutoNow",
     "converter:saveVehicle", "converter:forgetVehicle", "converter:devices", "converter:setLanes",
     "converter:previewStart", "converter:previewGet", "converter:previewCancel",
+    "converter:requestSpeedTest", "converter:applySpeedTest",
+    "converter:failedClips",
+    "converter:retryTemporary",
 ];
 const GROUPS: [&str; 3] = ["RecentClips", "SavedClips", "SentryClips"];
 const ACTIVE_STATES: [&str; 10] = ["discovering", "waiting", "staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing", "paused", "paused_network"];
@@ -72,6 +75,7 @@ pub trait ServiceApi: Send + Sync {
     fn cancel(&self, id: &str) -> SResult<Value>;
     fn discard(&self, id: &str) -> SResult<Value>;
     fn retry_failed(&self, id: &str) -> SResult<Value>;
+    fn retry_temporary(&self, _id:&str)->SResult<Value> {Err(Fail::code("OPERATION_FAILED"))}
     fn dismiss_summary(&self, id: &str) -> SResult<Value>;
     fn set_concurrency(&self, id: &str, value: &Value) -> SResult<Value>;
     /// (Node answers OPERATION_FAILED for a service without setLanes)
@@ -133,6 +137,7 @@ impl ServiceApi for Service {
     fn retry_failed(&self, id: &str) -> SResult<Value> {
         Service::retry_failed(self, id)
     }
+    fn retry_temporary(&self,id:&str)->SResult<Value> {Service::retry_temporary(self,id)}
     fn dismiss_summary(&self, id: &str) -> SResult<Value> {
         Service::dismiss_summary(self, id)
     }
@@ -236,6 +241,18 @@ pub fn sanitize_snapshot(snapshot: &Value) -> R<Value> {
     let cleanup_pending = items.iter().filter(|i| i.get("resultCode").and_then(Value::as_str).unwrap_or("").contains("cleanup-pending")).count();
     let active_index = items.iter().position(|i| i.get("id").is_some() && i.get("id") == m.get("activeItemId"));
     let failed: Vec<usize> = items.iter().enumerate().filter(|(_, i)| i["state"] == "failed").map(|(n, _)| n).collect();
+    // Preserve reasons from the complete manifest, not only the visible window.
+    // An absent retryable flag stays unknown rather than becoming false.
+    let mut failures = BTreeMap::new();
+    for &n in &failed {
+        let i = &items[n];
+        let key = (i["failure"]["code"].as_str().unwrap_or("").to_string(),
+            i["resultCode"].as_str().unwrap_or("").to_string(), i["failure"]["retryable"].as_bool(), i["encoder"].as_str().unwrap_or("").to_string());
+        *failures.entry(key).or_insert(0usize) += 1;
+    }
+    let failure_counts = json!(failures.into_iter().map(|((code,result,retryable,encoder),count)|
+        json!({"code":code,"resultCode":result,"retryable":retryable,"encoder":encoder,"count":count})).collect::<Vec<_>>());
+    let gpu_retries=items.iter().filter(|i| (i["state"]=="queued" || i["state"]=="processing") && i["resultCode"]=="gpu-memory-retry").count();
     let mut limit = 256usize;
     loop {
         let mut selected: Vec<usize> = Vec::new();
@@ -264,6 +281,8 @@ pub fn sanitize_snapshot(snapshot: &Value) -> R<Value> {
         prepared.insert("items".into(), Value::Array(selected.iter().map(|n| items[*n].clone()).collect()));
         prepared.insert("itemCount".into(), json!(count));
         prepared.insert("itemStateCounts".into(), Value::Object(state_counts.clone()));
+        prepared.insert("itemFailureCounts".into(), failure_counts.clone());
+        prepared.insert("itemGpuRetryCount".into(),json!(gpu_retries));
         prepared.insert("cleanupPendingCount".into(), json!(cleanup_pending));
         prepared.insert("itemsTruncated".into(), json!(true));
         match bounded(&Value::Object(prepared), MAX_SNAPSHOT_BYTES, true, true) {
@@ -317,6 +336,9 @@ pub fn response_error(e: &IpcError) -> Value {
     let mut err = Map::new();
     err.insert("code".into(), json!(if ok { raw } else { "OPERATION_FAILED".into() }));
     err.insert("retryable".into(), json!(e.retryable));
+    if e.code == "SPEED_TEST_RUNNING" {
+        err.insert("message".into(), json!("A speed test is running; resume when it finishes"));
+    }
     if e.own {
         if let Some(d) = e.details.as_ref().filter(|d| d.is_object()) {
             if let Ok(b) = bounded(d, 4096, false, false) {
@@ -804,6 +826,18 @@ impl Bridge {
                 no_payload(p)?;
                 self.current_job()
             }
+            "failedClips" => {
+                let Some(m) = p.and_then(Value::as_object).filter(|m| m.len() == 2 && m.contains_key("jobId")) else { return fail("INVALID_REQUEST") };
+                let Some(offset) = m.get("offset").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()) else { return fail("INVALID_REQUEST") };
+                let job = self.service.get(&safe_job_id(m.get("jobId"))?)?;
+                let failed: Vec<&Value> = job["items"].as_array().into_iter().flatten().filter(|i| i["state"] == "failed").collect();
+                let items: Vec<Value> = failed.iter().skip(offset).take(100).map(|i| json!({
+                    "relativePath":i["relativePath"],"resultCode":i["resultCode"],"encoder":i["encoder"],
+                    "failure":{"code":i["failure"]["code"],"retryable":i["failure"]["retryable"]}
+                })).collect();
+                let next = offset.saturating_add(items.len());
+                bounded(&json!({"total":failed.len(),"nextOffset":if next < failed.len() {Some(next)} else {None},"items":items}), MAX_SNAPSHOT_BYTES, true, true)
+            }
             "pause" => sanitize_snapshot(&self.service.pause(&job_id(p)?)?),
             "setConcurrency" => {
                 let m = p.and_then(Value::as_object);
@@ -862,6 +896,7 @@ impl Bridge {
                 self.current_job()
             }
             "retryFailed" => sanitize_snapshot(&self.service.retry_failed(&job_id(p)?)?),
+            "retryTemporary" => sanitize_snapshot(&self.service.retry_temporary(&job_id(p)?)?),
             "dismissSummary" => sanitize_snapshot(&self.service.dismiss_summary(&job_id(p)?)?),
             "getCapabilities" => {
                 no_payload(p)?;
@@ -901,6 +936,13 @@ impl Bridge {
                 no_payload(p)?;
                 let Some(auto) = self.extras().auto else { return fail("AUTO_UNAVAILABLE") };
                 bounded(&auto.get_state(), MAX_PAYLOAD_BYTES, false, true)
+            }
+            "requestSpeedTest" | "applySpeedTest" => {
+                let Some(auto) = self.extras().auto else { return fail("AUTO_UNAVAILABLE") };
+                let Some(m) = p.and_then(Value::as_object).filter(|m| m.len() == 1) else { return fail("INVALID_REQUEST") };
+                let Some(root) = m.get("sourceRoot").and_then(Value::as_str).filter(|r| !r.is_empty() && js_len(r) <= 4096) else { return fail("INVALID_REQUEST") };
+                let state = if name == "requestSpeedTest" { auto.request_speed_test(root) } else { auto.apply_speed_test(root) }.map_err(code_err)?;
+                bounded(&state, MAX_PAYLOAD_BYTES, false, true)
             }
             "setAuto" => self.set_auto(p, &replacement),
             "saveVehicle" => {
@@ -1378,5 +1420,45 @@ mod tests {
         assert!(s.get("ownedArtifacts").is_none() && s["items"][0].get("ownedPaths").is_none());
         assert_eq!(s["items"][0]["id"], "item-000000");
         assert!(s["items"].as_array().unwrap().iter().any(|i| i["id"] == "item-000007"));
+    }
+
+    #[test]
+    fn status_failure_counts_preserve_reasons_outside_the_snapshot_window() {
+        let items: Vec<Value> = (0..600).map(|i| {
+            let code = if i < 400 { "frame-count-mismatch" } else if i < 450 { "invalid-h264" } else { "EIO" };
+            json!({"id":format!("item-{i:06}"),"state":if i < 500 {"failed"} else {"completed"},
+                "relativePath":format!("RecentClips/generated-{i}.mp4"),"resultCode":code,"failure":{"code":code,"retryable":i >= 450}})
+        }).collect();
+        let out = sanitize_snapshot(&json!({"id":"job-1","state":"paused","items":items})).unwrap();
+        assert!(out["itemFailureCounts"].is_array(), "a trimmed snapshot must retain all failure counts by reason and retryability");
+        let groups = out["itemFailureCounts"].as_array().unwrap();
+        assert_eq!(groups.iter().map(|g| g["count"].as_u64().unwrap()).sum::<u64>(), 500);
+        assert_eq!(groups.iter().find(|g| g["code"] == "frame-count-mismatch").unwrap()["count"], 400);
+        assert_eq!(groups.iter().find(|g| g["code"] == "invalid-h264").unwrap()["retryable"], false);
+        assert_eq!(groups.iter().find(|g| g["code"] == "EIO").unwrap()["retryable"], true);
+        assert_eq!(out["items"].as_array().unwrap().len(), 256);
+    }
+
+    #[test]
+    fn status_failed_clips_are_read_only_paginated_and_only_expose_relative_paths() {
+        let (bridge, base, fake) = keep_recent_bridge("failed-clips");
+        let items: Vec<Value> = (0..250).map(|i| json!({"state":"failed","relativePath":format!("RecentClips/generated-{i}.mp4"),
+            "sourcePath":"/private/generated/source.mp4","resultCode":"invalid-h264","failure":{"code":"invalid-h264","retryable":false}})).collect();
+        let original = json!({"id":"job-1","state":"paused","items":items});
+        fake.0.lock().unwrap().1.push(("job-1".into(),original.clone()));
+        let out = bridge.invoke("failedClips", Some(json!({"jobId":"job-1","offset":100})), None);
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["value"]["total"], 250);
+        assert_eq!(out["value"]["nextOffset"], 200);
+        assert_eq!(out["value"]["items"].as_array().unwrap().len(), 100);
+        assert_eq!(out["value"]["items"][0]["relativePath"], "RecentClips/generated-100.mp4");
+        assert!(out["value"]["items"][0].get("sourcePath").is_none());
+        assert_eq!(out["value"]["items"][0]["failure"]["retryable"], false);
+        assert_eq!(bridge.invoke("failedClips",Some(json!({"jobId":"job-1","offset":200})),None)["value"]["nextOffset"], Value::Null);
+        for bad in [json!({"jobId":"job-1","offset":-1}),json!({"jobId":"job-1","offset":0,"unexpected":true})] {
+            assert_eq!(bridge.invoke("failedClips",Some(bad),None)["error"]["code"], "INVALID_REQUEST");
+        }
+        assert_eq!(fake.get_("job-1").unwrap(), original);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

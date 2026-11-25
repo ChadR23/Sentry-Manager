@@ -3741,6 +3741,22 @@
       "call": "POST /api/converter/invoke/getAuto"
     },
     {
+      "name": "requestSpeedTest",
+      "call": "POST /api/converter/invoke/requestSpeedTest"
+    },
+    {
+      "name": "applySpeedTest",
+      "call": "POST /api/converter/invoke/applySpeedTest"
+    },
+    {
+      "name": "failedClips",
+      "call": "POST /api/converter/invoke/failedClips"
+    },
+    {
+      "name": "retryTemporary",
+      "call": "POST /api/converter/invoke/retryTemporary"
+    },
+    {
       "name": "setAuto",
       "call": "POST /api/converter/invoke/setAuto"
     },

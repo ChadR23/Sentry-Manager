@@ -40,6 +40,7 @@ impl Host {
                     Some(rt) => rt,
                     None => {
                         let rt = Arc::new(open()?);
+                        rt.install_speed_tests();
                         *self.runtime.lock().unwrap() = Some(rt.clone());
                         rt
                     }

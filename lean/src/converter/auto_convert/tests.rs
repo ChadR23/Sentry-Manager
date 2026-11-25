@@ -5,6 +5,8 @@ use super::*;
 use crate::converter::service::{Fail, SResult};
 use crate::converter::testutil::tempdir;
 use std::collections::HashMap;
+#[path = "speed_tests.rs"]
+mod speed_tests;
 
 #[derive(Default)]
 struct FakeService {
@@ -87,6 +89,25 @@ fn opts(service: Arc<FakeService>, scanner: Arc<Scanner>, dir: &Path) -> AutoOpt
 
 fn clip(rel: &str, size: i64) -> Value {
     json!({ "relativePath": rel, "sourceBytes": size, "mtimeMs": 5 })
+}
+
+#[test]
+fn speed_test_legacy_manual_lanes_are_user_chosen_and_persist() {
+    let d = tempdir().unwrap();
+    let service = Arc::new(FakeService::default());
+    let scanner: Arc<Scanner> = Arc::new(|_, _, _| Ok(()));
+    let auto = Auto::new(opts(service.clone(), scanner.clone(), d.path()));
+    let config = json!({"sourceRoot":"/generated", "codec":"h265", "profileId":"aggressive",
+        "concurrency":6, "lanes":[{"device":"pci:0000:01:00.0","concurrency":2},{"device":"pci:0000:02:00.0","concurrency":4}]});
+    std::fs::write(d.path().join(SAVED_FILE), json!([config]).to_string()).unwrap();
+    auto.start();
+    assert_eq!(auto.get_state()["status"]["speedTests"]["/generated"]["settingsSource"], "user", "legacy disabled setups have no speed-test metadata yet");
+    auto.save_vehicle(&config).unwrap();
+    assert_eq!(auto.get_state()["status"]["speedTests"]["/generated"]["settingsSource"], "user");
+    let again = Auto::new(opts(service, scanner, d.path()));
+    again.start();
+    assert_eq!(again.get_state()["status"]["speedTests"]["/generated"]["settingsSource"], "user");
+    assert_eq!(again.get_state()["saved"][0]["lanes"], config["lanes"]);
 }
 
 fn give_up_config(dir: &Path) -> Value {

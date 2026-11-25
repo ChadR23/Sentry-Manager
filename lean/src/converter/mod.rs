@@ -38,6 +38,7 @@ pub mod runtime;
 pub mod scanner;
 pub mod schedule;
 pub mod service;
+pub mod gpu_memory;
 pub mod snapshot;
 pub mod staging;
 pub mod stats;

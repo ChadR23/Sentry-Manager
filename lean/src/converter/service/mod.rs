@@ -25,6 +25,10 @@ mod node_tests;
 mod refusal_tests;
 #[cfg(test)]
 mod memory_tests;
+#[cfg(test)]
+mod speed_tests;
+#[cfg(test)]
+mod gpu_memory_tests;
 
 pub use encode::{parse_progress_line, Progress};
 pub(crate) use encode::EncodeRequest;
@@ -46,6 +50,14 @@ pub const OWNED_KEYS: [&str; 6] = ["stagedSource", "encodedCandidate", "publicat
 const PRIVATE_SNAPSHOT_KEYS: [&str; 3] = ["ownedPaths", "ownedArtifacts", "publicationArtifact"];
 pub const MAX_RECORDED_ATTEMPTS: i64 = 3;
 pub const UNDER_SOURCE_SHARES: [f64; 2] = [0.85, 0.6];
+
+fn temporary_retry(item:&Value)->bool {
+    if item["state"]!="failed" || item["resultCode"].as_str().is_some_and(|c|c.contains("cleanup-pending")) {return false;}
+    let code=item["resultCode"].as_str().or(item["failure"]["code"].as_str()).unwrap_or("");
+    if code=="invalid-h264" {return false;}
+    item["failure"]["retryable"]==true || (code=="frame-count-mismatch" && item["encoder"].as_str().is_some_and(|e|
+        ["_nvenc","_vaapi","_qsv","_amf"].iter().any(|suffix|e.ends_with(suffix))))
+}
 pub const QUICK_RETRY_LIMIT: u32 = 2;
 pub const SOURCE_READS_AT_ONCE: usize = 2;
 
@@ -384,6 +396,7 @@ pub fn output_path(config: &Value, item: &Value) -> String {
 
 #[derive(Clone)]
 pub struct Options {
+    pub gpu_memory: Arc<super::gpu_memory::Gate>,
     pub store: Arc<JobStore>,
     pub staging: Arc<Tx>,
     pub tools: Arc<dyn Tools>,
@@ -423,6 +436,7 @@ pub struct Options {
 impl Options {
     pub fn new(store: Arc<JobStore>, staging: Arc<Tx>, tools: Arc<dyn Tools>) -> Options {
         Options {
+            gpu_memory: Arc::new(super::gpu_memory::Gate::system()),
             store,
             staging,
             tools,
@@ -630,6 +644,7 @@ pub struct Inner {
     pub listener_seq: AtomicU64,
     pub shutting_down: AtomicBool,
     preview_active: AtomicBool,
+    speed_test_active: AtomicBool,
     pub command: Mutex<()>,
     pub owner_seq: AtomicU64,
     pub reads: Arc<(Mutex<usize>, Condvar)>,
@@ -646,6 +661,10 @@ pub struct Inner {
 pub struct Service(pub Arc<Inner>);
 
 pub struct PreviewLease(Service);
+pub struct SpeedTestLease(Service);
+impl Drop for SpeedTestLease {
+    fn drop(&mut self) { self.0.0.speed_test_active.store(false, Ordering::SeqCst); }
+}
 impl Drop for PreviewLease {
     fn drop(&mut self) { self.0.0.preview_active.store(false, Ordering::SeqCst); }
 }
@@ -655,12 +674,40 @@ pub fn service_error(code: &str) -> Fail {
 }
 
 impl Service {
+    /// Reserve the whole server without changing a job. A requested test may
+    /// borrow an owner pause only after discovery and every worker have drained.
+    /// The command lock makes this check atomic with start/resume/retry.
+    pub fn try_speed_test(&self, requested: bool) -> SResult<Option<SpeedTestLease>> {
+        self.mutate(|| {
+            if self.0.shutting_down.load(Ordering::SeqCst) { return Err(service_error("SERVICE_SHUTDOWN")); }
+            if self.preview_active() || self.speed_test_active() { return Ok(None); }
+            for rt in self.0.jobs.lock().unwrap().values() {
+                let s = rt.lock();
+                if !s.children.is_empty() || !s.encodes.is_empty() || !s.in_flight.is_empty() || s.commit_holder.is_some()
+                    || s.node_checks.values().any(|n| *n > 0) || (s.manifest.state().is_terminal() && s.running) { return Ok(None); }
+            }
+            for j in self.list_summaries()? {
+                if ["completed", "failed", "cancelled"].contains(&j["state"].as_str().unwrap_or("")) { continue; }
+                if !requested || j["state"] != "paused" || !j["recovery"].is_null() { return Ok(None); }
+                let Some(rt) = j["id"].as_str().and_then(|id| self.runtime_of(id)) else { return Ok(None) };
+                let s = rt.lock();
+                if !s.pause_requested || s.preview_pause.is_some() || !s.producer_done || s.parked_workers < s.live_workers
+                    || !s.children.is_empty() || !s.encodes.is_empty() || !s.in_flight.is_empty() || s.commit_holder.is_some()
+                    || s.node_checks.values().any(|n| *n > 0) || s.recovery_required || s.cancel_requested || s.stop_requested {
+                    return Ok(None);
+                }
+            }
+            self.0.speed_test_active.store(true, Ordering::SeqCst);
+            Ok(Some(SpeedTestLease(self.clone())))
+        })
+    }
+    pub fn speed_test_active(&self) -> bool { self.0.speed_test_active.load(Ordering::SeqCst) }
     /// Reserve the converter while idle (parked jobs may keep their ownership).
     /// The command lock closes the idle-check/start-or-resume race.
     pub fn try_preview(&self) -> SResult<Option<PreviewLease>> {
         self.mutate(|| {
             if self.0.shutting_down.load(Ordering::SeqCst) { return Err(service_error("SERVICE_SHUTDOWN")); }
-            if self.preview_active() || super::runtime::preview_conversion(self)?.is_some() { return Ok(None); }
+            if self.preview_active() || self.speed_test_active() || super::runtime::preview_conversion(self)?.is_some() { return Ok(None); }
             self.0.preview_active.store(true, Ordering::SeqCst);
             Ok(Some(PreviewLease(self.clone())))
         })
@@ -676,6 +723,7 @@ impl Service {
             listener_seq: AtomicU64::new(0),
             shutting_down: AtomicBool::new(false),
             preview_active: AtomicBool::new(false),
+            speed_test_active: AtomicBool::new(false),
             command: Mutex::new(()),
             owner_seq: AtomicU64::new(1),
             reads: Arc::new((Mutex::new(0), Condvar::new())),
@@ -981,6 +1029,7 @@ impl Service {
     /// start(config): the new job's id
     pub fn start(&self, config: &Value) -> SResult<String> {
         self.mutate(|| {
+            if self.speed_test_active() { return Err(service_error("SPEED_TEST_RUNNING")); }
             if self.preview_active() { return Err(service_error("JOB_ACTIVE")); }
             if self.0.shutting_down.load(Ordering::SeqCst) {
                 return Err(service_error("SERVICE_SHUTDOWN"));
@@ -1129,6 +1178,7 @@ impl Service {
     }
 
     fn resume_now(&self, id: &str) -> SResult<Value> {
+        if self.speed_test_active() { return Err(service_error("SPEED_TEST_RUNNING")); }
         if self.preview_active() { return Err(service_error("JOB_ACTIVE")); }
         let rt = self.live_runtime(id)?;
         rt.lock().preview_pause = None;
@@ -1247,9 +1297,56 @@ impl Service {
         })
     }
 
+    /// Explicit recovery of temporary failures, including older GPU shortfalls
+    /// whose encode stderr was not retained. A user pause remains a pause.
+    pub fn retry_temporary(&self, id: &str) -> SResult<Value> {
+        self.mutate(|| {
+            if self.speed_test_active() {return Err(service_error("SPEED_TEST_RUNNING"));}
+            if self.preview_active() {return Err(service_error("JOB_ACTIVE"));}
+            let rt=self.live_runtime(id)?;
+            let m=rt.manifest();
+            let paused=m.state()==JobState::Paused;
+            {
+                let s=rt.lock();
+                if s.recovery_required || m.get("recovery").is_some_and(|r|!r.is_null()) || recorded_from(&m)==Some(JobState::Replacing) {
+                    return Err(service_error("RECOVERY_REQUIRED"));
+                }
+                if paused {
+                    if !s.pause_requested || s.preview_pause.is_some() || (s.running && (!s.producer_done || s.parked_workers<s.live_workers))
+                        || !s.in_flight.is_empty() || !s.children.is_empty() || s.commit_holder.is_some() {return Err(service_error("JOB_ACTIVE"));}
+                } else if s.running || !matches!(m.state(),JobState::Completed|JobState::Failed) {return Err(service_error("JOB_ACTIVE"));}
+            }
+            let selected:Vec<String>=m.items.iter().filter(|i|temporary_retry(i.value())).map(|i|i.id().to_string()).collect();
+            if selected.is_empty() {return Err(service_error("NO_FAILED_ITEMS"));}
+            let selected_ids:std::collections::HashSet<String>=selected.iter().cloned().collect();
+            for id in &selected {
+                let item=m.item(id).unwrap();
+                if !self.reconcile_item_ownership(&rt,id,Some(ownership_of(item.value())),false)? {return Err(service_error("RECOVERY_REQUIRED"));}
+            }
+            self.update(&rt,|s| {
+                let items=s.manifest.items.iter().map(|i|if selected_ids.contains(i.id()) {
+                    let gpu=i.str("resultCode")==Some("gpu-memory-exhausted") || i.str("resultCode")==Some("frame-count-mismatch");
+                    ItemIn::Raw(merge(i.value(),&vec![("state",Some(ItemState::Queued.into())),("attempts",Some(json!(0))),
+                        ("failure",None),("resultCode",Some(json!(if gpu {"gpu-memory-retry"} else {"temporary-retry"})))]))
+                } else {ItemIn::Trusted(i.clone())}).collect();
+                Some(Patch::new().state(if paused {JobState::Paused} else {JobState::Waiting}).set("summary",Value::Null)
+                    .set("summaryDismissed",json!(false)).set("failure",Value::Null).items(items))
+            })?;
+            if paused {
+                let mut s=rt.lock();
+                for id in selected {if !s.queue.contains(&id) {s.queue.push_back(id);}}
+            } else {
+                {let mut s=rt.lock();s.queue.clear();s.queue_closed=false;s.producer_done=false;}
+                self.launch(&rt,false,Self::queued_ids(&rt.manifest()));
+            }
+            Ok(public_snapshot(&rt.manifest()))
+        })
+    }
+
     /// retryFailed(id)
     pub fn retry_failed(&self, id: &str) -> SResult<Value> {
         self.mutate(|| {
+            if self.speed_test_active() { return Err(service_error("SPEED_TEST_RUNNING")); }
             if self.preview_active() { return Err(service_error("JOB_ACTIVE")); }
             let rt = self.live_runtime(id)?;
             let m = rt.manifest();

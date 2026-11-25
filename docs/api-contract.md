@@ -68,6 +68,46 @@ Server-Sent Events, signed-in. Keep-alive: ": ping" comment every 15 s. Limit: 2
 
 ### Converter IPC channels
 
+Guided automatic shrinking also exposes `requestSpeedTest` and `applySpeedTest`
+through `POST /api/converter/invoke/:name`. Both require admin access and the
+normal CSRF header, accept exactly `{ "sourceRoot": "<configured vehicle root>" }`,
+and return the automatic-conversion state. The first queues server-owned work;
+the second explicitly saves the latest matching recommendation for automatic
+shrinking. Neither command resumes a paused job. Existing manual device
+settings require the explicit apply operation. Missing setups and outdated
+recommendations are refused.
+
+`getAuto` remains read-only. When a vehicle has device-choice metadata or a test,
+`status.speedTests[sourceRoot]` adds `settingsSource` (`user`, `test`, or `default`),
+`phase` (`queued`, `waiting`, `running`, `done`, `skipped`, `failed`, `cancelled`, `stale`),
+`reason`, and the latest `progress` from the benchmark. A successful `result`
+contains `testedAt` (epoch milliseconds), `profileId`, `fingerprint`, `source`
+(`automatic` or `requested`) and `devices` with `id`, `name`, `concurrency`,
+`filesPerMinute` and nullable `filesPerKwh`. `startedAt` supports elapsed display.
+Device results may include `memory` with measured `freeMib`, `totalMib`, estimated
+`perEncodeMib`, and the resulting parallel `limit` at test time.
+Test-managed configs carry the server-owned `deviceSettingsSource: "test"` marker;
+clients cannot set it. During a speed test, start/resume/retry return
+`SPEED_TEST_RUNNING` with the explanation "A speed test is running; resume when
+it finishes".
+
+`failedClips` is a read-only invoke channel with the same admin/CSRF requirements.
+It accepts exactly `{ "jobId": "<id>", "offset": 0 }` (nonnegative integer offset)
+and returns `{ "total": 250, "nextOffset": 100, "items": [...] }`: at most 100
+failed clips, with only `relativePath`, `resultCode`, `encoder`, and `failure.code` /
+`failure.retryable`. `nextOffset` is null at the end. It does not retry a clip or
+change a job. Trimmed snapshots add `itemFailureCounts`, grouped by `code`,
+`resultCode`, `encoder`, and nullable `retryable`, with a `count` for each group; unknown
+reasons remain actionable. Counts cover the complete job, including omitted rows.
+`itemGpuRetryCount` retains queued/processing GPU-memory retries outside the window.
+
+`retryTemporary` accepts exactly `{ "jobId": "<id>" }` and returns the updated
+snapshot. It requires admin/CSRF access. It queues retryable failed clips and
+legacy GPU `frame-count-mismatch` failures, excluding `invalid-h264` and pending
+cleanup. A fully drained user pause stays paused; a finished job restarts only
+its selected failures. Running work, previews, speed tests and recovery block
+this command. Candidates must still pass the unchanged verification checks.
+
 `chooseFolder`, `start`, `getCurrent`, `pause`, `setConcurrency`, `resume`, `cancel`, `discard`, `retryFailed`, `dismissSummary`, `getCapabilities`, `subscribeProgress`, `unsubscribeProgress`, `runBenchmark`, `cancelBenchmark`, `getAuto`, `setAuto`, `checkAutoNow`, `saveVehicle`, `forgetVehicle`, `devices`, `setLanes`
 
 ## Routes by area

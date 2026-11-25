@@ -244,6 +244,22 @@ impl Service {
             return self.run_remote(rt, item_id, r);
         }
         let args = r.local_args()?;
+        let gpu = r.encoder.hardware.then(|| r.encoder.device.clone().or_else(|| {
+            let id=self.0.o.default_device.as_ref()?.as_ref()(r.codec)?;
+            self.0.o.resolve_device.as_ref()?.as_ref()(&id).map(|v|super::super::devices::device_of(&v))
+        }).unwrap_or_else(||super::super::planner::Device{id:"local-gpu".into(),..Default::default()}));
+        let _memory = if let Some(device)=&gpu {
+            let budget=super::super::gpu_memory::estimate_mib(self.0.o.tools.video_dimensions(r.source,&rt.signal()));
+            let serial=rt.lock().item(item_id).is_some_and(|i|i["resultCode"]=="gpu-memory-retry");
+            let started=Instant::now();
+            Some(loop {
+                if rt.lock().stopped() {return Err("cancelled");}
+                if let Some(lease)=self.0.o.gpu_memory.try_reserve(device,budget,serial) {break lease;}
+                if rt.lock().pause_requested {return Err("gpu-memory-paused");}
+                if started.elapsed()>=Duration::from_secs(30) {return Err("gpu-memory-exhausted");}
+                std::thread::sleep(Duration::from_millis(200));
+            })
+        } else {None};
         let ffmpeg = self.0.o.tools.ffmpeg_path().to_string();
         if super::super::process::validate_request(&ffmpeg, &args).is_err() {
             return Err("encoder-start-failed");
@@ -288,9 +304,17 @@ impl Service {
             }
         }
         let mut stderr = child.stderr.take().unwrap();
-        std::thread::spawn(move || {
+        let memory_error=Arc::new(AtomicBool::new(false));
+        let memory_error2=memory_error.clone();
+        let stderr_reader=std::thread::spawn(move || {
             let mut sink = [0u8; 8192];
-            while matches!(stderr.read(&mut sink), Ok(n) if n > 0) {}
+            let mut tail=Vec::new();
+            while let Ok(n)=stderr.read(&mut sink) {
+                if n==0 {break;}
+                tail.extend_from_slice(&sink[..n]);
+                if super::super::gpu_memory::exhausted(&String::from_utf8_lossy(&tail)) {memory_error2.store(true,Ordering::SeqCst);}
+                if tail.len()>8192 {tail.drain(..tail.len()-8192);}
+            }
         });
         let mut stdout = child.stdout.take().unwrap();
         let last_activity = Arc::new(Mutex::new(Instant::now()));
@@ -379,11 +403,14 @@ impl Service {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     let _ = reader.join();
+                    let _ = stderr_reader.join();
                     use std::os::unix::process::ExitStatusExt;
                     let s = rt.lock();
                     let stopped = s.cancel_requested || s.stop_requested || s.recovery_required || status.signal().is_some();
                     break if stopped {
                         Err("cancelled")
+                    } else if gpu.is_some() && memory_error.load(Ordering::SeqCst) {
+                        Err("gpu-memory-exhausted")
                     } else if status.code() == Some(0) {
                         Ok(())
                     } else {
@@ -414,6 +441,9 @@ impl Service {
             s.encode_fps.remove(item_id);
         }
         self.note_waiting(rt);
+        if result==Err("gpu-memory-exhausted") {
+            if let Some(device)=&gpu {self.0.o.gpu_memory.pressure(device);}
+        }
         result
     }
 }

@@ -1319,6 +1319,17 @@ impl Service {
                 if code == "withdrawn" {
                     return Err(service_error("NODE_WITHDRAWN"));
                 }
+                if code == "gpu-memory-paused" {return Err(service_error("GPU_MEMORY_PAUSED"));}
+                if code == "gpu-memory-exhausted" {
+                    // Do not disable a working decode tier or fall back to CPU
+                    // because another application temporarily filled the GPU.
+                    if attempts < MAX_RECORDED_ATTEMPTS {
+                        self.item_patch(rt,&id,vec![("resultCode",Some(json!("gpu-memory-retry")))],vec![])?;
+                        if rt.lock().pause_requested {return Err(service_error("GPU_MEMORY_PAUSED"));}
+                        continue;
+                    }
+                    return Err(Fail{code:Some(code.into()),retryable:true,..Default::default()});
+                }
                 // the same GPU encoder with a slower decode before giving up on it
                 if let Some(t) = used_tier {
                     failed_tiers.push(t.0);
@@ -1720,7 +1731,8 @@ impl Service {
             let s = rt.lock();
             (s.recovery_required && s.recovery_item_id.as_deref() != Some(item_id), s.stop_requested, s.cancel_requested)
         };
-        let withdrawn = e.is("NODE_WITHDRAWN") && !cancel_requested && cleanup.cleaned;
+        let memory_paused=e.is("GPU_MEMORY_PAUSED") && !cancel_requested && cleanup.cleaned;
+        let withdrawn = (e.is("NODE_WITHDRAWN") || memory_paused) && !cancel_requested && cleanup.cleaned;
         let stopped = (stop_requested || halted_by_recovery || withdrawn) && !cancel_requested;
         let terminally = cancel_requested;
         let own = ownership.clone().unwrap_or_default();
@@ -1728,7 +1740,7 @@ impl Service {
         let changes: Changes = vec![
             ("state", Some(next.into())),
             ("failure", if stopped || terminally { None } else { Some(json!({ "code": code, "retryable": retryable })) }),
-            ("resultCode", if stopped && cleanup.cleaned { None } else { Some(json!(if !cleanup.cleaned { "cleanup-pending".to_string() } else { code.clone() })) }),
+            ("resultCode", if memory_paused {Some(json!("gpu-memory-retry"))} else if stopped && cleanup.cleaned { None } else { Some(json!(if !cleanup.cleaned { "cleanup-pending".to_string() } else { code.clone() })) }),
             ("ownedPaths", if !cleanup.cleaned { Some(Value::Object(own.paths.clone())) } else { None }),
             ("ownedArtifacts", if !cleanup.cleaned { Some(Value::Object(own.arts.clone())) } else { None }),
         ];
@@ -1743,7 +1755,7 @@ impl Service {
         ])?;
         if withdrawn {
             let attempts = rt.lock().item(item_id).and_then(|i| i["attempts"].as_i64()).unwrap_or(0);
-            if attempts > 0 {
+            if attempts > 0 && !memory_paused {
                 self.item_patch(rt, item_id, vec![("attempts", Some(json!(attempts - 1)))], vec![])?;
             }
             let mut s = rt.lock();

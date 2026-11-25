@@ -367,7 +367,19 @@ fn automatic_conversion_decides_as_node_decides() {
     if let Ok(p) = std::env::var("LEAN_PARITY_DUMP") {
         std::fs::write(p, theirs.to_string()).unwrap();
     }
-    let mine = run_auto(&auto_scenario(&rd), theirs["steps"].as_array().unwrap());
+    let mut mine = run_auto(&auto_scenario(&rd), theirs["steps"].as_array().unwrap());
+    // Speed-test provenance is additive and absent from the frozen Node model.
+    // Keep comparing every existing field, service call and persisted file.
+    for step in mine["steps"].as_array_mut().unwrap() {
+        for key in ["state", "value"] {
+            if let Some(status) = step[key].get_mut("status").and_then(Value::as_object_mut) {
+                status.shift_remove("speedTests");
+            }
+        }
+    }
+    let metadata = mine["files"].as_object_mut().unwrap().shift_remove("speed-tests.json").unwrap();
+    let metadata: Value = serde_json::from_str(metadata.as_str().unwrap()).unwrap();
+    assert!(metadata.as_object().unwrap().values().all(|v| v["settingsSource"] == "user"), "legacy manual choices stay user-owned");
     for (i, (a, b)) in mine["steps"].as_array().unwrap().iter().zip(theirs["steps"].as_array().unwrap()).enumerate() {
         if let Some(e) = diff(a, b, &format!("step {i} ({})", b["op"])) {
             panic!("{e}");

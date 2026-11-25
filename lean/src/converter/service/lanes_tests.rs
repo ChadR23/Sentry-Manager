@@ -132,6 +132,7 @@ pub struct FakeTools {
     pub verified: Mutex<Vec<String>>,
 }
 impl Tools for FakeTools {
+    fn video_dimensions(&self,_s:&str,_c:&Arc<AtomicBool>)->Option<(u64,u64)> {Some((2896,1876))}
     fn inspect_video(&self, _s: &str, _c: &Arc<AtomicBool>) -> CResult<Inspected> {
         Ok(Inspected { codec: "h264".into(), duration_seconds: 2.0 })
     }
@@ -194,6 +195,8 @@ if [ -e "$CTL/fail-if" ]; then
   case "$*" in *"$pat"*) code=1 ;; esac
 fi
 printf 'fps=100\nprogress=end\n'
+[ ! -e "$CTL/stderr" ] || cat "$CTL/stderr" >&2
+if [ -e "$CTL/oom-once" ]; then printf '[CUDA] CUDA_ERROR_OUT_OF_MEMORY\nError submitting packet to decoder\n' >&2; rm "$CTL/oom-once"; fi
 [ "$code" = 0 ] && printf 'encoded' > "$last"
 touch "$CTL/done/$$"
 exit $code
@@ -214,6 +217,7 @@ pub struct Harness {
 }
 
 pub struct HarnessOptions {
+    pub gpu_memory: Option<Arc<super::super::gpu_memory::Gate>>,
     pub clips: usize,
     pub devices: Vec<Value>,
     pub works: Works,
@@ -226,7 +230,7 @@ pub struct HarnessOptions {
 
 impl Default for HarnessOptions {
     fn default() -> Self {
-        HarnessOptions { clips: 6, devices: vec![arc(), uhd(), cpu()], works: desktop_works(), hold: true, default_device: None, verify_ok: false, nodes: None, compare: None }
+        HarnessOptions { gpu_memory: None, clips: 6, devices: vec![arc(), uhd(), cpu()], works: desktop_works(), hold: true, default_device: None, verify_ok: false, nodes: None, compare: None }
     }
 }
 
@@ -274,6 +278,7 @@ impl Harness {
         ro.discovery = Some(disc);
         let (nodes, compare) = (o.nodes.clone(), o.compare.clone());
         ro.tune = Some(Box::new(move |so| {
+            if let Some(gate) = o.gpu_memory { so.gpu_memory = gate; }
             if let Some(n) = nodes {
                 let n2 = n.clone();
                 so.set_node_slots = Some(Arc::new(move |id: &str, s: &Value| n2.set_slots(id, s)));
@@ -621,17 +626,20 @@ fn a_job_without_lanes_keeps_its_arguments_and_one_gpus_broken_decode_stays_its_
     let args = &h.spawned()[0].args;
     assert_eq!(&args[..10], &["-nostdin", "-hide_banner", "-loglevel", "error", "-n", "-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128", "-i"]);
     assert_eq!(&args[11..13], &["-c:v", "hevc_qsv"]);
-    assert!(h.resolved.lock().unwrap().is_empty(), "no device is looked up");
+    assert!(!h.resolved.lock().unwrap().is_empty(), "memory admission resolves the default GPU without changing encoder arguments");
+    assert!(h.resolved.lock().unwrap().iter().all(|id| *id == id_of(uhd())), "only the default GPU is resolved");
     drop(h);
     // NVIDIA as the default: zero-copy decode, no GPU index
     let works: Works = Arc::new(|e: &str, _a: &[String]| Some(e == "hevc_nvenc" || e.starts_with("lib")));
-    let h = Harness::new(HarnessOptions { clips: 1, hold: false, works, ..Default::default() });
+    let h = Harness::new(HarnessOptions { clips: 1, hold: false, works, devices: vec![t400(), cpu()], default_device: Some(Some(id_of(t400()))), ..Default::default() });
     let id = h.service().start(&h.config(json!({ "concurrency": 1 }))).unwrap();
     h.finish_job(&id);
     let args = &h.spawned()[0].args;
     assert_eq!(&args[..9], &["-nostdin", "-hide_banner", "-loglevel", "error", "-n", "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]);
     assert_eq!(&args[11..13], &["-c:v", "hevc_nvenc"]);
     assert!(!args.iter().any(|a| a == "-gpu" || a == "-hwaccel_device"));
+    assert!(!h.resolved.lock().unwrap().is_empty());
+    assert!(h.resolved.lock().unwrap().iter().all(|id| *id == id_of(t400())), "memory admission resolves the default NVIDIA PCI device");
     drop(h);
     // decoding on the Arc fails; the UHD keeps decoding on its GPU
     let h = Harness::new(HarnessOptions { clips: 6, hold: false, ..Default::default() });
