@@ -1,7 +1,7 @@
 import { esc, invoke as previewInvoke, api as previewApi, clientId, scope } from '../core.js';
 import { icon } from '../icons.js';
 import { size } from '../format.js';
-import { KEEP_CHIPS, LEVELS, fromSaved, toVehicleConfig, toAutoSettings, planSentence, scheduleText, nextCheckLabel, expertSummary, dayStates, levelOf, levelDevice, previewPercent, previewMeasured, previewSource, previewMegabytes, previewProgress, previewFailure, dayHeat, footageEstimate, nextAgingDay, catchUpProgress } from '../encoderModel.js';
+import { KEEP_CHIPS, LEVELS, fromSaved, toVehicleConfig, toAutoSettings, planSentence, scheduleText, nextCheckLabel, expertSummary, dayStates, levelOf, levelDevice, previewPercent, previewMeasured, previewSource, previewMegabytes, previewProgress, previewFailure, dayHeat, footageEstimate, nextAgingDay, catchUpProgress, speedStatus, speedEstimate, statusNoun, clipFailures, currentFailureExplained } from '../encoderModel.js';
 import { onPreview, streamReady, follow, counts, ACTIVE, PAUSED, describe, applySnapshot, hardwareLabel } from '../convert.js';
 import { describeJob } from '../jobs.js';
 
@@ -45,6 +45,7 @@ async function renderStatus(mount, ctx, initial, show) {
   const vehicle = ctx.current(), root = rootOf(vehicle), zone = browserZone();
   let auto = initial, saved = null, jobs = [], days = [], encoder = null, snapshot = null, nodeWaiting = null;
   let readError = '', commandError = '', busy = false, loading = false, loaded = false, stopped = false;
+  let keptKey = '', keptRows = [], keptNext = 0, keptLoading = false, keptError = '';
   let share = vehicle.share;
   const valid = () => !stopped && ctx.alive();
   const activeJob = () => snapshot && snapshot.config?.sourceRoot === root && ACTIVE.has(snapshot.state) &&
@@ -56,10 +57,13 @@ async function renderStatus(mount, ctx, initial, show) {
       <div class="encoder-status-actions"><button type="button" data-change>Change setup</button><button type="button" class="ghost" data-off>Turn off</button></div>
     </div><div data-custom-status hidden></div><p data-separate-output hidden>Copies go to a separate folder, so this doesn't free space on the drive.</p><div class="encoder-summary" data-status-numbers></div>
       <p class="encoder-estimate-note" data-savings-note hidden>Recorded savings for this vehicle since its savings counter was last reset.</p>
+      <details class="encoder-kept encoder-estimate-note" data-kept hidden><summary data-kept-summary></summary><p data-kept-explanation></p><ul data-kept-list></ul><p data-kept-note></p><button type="button" data-kept-more hidden>Show more clips</button></details>
+      <p class="encoder-estimate-note" data-gpu-retrying hidden role="status"></p>
     </section>
     <section class="card encoder-catchup" data-catchup hidden aria-labelledby="encoder-catchup-heading"><div class="encoder-catchup-header"><h3 id="encoder-catchup-heading">Catching up on older footage</h3><button type="button" data-job-command hidden>Pause</button></div><div data-catchup-progress></div><small>Pause holds until you press Resume.</small></section>
+    <section class="card encoder-speed" aria-labelledby="encoder-speed-heading"><div class="encoder-catchup-header"><h3 id="encoder-speed-heading">Speed test</h3><button type="button" data-speed-test>Test again</button></div><p data-speed-summary role="status"></p><p data-speed-current hidden></p><button type="button" data-speed-apply hidden>Use these settings</button><small>Runs now if shrinking is paused, otherwise when the current shrinking run is paused or finished.</small></section>
     <section class="card"><h3>Coming up</h3><div class="encoder-review" data-coming-up></div><p class="encoder-estimate-note" data-next-work></p><small>Check times shown in ${esc(zone)}. Footage dates use ${esc(vehicle.timezone)}.</small></section>
-    <section class="card encoder-problems" data-problems hidden aria-labelledby="encoder-problems-heading"><h3 id="encoder-problems-heading">Needs attention</h3><div data-problem-list role="status"></div><div class="form-actions"><button type="button" data-refresh>Check again</button><a class="btn" href="#/activity">Activity</a><button type="button" data-problem-expert>Open Expert</button></div></section>
+    <section class="card encoder-problems" data-problems hidden aria-labelledby="encoder-problems-heading"><h3 id="encoder-problems-heading">Needs attention</h3><div data-problem-list role="status"></div><div class="form-actions"><button type="button" data-retry-temporary hidden>Retry clips that failed for temporary reasons</button><button type="button" data-refresh>Check again</button><a class="btn" href="#/activity">Activity</a><button type="button" data-problem-expert>Open Expert</button></div></section>
   </div>`;
   const update = (selector, html) => {
     const el = mount.querySelector(selector);
@@ -79,19 +83,27 @@ async function renderStatus(mount, ctx, initial, show) {
     const separate = config.outputMode === 'separate';
     mount.querySelector('[data-separate-output]').hidden = !separate;
     if (Number.isFinite(saved?.bytes)) numbers.push([size(saved.bytes), separate ? 'size saved by the copies' : 'space saved so far']);
-    if (Number.isFinite(saved?.clips)) numbers.push([saved.clips.toLocaleString(), 'clips shrunk since counter reset']);
+    if (Number.isFinite(saved?.clips)) numbers.push([saved.clips.toLocaleString(), `${statusNoun(saved.clips, 'clip')} shrunk since counter reset`]);
     if (Number.isFinite(status.nextCheckAt) && status.nextCheckAt > 0) numbers.push([nextCheckLabel(status.nextCheckAt, zone), 'next check']);
     const pending = status.pending?.[root];
     const waiting = c ? c.queued + c.inFlight : Number.isFinite(pending) ? pending : null;
     mount.querySelector('[data-savings-note]').hidden = !Number.isFinite(saved?.bytes) && !Number.isFinite(saved?.clips);
     mount.querySelector('[data-catchup]').hidden = !status.catchUp?.[root];
     const paused = active && PAUSED.has(active.state);
+    const speed = speedStatus(status.speedTests?.[root], config);
+    update('[data-speed-summary]', esc(speed.summary));
+    update('[data-speed-current]', esc(speed.current));
+    mount.querySelector('[data-speed-current]').hidden = !speed.current;
+    mount.querySelector('[data-speed-test]').disabled = busy || speed.active;
+    mount.querySelector('[data-speed-apply]').hidden = !speed.canApply;
+    mount.querySelector('[data-speed-apply]').disabled = busy;
     const progress = active && catchUpProgress(active, c), device = active && encoder ? hardwareLabel(active, encoder) : '';
     update('[data-catchup-progress]', progress
-      ? `<progress max="${progress.total}" value="${progress.done}" aria-label="Catch-up progress for the current job"></progress><div class="encoder-progress-caption"><span>${progress.percent}% · ${progress.unit === 'bytes' ? `${size(progress.done)} of ${size(progress.total)}` : `${progress.done.toLocaleString()} of ${progress.total.toLocaleString()} clips`} processed in this job · ${paused ? 'Paused' : 'In progress'}</span>${device ? `<span>${esc(device)}</span>` : ''}</div>${active.discoveryComplete === false ? '<small>Still looking for clips; the total may grow.</small>' : ''}`
+      ? `<progress max="${progress.total}" value="${progress.done}" aria-label="Catch-up progress for the current job"></progress><div class="encoder-progress-caption"><span>${progress.percent}% · ${progress.unit === 'bytes' ? `${size(progress.done)} of ${size(progress.total)}` : `${progress.done.toLocaleString()} of ${progress.total.toLocaleString()} ${statusNoun(progress.total, 'clip')}`} processed in this job · ${paused ? 'Paused' : 'In progress'}</span>${device ? `<span>${esc(device)}</span>` : ''}</div>${active.discoveryComplete === false ? '<small>Still looking for clips; the total may grow.</small>' : ''}`
       : `<progress aria-label="Preparing catch-up"></progress><p>${active ? paused ? 'Paused.' : 'Looking for eligible clips…' : status.active?.[root] ? 'Reading catch-up progress…' : 'Waiting for the server to start the catch-up job.'}</p>`);
     const jobButton = mount.querySelector('[data-job-command]');
-    jobButton.hidden = !active; jobButton.disabled = busy;
+    jobButton.hidden = !active; jobButton.disabled = busy || (paused && Object.values(status.speedTests || {}).some((s) => s.phase === 'running'));
+    jobButton.title = jobButton.disabled && !busy ? 'A speed test is running; resume when it finishes' : '';
     jobButton.textContent = paused ? 'Resume' : 'Pause';
     mount.querySelector('[data-change]').disabled = busy;
     mount.querySelector('[data-off]').disabled = busy;
@@ -99,10 +111,10 @@ async function renderStatus(mount, ctx, initial, show) {
     const dateLabel = (day) => new Date(day + 'T00:00:00Z').toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric', timeZone:'UTC'});
     const last = jobs.filter((j) => j.vehicleId === vehicle.id && ['conversion', 'convert'].includes(j.type) && ['done', 'failed', 'interrupted', 'cancelled'].includes(j.status))
       .sort((a, b) => (b.finishedAt || b.updatedAt || b.createdAt || 0) - (a.finishedAt || a.updatedAt || a.createdAt || 0))[0];
-    update('[data-coming-up]', (aging ? `<div class="encoder-review-row"><span class="encoder-review-icon">${icon('calendar_month')}</span><div><b>${esc(dateLabel(aging.day))} footage ages past ${choice.keep} days on ${esc(dateLabel(aging.agesOn))}</b><small>Included clips get shrunk on the first check after that.</small></div></div>` : '') +
+    update('[data-coming-up]', (aging ? `<div class="encoder-review-row"><span class="encoder-review-icon">${icon('calendar_month')}</span><div><b>${esc(dateLabel(aging.day))} footage ages past ${choice.keep} ${statusNoun(choice.keep, 'day')} on ${esc(dateLabel(aging.agesOn))}</b><small>Included clips get shrunk on the first check after that.</small></div></div>` : '') +
       (last ? `<div class="encoder-review-row"><span class="encoder-review-icon">${icon('task')}</span><div><b>Last run: ${esc(describeJob(last).title)}</b><small>${esc(describeJob(last).outcome || describeJob(last).statusText)}</small></div><a class="btn ghost" href="#/activity">Activity</a></div>` : ''));
     update('[data-next-work]', esc(waiting > 0
-      ? `${c ? `${waiting.toLocaleString()} clips waiting or in progress.` : `About ${waiting.toLocaleString()} files waiting at the last check; eligible clips are counted when the job starts.`} Later checks look for included clips ${choice.keep == null ? 'that have not been shrunk yet' : `older than the ${choice.keep}-day keep window`}.`
+      ? `${c ? `${waiting.toLocaleString()} ${statusNoun(waiting, 'clip')} waiting or in progress.` : `About ${waiting.toLocaleString()} ${statusNoun(waiting, 'file')} waiting at the last check; eligible clips are counted when the job starts.`} Later checks look for included clips ${choice.keep == null ? 'that have not been shrunk yet' : `that are older than the ${choice.keep}-day keep window`}.`
       : `The next check looks for included clips ${choice.keep == null ? 'that have not been shrunk yet' : `that have aged past the ${choice.keep}-day keep window`}. The amount will be known when it checks.`));
     const problems = [];
     if (readError) problems.push(readError);
@@ -111,18 +123,57 @@ async function renderStatus(mount, ctx, initial, show) {
     if (share?.healthy === false || share?.readable === false || active?.state === 'paused_network' || ['PATH_UNAVAILABLE', 'SOURCE_UNAVAILABLE'].includes(sourceError))
       problems.push(`The footage share is offline or cannot be reached. ${share?.lastError || 'Check its connection; your originals stay where they are.'}`);
     if (sourceError && !['PATH_UNAVAILABLE', 'SOURCE_UNAVAILABLE'].includes(sourceError)) problems.push(describe({ code: sourceError }));
-    if (c?.failed) problems.push(`${c.failed} clips could not be shrunk. Their originals were kept. Open Expert to review or retry them.`);
-    for (const job of jobs.filter((j) => j.vehicleId === vehicle.id && ['conversion', 'convert'].includes(j.type) && j.status === 'failed'))
+    const current = snapshot?.config?.sourceRoot === root ? snapshot : null;
+    const issues = clipFailures(current);
+    mount.querySelector('[data-gpu-retrying]').hidden = !issues.retrying;
+    update('[data-gpu-retrying]', esc(issues.retryingText));
+    const retry = mount.querySelector('[data-retry-temporary]');
+    retry.hidden = !(issues.temporary || issues.legacyGpu);
+    retry.disabled = busy || (current && !['paused','completed','failed'].includes(current.state)) || Object.values(status.speedTests || {}).some((s) => s.phase === 'running');
+    retry.title = current && !['paused','completed','failed'].includes(current.state) ? 'Pause shrinking before retrying these clips.' : '';
+    const nextKeptKey = `${current?.id || ''}:${JSON.stringify(current?.itemFailureCounts || current?.items?.filter((i) => i.state === 'failed'))}`;
+    if (nextKeptKey !== keptKey) { keptKey = nextKeptKey; keptRows = []; keptNext = 0; keptError = ''; }
+    const byPath = new Map([...keptRows, ...(current?.items || [])].map((i) => [i.relativePath, i]));
+    const shown = clipFailures({...current, items:[...byPath.values()]}).items;
+    mount.querySelector('[data-kept]').hidden = !issues.damaged;
+    update('[data-kept-summary]', esc(issues.keptText));
+    update('[data-kept-explanation]', esc(issues.explanation));
+    update('[data-kept-list]', shown.map((i) => `<li><span>${esc(i.relativePath)}</span><small>${esc(i.reason)}</small></li>`).join(''));
+    update('[data-kept-note]', esc(keptError || (shown.length < issues.damaged ? `Showing ${shown.length.toLocaleString()} of ${issues.damaged.toLocaleString()} kept ${statusNoun(issues.damaged, 'clip')}.` : '')));
+    const more = mount.querySelector('[data-kept-more]');
+    more.hidden = shown.length >= issues.damaged || keptNext == null;
+    more.disabled = keptLoading; more.textContent = keptLoading ? 'Loading clips…' : keptError ? 'Try listing clips again' : 'Show more clips';
+    if (issues.attention) problems.push(issues.attentionText);
+    for (const job of jobs.filter((j) => j.vehicleId === vehicle.id && ['conversion', 'convert'].includes(j.type) && j.status === 'failed')) {
+      // The current snapshot explains this row's clip failures, including a
+      // finished run containing only damaged originals safely kept as recorded.
+      if (currentFailureExplained(job, current)) continue;
       problems.push(describeJob(job).outcome || 'A previous shrinking run failed. Open Activity for details.');
+    }
     if (status.active?.[root]?.pausedForDevices || (active && nodeWaiting?.jobId === active.id && nodeWaiting.count > 0))
       problems.push('Waiting for an encoding device or GPU to become available.');
     else if (pending > 0 && Object.entries(status.active || {}).some(([source]) => source !== root))
       problems.push('Waiting for another vehicle’s shrinking run to free an encoding device.');
     if (status.active?.[root]?.pausedForWindow) problems.push('Waiting for the next cheap electricity period.');
-    if (loaded && !readError) numbers.push([new Set(problems).size.toLocaleString(), 'problems']);
+    const problemCount = new Set(problems).size;
+    if (loaded && !readError) numbers.push([problemCount.toLocaleString(), statusNoun(problemCount, 'problem')]);
     update('[data-status-numbers]', numbers.map(([value, label], i) => `<div class="encoder-stat${i === 0 && Number.isFinite(saved?.bytes) ? ' encoder-stat-saved' : ''}"><b>${esc(value)}</b><span>${label}</span></div>`).join(''));
     mount.querySelector('[data-problems]').hidden = !problems.length;
     update('[data-problem-list]', [...new Set(problems)].map((message) => `<p>${esc(message)}</p>`).join(''));
+  }
+  async function loadKept() {
+    const job = snapshot?.config?.sourceRoot === root ? snapshot : null;
+    if (!job || keptLoading || keptNext == null) return;
+    const key = keptKey;
+    keptLoading = true; keptError = ''; draw();
+    try {
+      const page = await invoke('failedClips', {jobId:job.id, offset:keptNext});
+      if (valid() && keptKey === key) {
+        keptRows.push(...page.items.map((i) => ({...i, state:'failed'})));
+        keptNext = page.nextOffset;
+      }
+    } catch (error) { if (valid() && keptKey === key) keptError = `Could not list the clips. ${errorText(error)}`; }
+    finally { keptLoading = false; draw(); }
   }
   async function load() {
     if (!valid() || loading || busy) return;
@@ -166,14 +217,33 @@ async function renderStatus(mount, ctx, initial, show) {
     } catch (error) { if (valid()) commandError = errorText(error); }
     finally { busy = false; draw(); }
   };
+  for (const [selector, command] of [['[data-speed-test]', 'requestSpeedTest'], ['[data-speed-apply]', 'applySpeedTest']]) {
+    mount.querySelector(selector).onclick = async () => {
+      if (busy) return;
+      busy = true; commandError = ''; draw();
+      try { const updated = await invoke(command, {sourceRoot:root}); if (valid()) auto = updated; }
+      catch (error) { if (valid()) commandError = errorText(error); }
+      finally { busy = false; draw(); }
+    };
+  }
   mount.querySelector('[data-refresh]').onclick = load;
+  mount.querySelector('[data-kept-more]').onclick = loadKept;
+  mount.querySelector('[data-retry-temporary]').onclick = async () => {
+    if (!snapshot || busy) return;
+    busy = true; commandError = ''; draw();
+    try {
+      const result = await invoke('retryTemporary', {jobId:snapshot.id});
+      if (valid()) { snapshot = result; applySnapshot(result); }
+    } catch (error) { if (valid()) commandError = errorText(error); }
+    finally { busy = false; draw(); }
+  };
   mount.querySelector('[data-problem-expert]').onclick = openExpert;
   draw();
   const stop = follow((next, waiting) => {
     if (next?.config?.sourceRoot === root) { snapshot = next; nodeWaiting = waiting; }
     draw();
   }, ctx.scope);
-  const timer = setInterval(load, 5000);
+  const timer = setInterval(load, 1500);
   const cleanup = () => { stopped = true; clearInterval(timer); stop(); };
   ctx.scope.signal.addEventListener('abort', cleanup, { once: true });
   await load();
@@ -284,6 +354,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
         <p>${esc(expertSummary(saved))}</p>
         <div class="form-actions"><button type="button" data-keep-expert>Keep my Expert settings</button><button type="button" data-pick-level>Pick a level</button></div></div>` : ''}
       <div class="encoder-tiles" data-levels role="group" aria-label="Space to save"></div>
+      <p data-speed-estimate class="encoder-estimate-note" hidden></p>
       <section class="encoder-cmp-card" data-cmp aria-labelledby="encoder-preview-heading">
         <div class="encoder-cmp-head"><h3 id="encoder-preview-heading">See it on your own clip</h3><small>Drag the line. The dashed box is shown up close.</small></div>
         <div class="encoder-cmp-toolbar"><div class="encoder-cmp-tabs" role="tablist" aria-label="Preview clip kind">
@@ -347,12 +418,18 @@ async function renderWizard(mount, ctx, auto, editing, show) {
   function drawReview() {
     const expertOnly = choice.level === 'custom' && saved?.outputMode !== 'replace';
     mount.querySelector('[data-plan]').textContent = planSentence(choice);
+    const speed = speedEstimate(auto.status?.speedTests?.[root], choice.level);
+    mount.querySelector('[data-speed-estimate]').textContent = speed;
+    mount.querySelector('[data-speed-estimate]').hidden = !speed;
     const estimate = footageEstimate(days, choice.keep, vehicle.timezone, choice.level, today);
     const level = LEVELS.find((l) => l.id === choice.level);
     const order = choice.order.filter((g) => choice.included[g]);
     const excludedNames = choice.order.filter((g) => !choice.included[g]).map((g) => GROUPS[g].name);
     const codec = choice.level === 'custom' ? saved?.codec?.toUpperCase() : 'H.265';
-    const device = choice.level === 'custom' ? '' : devices ? levelDevice(devices, choice.level).replace(/^Uses /, '') : '';
+    const tested = auto.status?.speedTests?.[root];
+    const knownSetting = saved?.deviceSettingsSource === 'test' && tested?.result?.profileId === LEVELS.find((l) => l.id === choice.level)?.profileId
+      ? tested.result.devices.map((d) => `${d.name} × ${d.concurrency}`).join(' and ') : '';
+    const device = knownSetting || (choice.level === 'custom' ? '' : devices ? levelDevice(devices, choice.level).replace(/^Uses /, '') : '');
     const rows = [
       ['calendar_month', 'keep', choice.keep == null ? 'No keep window' : `Newest ${choice.keep} ${choice.keep === 1 ? 'day stays' : 'days stay'} as recorded`, `${size(estimate.kept)} right now · day-level estimate`, 1],
       ['hard_drive', 'space', level ? `${level.name}: about ${level.pct}% smaller` : 'Customized in Expert', level ? estimate.shrink === 0 ? nothingWaiting() : `Gets back about ${size(estimate.saved)} from ${size(estimate.shrink)} of older footage · estimate across all clip kinds` : expertSummary(saved), 2],
@@ -402,6 +479,9 @@ async function renderWizard(mount, ctx, auto, editing, show) {
       <span class="encoder-quality-note">${QUALITY[level.id].note}</span><span class="encoder-device">${esc(levelDevice(devices, level.id))}</span><small>Typical results, not a promise</small>
     </button>`).join('') + `<button type="button" class="encoder-tile" data-open-expert aria-pressed="${choice.level === 'custom'}"><span class="encoder-tile-title">Custom</span>${icon('tune')}<span>Pick the codec, quality or bitrate yourself</span><small>Opens Expert</small></button>`;
     mount.querySelector('[data-keep-expert]')?.setAttribute('aria-pressed', String(choice.level === 'custom'));
+    const speed = speedEstimate(auto.status?.speedTests?.[root], choice.level);
+    mount.querySelector('[data-speed-estimate]').textContent = speed;
+    mount.querySelector('[data-speed-estimate]').hidden = !speed;
     const estimate = footageEstimate(days, choice.keep, vehicle.timezone, choice.level, today);
     const level = LEVELS.find((l) => l.id === choice.level);
     mount.querySelector('[data-space-estimate]').innerHTML = estimate.shrink === 0 ? `<p>${esc(nothingWaiting())}</p>` : level ? `<div class="encoder-stat encoder-stat-saved"><b>${size(estimate.saved)}</b><span>you get back · estimate</span></div><div><div class="encoder-estimate-labels"><span>Older footage now: <b>${size(estimate.shrink)}</b></span><span>After: <b>${size(estimate.after)}</b></span></div><div class="encoder-space-bar" role="img" aria-label="Estimated ${level.pct}% saved"><i style="width:${100 - level.pct}%"></i><i style="width:${level.pct}%"></i></div><small>Based on ${level.name}'s typical ${level.pct}% saving across all clip kinds${total > days.length ? ` in the ${days.length} loaded days` : ''}. Actual savings depend on the kinds included and the footage.</small></div>` : '<div><b>Custom</b><p>Choose a guided level to estimate the space you get back. Your Expert settings are kept.</p></div>';
@@ -424,7 +504,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
     if (busy) {
       const stages = previewProgress(progress, requestedKind || previewKind, vehicle.timezone);
       const waiting = previewState === 'waiting';
-      status = `${waiting ? `<p>${waitingFor === 'benchmark' ? 'Waiting for the device benchmark to finish.' : waitingFor === 'conversion' ? 'Waiting for the current shrinking run to finish.' : 'Waiting for an encoder to become available.'}</p>` : ''}
+      status = `${waiting ? `<p>${waitingFor === 'benchmark' ? 'Waiting for the speed test to finish.' : waitingFor === 'conversion' ? 'Waiting for the current shrinking run to finish.' : 'Waiting for an encoder to become available.'}</p>` : ''}
         <ol class="encoder-preview-steps">${stages.steps.map((s) => `<li class="${s.done ? 'done' : s.active && !waiting ? 'active' : ''}"><span class="encoder-preview-mark" aria-hidden="true">${s.done ? '✓' : '·'}</span>${esc(s.text)}</li>`).join('')}</ol>
         <progress max="5" value="${stages.done}" aria-label="Preview steps completed for this clip"></progress><p class="encoder-estimate-note">${stages.done} of 5 steps for this clip · <span data-preview-elapsed></span> seconds elapsed</p>
         ${waiting && waitingFor === 'conversion' ? `<button type="button" data-pause-preview ${pausePending ? 'disabled' : ''}>${pausePending ? 'Pausing conversion…' : 'Pause conversion and preview now'}</button>` : ''}`;

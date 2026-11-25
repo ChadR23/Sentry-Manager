@@ -3376,7 +3376,7 @@ dialog {
   border-radius: 99px;
   color: var(--accent);
   background: oklch(0.82 0.18 150 / 0.12);
-  font-size: 10px;
+  font-size: 12px;
 }
 .encoder-pct {
   font: 600 25px 'JetBrains Mono', monospace;
@@ -3649,3 +3649,12 @@ dialog {
 :is([data-preview-status], .encoder-status-screen) progress::-webkit-progress-bar { background: #27332e; border-radius: 99px; }
 :is([data-preview-status], .encoder-status-screen) progress::-webkit-progress-value { background: var(--accent); border-radius: 99px; }
 :is([data-preview-status], .encoder-status-screen) progress::-moz-progress-bar { background: var(--accent); border-radius: 99px; }
+
+/* Device speed results may name several GPUs; keep long names inside the card. */
+.encoder-speed p { overflow-wrap:anywhere; }
+.encoder-speed > small { display:block; margin-top:12px; }
+.encoder-kept summary { min-height:44px; display:flex; align-items:center; cursor:pointer; }
+.encoder-kept summary::before { content:'›'; margin-right:8px; }
+.encoder-kept[open] summary::before { content:'⌄'; }
+.encoder-kept li { margin:10px 0; overflow-wrap:anywhere; }
+.encoder-kept li small { display:block; font-size:12px; }

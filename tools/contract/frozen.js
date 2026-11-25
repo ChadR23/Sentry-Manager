@@ -113,7 +113,16 @@ function hostFacts(v, route) {
   return out;
 }
 function machine(v, route, other = flag('other-machine')) {
-  return machineOf(hostFacts(v, route), route, other);
+  let answer = hostFacts(v, route);
+  // Built-in pack bytes follow the shipped UI assets (like original.zip).
+  // Keep every other field, uploaded pack sizes, and missing/invalid sizes exact.
+  if (route === 'GET /api/ui-packs' && Array.isArray(answer?.body?.packs)) {
+    answer = structuredClone(answer);
+    for (const pack of answer.body.packs) {
+      if (pack?.builtin === true && Number.isSafeInteger(pack.bytes) && pack.bytes > 0) pack.bytes = '<asset-bytes>';
+    }
+  }
+  return machineOf(answer, route, other);
 }
 /**
  * The day the answers were recorded, and the day they are compared on: the

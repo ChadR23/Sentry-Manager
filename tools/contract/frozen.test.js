@@ -13,6 +13,26 @@ const file = path.join(__dirname, 'frozen.js');
 const localRequire = createRequire(file);
 const routes = localRequire('../../lean/tests/fixtures/contract/routes.json').routes;
 
+test('frozen: built-in pack sizes follow assets while metadata and uploaded sizes stay exact', () => {
+  const { machine } = localRequire('./frozen');
+  const route = 'GET /api/ui-packs';
+  const before = {body:{packs:[{id:'sentry-six',builtin:true,bytes:634132,files:39},{id:'uploaded',builtin:false,bytes:1200,files:2}]}};
+  const after = structuredClone(before);
+  after.body.packs[0].bytes = 647203;
+  assert.deepEqual(machine(before,route), machine(after,route));
+  assert.equal(before.body.packs[0].bytes,634132,'comparison does not mutate the recorded answer');
+  for (const bytes of [undefined,null,'647203',0,-1]) {
+    const bad=structuredClone(after);
+    if(bytes===undefined)delete bad.body.packs[0].bytes;else bad.body.packs[0].bytes=bytes;
+    assert.notDeepEqual(machine(before,route),machine(bad,route),'missing, invalid and changed-type sizes still differ');
+  }
+  const metadata=structuredClone(after);metadata.body.packs[0].files++;
+  assert.notDeepEqual(machine(before,route),machine(metadata,route));
+  const uploaded=structuredClone(after);uploaded.body.packs[1].bytes++;
+  assert.notDeepEqual(machine(before,route),machine(uploaded,route));
+  assert.notDeepEqual(machine(before,'GET /api/vehicles'),machine(after,'GET /api/vehicles'));
+});
+
 // Only startup and API answers are replaced: main's shutdown and directory removal run unchanged.
 async function run(t, { mode = 'graceful', different = false, removeError = false, args = [] } = {}) {
   const messages = [], warnings = [], logs = [];

@@ -19,6 +19,113 @@ const groups = ['SavedClips', 'SentryClips', 'RecentClips'];
 const simple = { codec: 'h265', outputMode: 'replace', profileId: 'aggressive' };
 const choice = (patch = {}) => ({ ...structuredClone(model.DEFAULTS), ...patch });
 
+test('GPU memory retries and older GPU shortfalls are not described as damaged video', () => {
+  const legacy = {state:'failed',encoder:'hevc_nvenc',resultCode:'frame-count-mismatch',failure:{code:'frame-count-mismatch',retryable:false}};
+  const temporary = {state:'failed',encoder:'hevc_nvenc',resultCode:'gpu-memory-exhausted',failure:{code:'gpu-memory-exhausted',retryable:true}};
+  const pending = {state:'queued',resultCode:'gpu-memory-retry'};
+  const result = model.clipFailures({state:'paused',items:[legacy,temporary,pending]});
+  assert.equal(result.damaged,0);
+  assert.equal(result.legacyGpu,1);
+  assert.equal(result.temporary,1);
+  assert.equal(result.retrying,1);
+  assert.match(result.retryingText,/1 clip will be retried.*GPU ran out of memory/);
+  assert.match(result.retryingText,/resume/i);
+  const trimmed = model.clipFailures({itemStateCounts:{failed:4},itemGpuRetryCount:8,
+    itemFailureCounts:[{encoder:'hevc_nvenc',code:'frame-count-mismatch',resultCode:'frame-count-mismatch',retryable:false,count:4}]});
+  assert.equal(trimmed.legacyGpu,4); assert.equal(trimmed.damaged,0); assert.equal(trimmed.retrying,8);
+});
+
+test('speed result explains measured GPU memory pressure without inventing usage', () => {
+  const state={phase:'done',settingsSource:'test',result:{profileId:'aggressive',testedAt:1795525200000,
+    devices:[{id:'gpu',name:'GPU',concurrency:1,filesPerMinute:2,memory:{freeMib:1304,totalMib:8192,perEncodeMib:1010,limit:1}}]}};
+  assert.match(model.speedStatus(state,{}).summary,/limited by GPU memory/i);
+  assert.match(model.speedStatus(state,{}).summary,/6\.7 GB already in use/);
+});
+
+test('status nouns use singular only for one problem, clip or file', () => {
+  for (const word of ['problem', 'clip', 'file']) {
+    assert.equal(model.statusNoun?.(0, word), word + 's');
+    assert.equal(model.statusNoun?.(1, word), word);
+    assert.equal(model.statusNoun?.(2, word), word + 's');
+  }
+});
+
+test('queued temporary retries and successful retries supersede their stale Activity failure', () => {
+  const job={externalId:'converter:job-1'};
+  const snapshot={id:'job-1',state:'paused',items:[{state:'queued',resultCode:'gpu-memory-retry'}]};
+  assert.equal(model.currentFailureExplained?.(job,snapshot),true);
+  assert.equal(model.currentFailureExplained?.({externalId:'converter:older-job'},snapshot),false);
+  assert.equal(model.currentFailureExplained?.(job,{...snapshot,failure:{code:'recovery-required'}}),false);
+  assert.equal(model.currentFailureExplained?.(job,{...snapshot,state:'completed',items:[]}),true);
+});
+
+test('damaged clips kept as recorded are separate from actionable failures', () => {
+  const damaged = Array.from({length:5}, (_, i) => ({state:'failed', relativePath:`RecentClips/generated-${i}.mp4`,
+    resultCode:i === 4 ? 'invalid-h264' : 'frame-count-mismatch', failure:{retryable:false}}));
+  const result = model.clipFailures?.({items:damaged});
+  assert.equal(result?.damaged, 5);
+  assert.equal(result?.attention, 0);
+  assert.equal(result?.keptText, '5 damaged clips kept as recorded');
+  assert.equal(result?.items.length, 5);
+  assert.match(result?.items[0].reason || '', /every.*frame/);
+  assert.match(result?.items[4].reason || '', /cannot be read/);
+  assert.doesNotMatch(result?.explanation || '', /retry|Expert/);
+  const single = model.clipFailures?.({items:[damaged[4]]});
+  assert.equal(single?.keptText, '1 damaged clip kept as recorded');
+  const attention = model.clipFailures?.({items:[
+    {...damaged[0],failure:{retryable:true}}, {...damaged[0],failure:{}},
+    {...damaged[0],resultCode:'cleanup-pending'}, {...damaged[0],resultCode:'EIO',failure:{retryable:true}},
+  ]});
+  assert.equal(attention?.damaged, 0);
+  assert.equal(attention?.attention, 4);
+  assert.match(attention?.attentionText || '', /Open Expert.*retry/);
+});
+
+test('truncated failure snapshots use all recorded reasons and keep unknown failures actionable', () => {
+  const result = model.clipFailures?.({items:[],itemStateCounts:{failed:500},itemFailureCounts:[
+    {code:'frame-count-mismatch',resultCode:'frame-count-mismatch',retryable:false,count:400},
+    {code:'invalid-h264',resultCode:'invalid-h264',retryable:false,count:50},
+    {code:'EIO',resultCode:'EIO',retryable:true,count:40},
+  ]});
+  assert.equal(result?.damaged, 450);
+  assert.equal(result?.attention, 50);
+  assert.equal(result?.items.length, 0);
+});
+
+test('server-tested local lanes retain the guided level, manual and node lanes stay custom', () => {
+  const c = {...simple, deviceSettingsSource:'test', lanes:[{device:'gpu-a',concurrency:4},{device:'gpu-b',concurrency:2}]};
+  assert.equal(model.levelOf(c), 'med');
+  assert.equal(model.levelOf({...c, deviceSettingsSource:'user'}), 'custom');
+  assert.equal(model.levelOf({...c, lanes:[{device:'node:a',concurrency:2}]}), 'custom');
+});
+
+test('speed estimates use measured results only for the selected profile', () => {
+  const slow={phase:'done',result:{profileId:'aggressive',testedAt:1795525200000,devices:[{id:'cpu',name:'CPU',concurrency:1,filesPerMinute:1/60}]}};
+  assert.equal(model.speedEstimate(slow,'med'),'About 1 clip an hour on your server');
+  assert.match(model.speedStatus(slow,{}).summary,/about 1 clip an hour$/);
+  const state = {result:{profileId:'aggressive', testedAt:1795525200000,
+    devices:[{id:'gpu-a', name:'GPU A', concurrency:4, filesPerMinute:3.5},
+      {id:'gpu-b', name:'GPU B', concurrency:2, filesPerMinute:2}]}};
+  assert.equal(model.speedEstimate?.(state, 'med'), 'About 330 clips an hour on your server');
+  assert.equal(model.speedEstimate?.(state, 'high'), '');
+  assert.equal(model.speedEstimate?.(null, 'med'), '');
+  state.result.devices[0].filesPerMinute = NaN;
+  assert.equal(model.speedEstimate?.(state, 'med'), '');
+});
+
+test('speed status distinguishes an unapplied recommendation from current settings', () => {
+  assert.match(model.speedStatus({settingsSource:'user'}, simple).summary, /settings are kept/);
+  const result = {profileId:'aggressive', testedAt:1795525200000,
+    devices:[{id:'gpu-a',name:'GPU A',concurrency:4,filesPerMinute:3}]};
+  const s = model.speedStatus?.({phase:'done',settingsSource:'user',result},
+    {...simple, lanes:[{device:'gpu-a',concurrency:2}]});
+  assert.match(s?.summary || '', /Recommended: GPU A × 4/);
+  assert.match(s?.current || '', /GPU A × 2/);
+  assert.equal(s?.canApply, true);
+  assert.match(model.speedStatus?.({phase:'running',progress:{step:'run',device:{name:'GPU A'},level:2},startedAt:1000}, simple, 61000)?.summary || '', /GPU A.*2.*1m/);
+  assert.match(model.speedStatus?.({phase:'waiting',reason:'Waiting for shrinking to pause or finish.'}, simple)?.summary || '', /Waiting for shrinking/);
+});
+
 test('preview progress counts verified steps for the current clip, never invented encode percents', () => {
   const picking = model.previewProgress(null, 'saved', 'UTC');
   assert.equal(picking.done, 0);

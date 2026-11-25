@@ -185,6 +185,60 @@ Review the choices and confirm replacement before turning on automatic
 shrinking. Each smaller copy is checked before it replaces the original.
 The status screen shows progress, space saved and the next check.
 
+Clips with damaged video (`invalid-h264`, or non-GPU `frame-count-mismatch`, recorded as
+nonretryable) appear separately as **damaged clips kept as recorded**, without
+adding an actionable problem. Expand that line to see relative paths and plain
+reasons; **Show more clips** reads additional pages for large jobs. Originals
+stay as recorded. Temporary, unknown, and cleanup failures still appear under
+**Needs attention**, with the existing review and retry actions.
+
+GPU memory exhaustion is temporary. An explicit memory-allocation error from
+NVENC/CUDA, VA-API or QSV rejects that encode even if ffmpeg reports success;
+the frame-count check still has zero tolerance. The converter cleans up the
+candidate and tries again with one encode at a time on that GPU, at most three
+attempts total. The status screen says when clips will be retried. A pause is
+kept, and a failed retry leaves the original in place. **Retry clips that failed
+for temporary reasons** queues eligible failures; it also offers a fresh check
+for older GPU frame-count failures whose encode logs were not retained. It never
+queues `invalid-h264` and never resumes a paused run.
+
+NVIDIA lanes use the configured parallel count as an upper bound. Before each
+encode, a bounded `nvidia-smi` query checks free memory by PCI address, and a
+shared reservation prevents simultaneous workers spending the same budget.
+The estimate is 512 MiB plus 96 bytes per pixel, rounded up to MiB, with 128 MiB
+left free. At 2896×1876 this is 1,010 MiB per encode: 1,304 MiB free admits one.
+Unknown dimensions budget for UHD. This conservative estimate is checked with
+synthetic readings and the reported one-versus-four encode observations; it is
+not a measured allocation for every driver. Reservations also leave headroom
+for allocations still growing. Unreadable memory telemetry keeps the existing
+lane behavior; a detected memory failure still serializes the GPU for 60 seconds.
+An admission wait ends after 30 seconds and counts toward the bounded attempts.
+
+**Speed test.** Before the first automatic run, a setup without chosen device
+settings tests temporary copies of original H.264 clips on this server. It uses
+H.265 at the selected space level and the configured verification mode. Each
+local GPU is tested on its own at 1, 2, 4, 6 and 8 clips at once; High tests the
+CPU instead. It chooses the lightest successful setting within 5% of the fastest
+for each device. It never replaces footage during the test. A change to the
+server's devices prompts another test for settings managed by the speed test.
+
+Automatic tests wait until every conversion job has finished and no preview is
+running. **Test again** may also run while a job is fully paused by you, after
+its current work has stopped. The job stays paused; Resume is unavailable until
+the test finishes. Tests never pause, cancel or resume jobs themselves. If no
+original clips remain, or a test fails or is cancelled, shrinking keeps the
+existing settings and the status screen explains why the test did not finish.
+
+Settings chosen in Expert stay yours. A requested test shows its recommendation
+beside your current setting; **Use these settings** saves it for automatic
+shrinking. The status card shows measured speed, device counts and the
+test date. Step 2 shows a speed estimate only when a result exists for that
+level. Speeds measured on each device separately are approximate when used
+together, since they share the server and footage storage.
+The test samples current GPU memory too, including other applications' usage,
+and does not test or recommend a parallel level beyond that budget. Its result
+shows when memory limited the test and how much was already in use.
+
 **Expert** opens the full Encoder controls. The switch only changes the
 view; it never saves settings or starts work. Saving in Expert keeps the
 keep window and calendar schedule. Changing the interval or time window

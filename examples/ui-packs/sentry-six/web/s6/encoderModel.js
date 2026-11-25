@@ -6,6 +6,79 @@ export const LEVELS = [
 ];
 export const KEEP_CHIPS = [3, 7, 14, 30, 60];
 
+export const statusNoun = (count, one, many = one + 's') => count === 1 ? one : many;
+
+export function clipFailures(snapshot) {
+  const rows = (snapshot?.items || []).filter((i) => i.state === 'failed');
+  const codeOf = (i) => i.resultCode || i.failure?.code || i.code;
+  const legacyGpu = (i) => codeOf(i) === 'frame-count-mismatch' && /_(nvenc|vaapi|qsv|amf)$/.test(i.encoder || '');
+  const temporary = (i) => codeOf(i) === 'gpu-memory-exhausted' && (i.failure?.retryable ?? i.retryable) === true;
+  const damaged = (i) => (i.failure?.retryable ?? i.retryable) === false &&
+    !legacyGpu(i) && ['frame-count-mismatch', 'invalid-h264'].includes(codeOf(i));
+  const groups = snapshot?.itemFailureCounts || rows.map((i) => ({...i, count:1}));
+  const sum = (accept) => groups.filter(accept).reduce((n, g) => n + (Number(g.count) || 0), 0);
+  const kept = sum(damaged), gpu = sum(temporary), legacy = sum(legacyGpu);
+  const retrying = snapshot?.itemGpuRetryCount ?? (snapshot?.items || []).filter((i) => ['queued','processing'].includes(i.state) && i.resultCode === 'gpu-memory-retry').length;
+  const total = snapshot?.itemStateCounts?.failed ?? snapshot?.itemCounts?.failed ?? rows.length;
+  const attention = Math.max(0, total - kept);
+  const n = kept.toLocaleString();
+  return {
+    damaged:kept, attention, temporary:gpu, legacyGpu:legacy, retrying,
+    retryingText:`${retrying.toLocaleString()} ${statusNoun(retrying, 'clip')} will be retried (the GPU ran out of memory)${['paused','paused_network'].includes(snapshot?.state) ? ' when you resume shrinking' : ''}.`,
+    keptText:`${n} damaged ${statusNoun(kept, 'clip')} kept as recorded`,
+    explanation:`${n} ${statusNoun(kept, 'clip')} ${kept === 1 ? 'has' : 'have'} damaged video. Shrinking would lose frames or produce unreadable video. ${kept === 1 ? 'The original was' : 'The originals were'} kept as recorded; nothing to do.`,
+    attentionText:[gpu ? `${gpu.toLocaleString()} ${statusNoun(gpu, 'clip')} could not finish because the GPU ran out of memory. ${gpu === 1 ? 'The original was' : 'The originals were'} kept. Retry with less pressure on the GPU.` : '', legacy ? `${legacy.toLocaleString()} ${statusNoun(legacy, 'clip')} lost frames during GPU encoding. The GPU may have been too busy; ${legacy === 1 ? 'the original was' : 'the originals were'} kept. Retry with less pressure to check.` : '',
+      attention > gpu + legacy ? `${(attention-gpu-legacy).toLocaleString()} ${statusNoun(attention-gpu-legacy, 'clip')} could not be shrunk. ${attention-gpu-legacy === 1 ? 'The original was' : 'The originals were'} kept. Open Expert to review or retry ${attention-gpu-legacy === 1 ? 'it' : 'them'}.` : ''].filter(Boolean).join(' '),
+    items:rows.filter(damaged).map((i) => ({relativePath:i.relativePath || 'Unknown clip', code:codeOf(i),
+      reason:codeOf(i) === 'frame-count-mismatch' ? 'A smaller copy could not preserve every video frame.' : 'Some of the recorded video cannot be read.'})),
+  };
+}
+
+export function currentFailureExplained(job, snapshot) {
+  if (!snapshot || job.externalId !== `converter:${snapshot.id}` || snapshot.failure) return false;
+  const issues = clipFailures(snapshot);
+  return snapshot.state === 'completed' || issues.damaged + issues.attention + issues.retrying > 0;
+}
+
+function speedPerHour(result) {
+  const devices = result?.devices;
+  if (!devices?.length || devices.some((d) => !Number.isFinite(d.filesPerMinute) || d.filesPerMinute <= 0)) return null;
+  return Math.round(devices.reduce((sum, d) => sum + d.filesPerMinute, 0) * 60);
+}
+
+export function speedEstimate(state, level) {
+  const result = state?.result, rate = speedPerHour(result);
+  return rate != null && result.profileId === LEVELS.find((l) => l.id === level)?.profileId
+    ? `About ${rate.toLocaleString('en-US')} ${statusNoun(rate, 'clip')} an hour on your server` : '';
+}
+
+export function speedStatus(state, config, now = Date.now()) {
+  const s = state || {}, result = s.result;
+  const active = ['queued', 'waiting', 'running'].includes(s.phase);
+  const canApply = !active && s.phase === 'done' && s.settingsSource === 'user' && !!result?.devices?.length;
+  const names = (devices) => devices.map((d) => `${d.name || d.device || d.id} × ${d.concurrency}`).join(' and ');
+  let summary = s.reason || (s.settingsSource === 'user' ? 'Your device settings are kept. Test again to compare them.' : 'A speed test will choose how many clips your server shrinks at once.');
+  if (s.phase === 'running') {
+    const p = s.progress || {}, seconds = Math.max(0, Math.floor((now - (s.startedAt || now)) / 1000));
+    const elapsed = seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
+    const step = p.step === 'scan' ? 'Finding original clips' : p.step === 'copy' ? 'Preparing temporary copies'
+      : `${p.device?.name || (p.hardware === false ? 'CPU' : 'Encoding device')}${p.level ? ` · ${p.level} at once` : ''}`;
+    summary = `${step} · ${elapsed} elapsed`;
+  } else if (s.phase === 'queued') summary = 'Speed test queued.';
+  else if (s.phase === 'done' && result?.devices?.length) {
+    const date = new Date(result.testedAt).toLocaleDateString('en-US', {month:'short', day:'numeric'});
+    const rate = speedPerHour(result);
+    summary = `${canApply ? 'Recommended: ' : 'Using '}${names(result.devices)} · tested ${date}${rate == null ? '' : ` · about ${rate.toLocaleString('en-US')} ${statusNoun(rate, 'clip')} an hour`}`;
+    for (const device of result.devices) {
+      const memory = device.memory;
+      if (memory?.limit < 8 && Number.isFinite(memory.freeMib) && Number.isFinite(memory.totalMib))
+        summary += ` · ${device.name || 'GPU'} limited by GPU memory: ${(Math.max(0, memory.totalMib-memory.freeMib)/1024).toFixed(1)} GB already in use`;
+    }
+  }
+  const current = canApply ? `Current: ${config?.lanes?.length ? names(config.lanes.map((d) => ({...d, name:result.devices.find((r) => r.id === d.device)?.name}))) : `${config?.concurrency || 1} at once on the default device`}` : '';
+  return {summary, current, active, canApply};
+}
+
 export function levelDevice(answer, level) {
   const devices = answer?.devices || [];
   const preferred = answer?.defaultDevices?.h265 ?? answer?.defaultDevice;
@@ -139,7 +212,7 @@ export function levelOf(config) {
     'qualityLevel' in config ||
     (config.lanes != null &&
       (!Array.isArray(config.lanes) ||
-        config.lanes.length > 1 ||
+        (config.lanes.length > 1 && config.deviceSettingsSource !== 'test') ||
         config.lanes.some((lane) => lane.device?.startsWith('node:'))))
   )
     return 'custom';
