@@ -1030,3 +1030,58 @@ fn a_tidy_keeps_a_leftover_an_overlay_and_its_lower_folder_share() {
 fn by_parent_chain_a_tidy_keeps_a_leftover_an_overlay_and_its_lower_folder_share() {
     crate::converter::mount_place::with_parent_chain(overlay_tidy_keeps_across_merged_and_lower);
 }
+
+// ---- a mount stacked over "/"
+
+fn root_over_sh(cmd: &str) -> bool {
+    std::process::Command::new("sh").arg("-c").arg(cmd).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+}
+fn root_over_q(p: &Path) -> String {
+    format!("'{}'", p.display())
+}
+
+/// After `mount --bind X /` this process keeps its old root (its lookups start under the
+/// new mount) and sees every mount below. The parent chain cannot tell that, so it places
+/// nothing and the tidy keeps a backup a paused job still needs, through a bind of the
+/// job's SentryClips. Runs in a private mount namespace (root only).
+#[test]
+fn rc5_root_overmounted_by_parent_chain() {
+    if crate::converter::mount_place::in_private_mount_namespace(concat!(module_path!(), "::rc5_root_overmounted_by_parent_chain")) {
+        return;
+    }
+    let e = env();
+    let tmp = e.root.parent().unwrap().to_path_buf();
+    let jobs = tmp.join("rc5jobs");
+    fs::create_dir_all(&jobs).unwrap();
+    let store = JobStore::new(&jobs).unwrap();
+    let view = tmp.join("v5");
+    fs::create_dir_all(view.join("SentryClips")).unwrap();
+    assert!(root_over_sh(&format!("mount --bind {} {}", root_over_q(&e.root.join("SentryClips")), root_over_q(&view.join("SentryClips")))));
+    let x = e.dir.join(A);
+    fs::write(&x, h264()).unwrap();
+    fs::hard_link(&x, e.dir.join(format!("BACKUP-{A}"))).unwrap();
+    let paused = job(&store, &e.root, "paused", vec![], vec![]);
+    let over = tmp.join("over");
+    fs::create_dir_all(&over).unwrap();
+    assert!(root_over_sh(&format!("mount --bind {} /", root_over_q(&over))));
+    assert!(fs::metadata(&x).is_ok(), "this process still reaches its old root");
+    let via = view.join("SentryClips").join(e.dir.file_name().unwrap());
+    let run = || {
+        let r = rc3_tidy_via(&e, &store, &view, &via);
+        outcome(&r, &format!("BACKUP-{A}")).clone()
+    };
+    let by_kernel = run();
+    crate::converter::mount_place::force_parent_chain(true);
+    let by_chain = run();
+    crate::converter::mount_place::force_parent_chain(false);
+    let nlink = fs::metadata(&x).unwrap().nlink();
+    // (the namespace drops every mount when it exits; this one is unmounted now so the
+    // test's folder can be removed)
+    let _ = std::process::Command::new("umount").arg(view.join("SentryClips")).status();
+    if crate::converter::mount_place::mnt_id(Path::new("/")).is_some() {
+        assert_eq!(by_kernel, Outcome::Kept(format!("job {paused} still has files to settle in this folder")));
+    }
+    let root = e.root.display();
+    assert_eq!(by_chain, Outcome::Kept(format!("job {paused} still has files to settle in \"{root}\", which cannot be told apart from this folder now")), "nlink now {nlink}");
+    assert_eq!(nlink, 2);
+}

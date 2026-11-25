@@ -27,8 +27,10 @@
 //! Two different filesystems are told apart by device, which is only right when each
 //! holds its own files. An overlay, a FUSE filesystem (mergerfs, Unraid's shfs) or a
 //! network share (cifs, NFS, 9p, virtiofs, ceph) may show the files of another device, or
-//! the same files through two superblocks: a place on one of those and a place on another
-//! device cannot be told apart (`cannot_tell`), so they overlap.
+//! the same files through two superblocks, or through two mounts of one superblock whose
+//! roots mountinfo does not tell (NFS): a place on one of those and a place on any other
+//! mount cannot be told apart (`cannot_tell`), so they overlap. Within one such mount
+//! paths compare as usual.
 
 use std::collections::HashMap;
 use std::ffi::{CString, OsString};
@@ -57,6 +59,8 @@ pub struct Place {
     pub path: PathBuf,
     /// on a filesystem that may show another device's files (`opaque_type`)
     pub opaque: bool,
+    /// the id of the mount it was placed through (its mountinfo line's first field)
+    pub mount: u64,
 }
 
 /// A filesystem type whose files may be another device's, or the same files as another
@@ -166,6 +170,37 @@ pub fn with_parent_chain(test: fn()) {
     test();
 }
 
+/// Tests that change mounts outside their own folders (a mount over "/"): runs the test
+/// named `test` (`concat!(module_path!(), "::name")`) again, alone, in this test binary
+/// under `unshare -m --propagation private`, so every mount it makes goes with that mount
+/// namespace when it exits. True here (the test passed there, or was skipped: no unshare,
+/// not root): the caller returns. False inside the namespace: the caller goes on.
+#[cfg(test)]
+pub fn in_private_mount_namespace(test: &str) -> bool {
+    use std::process::{Command, Stdio};
+    const IN: &str = "LEAN_TEST_IN_PRIVATE_MOUNT_NAMESPACE";
+    let name = test.split_once("::").map_or(test, |(_, rest)| rest);
+    if std::env::var_os(IN).is_some_and(|v| v == name) {
+        return false;
+    }
+    let can = Command::new("unshare").args(["-m", "--propagation", "private", "true"]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    if !can {
+        eprintln!("skipped: no private mount namespace (unshare -m needs root)");
+        return true;
+    }
+    let exe = std::env::current_exe().expect("this test binary");
+    let out = Command::new("unshare")
+        .args(["-m", "--propagation", "private", "--"])
+        .arg(exe)
+        .args([name, "--exact", "--test-threads=1", "--nocapture"])
+        .env(IN, name)
+        .output()
+        .expect("run the test in a private mount namespace");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success() && text.contains("test result: ok. 1 passed"), "{name} in a private mount namespace:\n{text}");
+    true
+}
+
 /// Place by the table's parent chain (the kernel cannot say which mount a path is on).
 fn by_chain() -> bool {
     #[cfg(test)]
@@ -183,10 +218,10 @@ impl Mount {
     fn place(&self, real: &Path) -> Option<Place> {
         let rest = real.strip_prefix(&self.at).ok()?;
         let path = if rest.as_os_str().is_empty() { self.root.clone() } else { self.root.join(rest) };
-        Some(Place { dev: self.dev.clone(), path, opaque: opaque_type(&self.fstype) })
+        Some(Place { dev: self.dev.clone(), path, opaque: opaque_type(&self.fstype), mount: self.id })
     }
     fn root_place(&self) -> Place {
-        Place { dev: self.dev.clone(), path: self.root.clone(), opaque: opaque_type(&self.fstype) }
+        Place { dev: self.dev.clone(), path: self.root.clone(), opaque: opaque_type(&self.fstype), mount: self.id }
     }
 }
 
@@ -239,13 +274,18 @@ impl Table {
     /// one of those, so what was mounted inside P before it is hidden). A reached M is on top
     /// iff no child of M is stacked over it (mount point equal to M's). Two children of one
     /// mount on the same point, more than one root (a mount whose parent is not listed),
-    /// a root not at "/", a mount point not below its parent's, or a loop: None.
+    /// a root not at "/", any other mount at "/", a mount point not below its parent's, or
+    /// a loop: None.
+    ///
+    /// (A mount stacked over "/" is not on top for a process that has not chrooted since:
+    /// its lookups start at its own root, under it, and still see every mount below. So
+    /// the chain cannot say what such a process reaches.)
     fn tops(&self) -> Option<Vec<bool>> {
         let n = self.0.len();
         let index: HashMap<u64, usize> = self.0.iter().enumerate().map(|(i, m)| (m.id, i)).collect();
         let parent: Vec<Option<usize>> = self.0.iter().map(|m| index.get(&m.parent).copied().filter(|&p| self.0[p].id != m.id)).collect();
         let roots: Vec<usize> = (0..n).filter(|&i| parent[i].is_none()).collect();
-        if roots.len() != 1 || self.0[roots[0]].at != Path::new("/") {
+        if roots.len() != 1 || self.0[roots[0]].at != Path::new("/") || (0..n).any(|i| i != roots[0] && self.0[i].at == Path::new("/")) {
             return None;
         }
         let mut children: Vec<Vec<usize>> = vec![vec![]; n];
@@ -354,11 +394,14 @@ pub fn holds(places: &[Place], p: &Place) -> bool {
     places.iter().any(|o| within(p, o))
 }
 
-/// Two places on different devices where either may show the other's files (an overlay
-/// or FUSE union of it, or a network share of the same files through another superblock):
-/// whether they share files cannot be told. On one device paths compare as usual.
+/// Two places where either is on a filesystem that may show another's files (an overlay
+/// or FUSE union, or a network share), not both through one mount: whether they share
+/// files cannot be told. Only within one mount do their paths compare: two mounts of one
+/// such filesystem may share a device and still not be told apart by path (NFS mounts of
+/// one export's folders share a superblock, and mountinfo gives "/" as each one's root).
+/// Places on plain filesystems compare by device and path.
 pub fn cannot_tell(a: &Place, b: &Place) -> bool {
-    a.dev != b.dev && (a.opaque || b.opaque)
+    (a.opaque || b.opaque) && a.mount != b.mount
 }
 
 /// Two folders share files: some part of one is in or above some part of the other, or
@@ -418,8 +461,23 @@ mod tests {
         }
     }
 
+    /// A place on a plain filesystem, through mount 0 (`bare` sets that on a computed one,
+    /// to compare it by device and path).
     fn pl(dev: &str, p: &str) -> Place {
-        Place { dev: dev.into(), path: p.into(), opaque: false }
+        Place { dev: dev.into(), path: p.into(), opaque: false, mount: 0 }
+    }
+    trait Bare {
+        fn bare(self) -> Self;
+    }
+    impl Bare for Place {
+        fn bare(self) -> Place {
+            Place { mount: 0, ..self }
+        }
+    }
+    impl Bare for Vec<Place> {
+        fn bare(self) -> Vec<Place> {
+            self.into_iter().map(Bare::bare).collect()
+        }
     }
 
     #[test]
@@ -445,15 +503,15 @@ mod tests {
     #[test]
     fn places_through_the_mount_a_path_is_on() {
         let t = t();
-        assert_eq!(t.place_in_sample("/srv/share/TeslaCam").unwrap(), pl("253:1", "/srv/share/TeslaCam"));
-        assert_eq!(t.place_in_sample("/view/SentryClips/2026-x").unwrap(), pl("253:1", "/srv/share/TeslaCam/SentryClips/2026-x"));
-        assert_eq!(t.place_in_sample("/view/SentryClips").unwrap(), pl("253:1", "/srv/share/TeslaCam/SentryClips"));
-        assert_eq!(t.place_in_sample("/view").unwrap(), pl("253:1", "/view"));
-        assert_eq!(t.place_in_sample("/mnt/my usb/TeslaCam").unwrap(), pl("0:50", "/TeslaCam"));
+        assert_eq!(t.place_in_sample("/srv/share/TeslaCam").unwrap().bare(), pl("253:1", "/srv/share/TeslaCam"));
+        assert_eq!(t.place_in_sample("/view/SentryClips/2026-x").unwrap().bare(), pl("253:1", "/srv/share/TeslaCam/SentryClips/2026-x"));
+        assert_eq!(t.place_in_sample("/view/SentryClips").unwrap().bare(), pl("253:1", "/srv/share/TeslaCam/SentryClips"));
+        assert_eq!(t.place_in_sample("/view").unwrap().bare(), pl("253:1", "/view"));
+        assert_eq!(t.place_in_sample("/mnt/my usb/TeslaCam").unwrap().bare(), pl("0:50", "/TeslaCam"));
         // a later mount at one point hides the earlier one
-        assert_eq!(t.place_in_sample("/cam/a").unwrap(), pl("253:1", "/hidden/a"));
+        assert_eq!(t.place_in_sample("/cam/a").unwrap().bare(), pl("253:1", "/hidden/a"));
         // a mount point that only shares a prefix of its name is not above
-        assert_eq!(t.place_in_sample("/viewer").unwrap(), pl("253:1", "/viewer"));
+        assert_eq!(t.place_in_sample("/viewer").unwrap().bare(), pl("253:1", "/viewer"));
     }
 
     #[test]
@@ -490,10 +548,10 @@ mod tests {
         .unwrap();
         let kernel = |p: &Path| Some(if p.starts_with("/share/TeslaCam") { 51 } else { 27 });
         let got = t.place_of_real_by(Path::new("/share/TeslaCam/SentryClips/evt"), &kernel).unwrap();
-        assert_eq!(got, pl("253:1", "/real/TeslaCam/SentryClips/evt"));
+        assert_eq!(got.bare(), pl("253:1", "/real/TeslaCam/SentryClips/evt"));
         // the hidden tmpfs is not something /share holds
         let share = t.places_of_real_by(Path::new("/share"), &kernel).unwrap();
-        assert_eq!(share, vec![pl("253:1", "/share"), pl("253:1", "/real/TeslaCam")]);
+        assert_eq!(share.bare(), vec![pl("253:1", "/share"), pl("253:1", "/real/TeslaCam")]);
         // a mount on top listed before the one under it (after mount --move)
         let moved = Table::parse(
             "27 1 253:1 / / rw - ext4 /dev/vda rw\n\
@@ -502,8 +560,8 @@ mod tests {
         )
         .unwrap();
         let kernel = |p: &Path| Some(if p.starts_with("/x") { 48 } else { 27 });
-        assert_eq!(moved.place_of_real_by(Path::new("/x/SentryClips"), &kernel).unwrap(), pl("253:1", "/real/TeslaCam/SentryClips"));
-        assert_eq!(moved.places_of_real_by(Path::new("/"), &kernel).unwrap(), vec![pl("253:1", "/"), pl("253:1", "/real/TeslaCam")]);
+        assert_eq!(moved.place_of_real_by(Path::new("/x/SentryClips"), &kernel).unwrap().bare(), pl("253:1", "/real/TeslaCam/SentryClips"));
+        assert_eq!(moved.places_of_real_by(Path::new("/"), &kernel).unwrap().bare(), vec![pl("253:1", "/"), pl("253:1", "/real/TeslaCam")]);
         // unknown to the kernel, unknown to the table, or not above the path: no place
         assert!(t.place_of_real_by(Path::new("/a"), &|_| None).is_none());
         assert!(t.place_of_real_by(Path::new("/a"), &|_| Some(99)).is_none());
@@ -564,13 +622,13 @@ mod tests {
     #[test]
     fn without_mount_ids_a_path_is_placed_on_the_visible_mount_by_the_parent_chain() {
         let t = Table::parse(CHAIN).unwrap();
-        assert_eq!(chain_place(&t, "/cam/a").unwrap(), pl("253:1", "/hidden/a"), "the mount stacked on top");
-        assert_eq!(chain_place(&t, "/cam/deep/x").unwrap(), pl("253:1", "/hidden/deep/x"), "not the hidden tmpfs inside the covered mount");
-        assert_eq!(chain_place(&t, "/pts/1").unwrap(), pl("0:53", "/1"));
-        assert_eq!(chain_place(&t, "/view/SentryClips/x").unwrap(), pl("253:1", "/srv/share/TeslaCam/SentryClips/x"));
-        assert_eq!(chain_place(&t, "/mnt/my usb/TeslaCam").unwrap(), pl("0:50", "/TeslaCam"));
-        assert_eq!(chain_place(&t, "/viewer").unwrap(), pl("253:1", "/viewer"));
-        let all = chain_places(&t, "/").unwrap();
+        assert_eq!(chain_place(&t, "/cam/a").unwrap().bare(), pl("253:1", "/hidden/a"), "the mount stacked on top");
+        assert_eq!(chain_place(&t, "/cam/deep/x").unwrap().bare(), pl("253:1", "/hidden/deep/x"), "not the hidden tmpfs inside the covered mount");
+        assert_eq!(chain_place(&t, "/pts/1").unwrap().bare(), pl("0:53", "/1"));
+        assert_eq!(chain_place(&t, "/view/SentryClips/x").unwrap().bare(), pl("253:1", "/srv/share/TeslaCam/SentryClips/x"));
+        assert_eq!(chain_place(&t, "/mnt/my usb/TeslaCam").unwrap().bare(), pl("0:50", "/TeslaCam"));
+        assert_eq!(chain_place(&t, "/viewer").unwrap().bare(), pl("253:1", "/viewer"));
+        let all = chain_places(&t, "/").unwrap().bare();
         for p in [pl("253:1", "/"), pl("0:21", "/"), pl("253:1", "/srv/share/TeslaCam/SentryClips"), pl("0:50", "/"), pl("253:1", "/hidden"), pl("0:53", "/")] {
             assert!(all.contains(&p), "{p:?} in {all:?}");
         }
@@ -598,8 +656,8 @@ mod tests {
              51 27 253:1 /real/TeslaCam /share/TeslaCam rw - ext4 /dev/vda rw\n",
         )
         .unwrap();
-        assert_eq!(chain_place(&t, "/share/TeslaCam/SentryClips/evt").unwrap(), pl("253:1", "/real/TeslaCam/SentryClips/evt"));
-        assert_eq!(chain_places(&t, "/share").unwrap(), vec![pl("253:1", "/share"), pl("253:1", "/real/TeslaCam")]);
+        assert_eq!(chain_place(&t, "/share/TeslaCam/SentryClips/evt").unwrap().bare(), pl("253:1", "/real/TeslaCam/SentryClips/evt"));
+        assert_eq!(chain_places(&t, "/share").unwrap().bare(), vec![pl("253:1", "/share"), pl("253:1", "/real/TeslaCam")]);
         // a mount on top listed before the one under it (after mount --move)
         let moved = Table::parse(
             "27 1 253:1 / / rw - ext4 /dev/vda rw\n\
@@ -607,8 +665,8 @@ mod tests {
              49 27 0:40 / /x rw - tmpfs t rw\n",
         )
         .unwrap();
-        assert_eq!(chain_place(&moved, "/x/SentryClips").unwrap(), pl("253:1", "/real/TeslaCam/SentryClips"));
-        assert_eq!(chain_places(&moved, "/").unwrap(), vec![pl("253:1", "/"), pl("253:1", "/real/TeslaCam")]);
+        assert_eq!(chain_place(&moved, "/x/SentryClips").unwrap().bare(), pl("253:1", "/real/TeslaCam/SentryClips"));
+        assert_eq!(chain_places(&moved, "/").unwrap().bare(), vec![pl("253:1", "/"), pl("253:1", "/real/TeslaCam")]);
         // a mount made inside the one moved underneath stays hidden
         let under = Table::parse(
             "27 1 253:1 / / rw - ext4 /dev/vda rw\n\
@@ -617,8 +675,8 @@ mod tests {
              52 49 0:41 / /x/SentryClips rw - tmpfs t rw\n",
         )
         .unwrap();
-        assert_eq!(chain_place(&under, "/x/SentryClips/evt").unwrap(), pl("253:1", "/real/TeslaCam/SentryClips/evt"));
-        assert!(!chain_places(&under, "/x").unwrap().contains(&pl("0:41", "/")));
+        assert_eq!(chain_place(&under, "/x/SentryClips/evt").unwrap().bare(), pl("253:1", "/real/TeslaCam/SentryClips/evt"));
+        assert!(!chain_places(&under, "/x").unwrap().bare().contains(&pl("0:41", "/")));
         // a mount on a shallower point of the same parent hides a deeper one, in any order
         let shallow = Table::parse(
             "27 1 253:1 / / rw - ext4 /dev/vda rw\n\
@@ -626,7 +684,7 @@ mod tests {
              60 27 0:60 / /a/b/c rw - tmpfs t rw\n",
         )
         .unwrap();
-        assert_eq!(chain_place(&shallow, "/a/b/c/d").unwrap(), pl("253:1", "/real/b/c/d"));
+        assert_eq!(chain_place(&shallow, "/a/b/c/d").unwrap().bare(), pl("253:1", "/real/b/c/d"));
         // ... but a mount made inside it is seen
         let inside = Table::parse(
             "27 1 253:1 / / rw - ext4 /dev/vda rw\n\
@@ -634,8 +692,8 @@ mod tests {
              60 61 0:60 / /a/b/c rw - tmpfs t rw\n",
         )
         .unwrap();
-        assert_eq!(chain_place(&inside, "/a/b/c/d").unwrap(), pl("0:60", "/d"));
-        assert_eq!(chain_places(&inside, "/a").unwrap(), vec![pl("253:1", "/real"), pl("0:60", "/")]);
+        assert_eq!(chain_place(&inside, "/a/b/c/d").unwrap().bare(), pl("0:60", "/d"));
+        assert_eq!(chain_places(&inside, "/a").unwrap().bare(), vec![pl("253:1", "/real"), pl("0:60", "/")]);
     }
 
     #[test]
@@ -651,9 +709,12 @@ mod tests {
         none("27 1 253:1 / /x rw - ext4 a rw\n", "a root not at /");
         none("27 1 253:1 / / rw - ext4 a rw\n30 27 0:60 / /a rw - tmpfs t rw\n31 30 0:61 / /b rw - tmpfs t rw\n", "a mount point not below its parent's");
         none("27 1 253:1 / / rw - ext4 a rw\n30 31 0:60 / /a rw - tmpfs t rw\n31 30 0:61 / /a rw - tmpfs t rw\n", "a loop");
+        // a mount stacked over "/" (`mount --bind X /`): lookups of a process that has not
+        // chrooted since still start under it, at the old root
+        none("27 1 253:1 / / rw - ext4 a rw\n40 27 253:1 /srv/share/TeslaCam/SentryClips /view rw - ext4 a rw\n90 27 253:1 /over / rw - ext4 a rw\n", "a mount stacked over /");
         // a mount listed as its own parent is a root
         let t = Table::parse("1 1 253:1 / / rw - ext4 a rw\n30 1 0:60 / /a rw - tmpfs t rw\n").unwrap();
-        assert_eq!(chain_place(&t, "/a/b").unwrap(), pl("0:60", "/b"));
+        assert_eq!(chain_place(&t, "/a/b").unwrap().bare(), pl("0:60", "/b"));
     }
 
     // ---- filesystems whose files cannot be told apart by device
@@ -688,16 +749,52 @@ mod tests {
             assert!(ov("/nfs/a", "/ext/a"), "a network share and a local disk");
             assert!(ov("/data", "/nas/x"), "a network share and a folder of the root disk");
             assert!(ov("/mnt", "/ext"), "a folder that holds a union");
-            // one superblock: paths compare as usual
+            // one mount: paths compare as usual
             assert!(!ov("/mnt/user/a", "/mnt/user/b"));
-            assert!(!ov("/nas/x", "/nas2"), "the same share mounted twice, other folders");
+            assert!(!ov("/nas/x", "/nas/TeslaCam"), "two folders of one cifs mount");
+            assert!(ov("/nas/TeslaCam/a", "/nas/TeslaCam"), "one cifs mount, one folder inside the other");
+            // two mounts of one share: their roots may not be what mountinfo says
+            assert!(ov("/nas/x", "/nas2"), "the same share mounted twice, other folders");
             assert!(ov("/nas/TeslaCam/a", "/nas2"), "the same share mounted twice, one inside the other");
             // two plain devices are told apart
             assert!(!ov("/ext/a", "/mnt/disk1/a"));
             assert!(!ov("/ext/a", "/srv"));
         }
-        assert!(cannot_tell(&Place { opaque: true, ..pl("0:1", "/") }, &pl("0:2", "/")));
-        assert!(!cannot_tell(&Place { opaque: true, ..pl("0:1", "/") }, &Place { opaque: true, ..pl("0:1", "/x") }));
+        let on = |dev: &str, path: &str, opaque: bool, mount: u64| Place { opaque, mount, ..pl(dev, path) };
+        assert!(cannot_tell(&on("0:1", "/", true, 1), &on("0:2", "/", false, 2)));
+        assert!(!cannot_tell(&on("0:1", "/", true, 1), &on("0:1", "/x", true, 1)), "one mount");
+        assert!(cannot_tell(&on("0:1", "/", true, 1), &on("0:1", "/x", true, 2)), "one device, two mounts");
+        assert!(!cannot_tell(&on("8:1", "/", false, 1), &on("8:1", "/x", false, 2)), "a plain filesystem's two mounts");
+    }
+
+    /// NFS (sharecache, the default): `h:/export` at /a and `h:/export/sub` at /b share one
+    /// superblock, so one device, and mountinfo gives "/" as the root of both. /a/sub/y and
+    /// /b/y are one folder although their places, (dev, /sub/y) and (dev, /y), are apart.
+    const NFS: &str = "\
+27 1 253:1 / / rw - ext4 /dev/vda rw
+70 27 0:80 / /a rw,relatime - nfs4 h:/export rw,vers=4.2
+71 27 0:80 / /b rw,relatime - nfs4 h:/export/sub rw,vers=4.2
+";
+
+    #[test]
+    fn two_nfs_mounts_of_one_export_cannot_be_told_apart_by_path() {
+        let t = Table::parse(NFS).unwrap();
+        for way in [false, true] {
+            let ps = |p: &str| if way { chain_places(&t, p).unwrap() } else { t.places_in_sample(p).unwrap() };
+            let ov = |a: &str, b: &str| overlap(&ps(a), &ps(b)) && overlap(&ps(b), &ps(a));
+            assert_eq!(ps("/a/sub/y").bare(), vec![Place { opaque: true, ..pl("0:80", "/sub/y") }]);
+            assert_eq!(ps("/b/y").bare(), vec![Place { opaque: true, ..pl("0:80", "/y") }]);
+            assert!(ov("/a/sub/y", "/b/y"), "one folder through two mounts of one export");
+            assert!(ov("/a/x", "/b/z"), "any two folders of the two mounts");
+            assert!(ov("/a", "/b"));
+            // within one of the mounts paths still compare
+            assert!(!ov("/a/x", "/a/sub"), "two folders of one mount");
+            assert!(!ov("/b/x", "/b/y"));
+            assert!(ov("/a/sub", "/a/sub/y"));
+            // and the root disk is another device next to a network share
+            assert!(ov("/srv", "/b/y"));
+            assert!(ov("/", "/a/x"), "a folder that holds the mounts");
+        }
     }
 
     fn mnt(args: &[&OsStr]) -> bool {

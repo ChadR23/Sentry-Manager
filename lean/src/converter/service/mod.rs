@@ -1713,4 +1713,39 @@ mod rc3_alongside_tests {
     fn by_parent_chain_an_overlay_and_its_lower_folder_overlap() {
         crate::converter::mount_place::with_parent_chain(rc3_probe_overlayfs_lower_and_merged);
     }
+
+    /// After `mount --bind X /` this process keeps its old root and sees every mount below;
+    /// the parent chain cannot tell that, so a share and a bind of its SentryClips never
+    /// run alongside. Runs in a private mount namespace (root only).
+    #[test]
+    fn rc5_root_overmounted_alongside_by_parent_chain() {
+        if crate::converter::mount_place::in_private_mount_namespace(concat!(module_path!(), "::rc5_root_overmounted_alongside_by_parent_chain")) {
+            return;
+        }
+        let both = |x: &Path, y: &Path| {
+            let running = |root: &Path| json!({ "config": cfg(root, "gpu0"), "state": "running" });
+            (Service::may_run_alongside(&cfg(x, "cpu"), &[running(y)]), Service::may_run_alongside(&cfg(y, "cpu"), &[running(x)]))
+        };
+        let tmp = crate::converter::testutil::tempdir().unwrap();
+        let (share, view, over, other) = (tmp.path().join("share"), tmp.path().join("view"), tmp.path().join("over"), tmp.path().join("other"));
+        fs::create_dir_all(share.join("TeslaCam/SentryClips")).unwrap();
+        for d in [&view, &over, &other] {
+            fs::create_dir_all(d).unwrap();
+        }
+        assert!(mnt(&[OsStr::new("--bind"), share.join("TeslaCam/SentryClips").as_os_str(), view.as_os_str()]));
+        assert!(mnt(&[OsStr::new("--bind"), over.as_os_str(), OsStr::new("/")]));
+        assert!(share.join("TeslaCam/SentryClips").is_dir(), "this process still reaches its old root");
+        let by_kernel = (both(&share, &view), both(&other, &share));
+        crate::converter::mount_place::force_parent_chain(true);
+        let by_chain = (both(&share, &view), both(&other, &share));
+        crate::converter::mount_place::force_parent_chain(false);
+        // (the namespace drops every mount when it exits; this one is unmounted now so the
+        // test's folder can be removed)
+        um(&view);
+        if crate::converter::mount_place::mnt_id(Path::new("/")).is_some() {
+            assert_eq!(by_kernel, ((false, false), (true, true)), "the kernel way: share and view overlap, other is apart");
+        }
+        assert_eq!(by_chain.0, (false, false), "two jobs over the same clips");
+        assert_eq!(by_chain.1, (false, false), "the chain cannot place anything: nothing runs alongside");
+    }
 }
