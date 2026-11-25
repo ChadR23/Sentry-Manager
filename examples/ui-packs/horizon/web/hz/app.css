@@ -920,3 +920,11 @@ fieldset:disabled { opacity: 0.6; }
 .sentry-sul .sul-car-head h3 { text-transform: uppercase; letter-spacing: .14em; }
 .sentry-sul .sul-car-chip b, .sentry-sul .sul-tire b { font-family: var(--mono); text-shadow: 0 0 10px rgba(61, 240, 255, .45); }
 .sentry-sul .sul-car-body { box-shadow: 0 0 14px rgba(255, 63, 180, .45), inset 0 0 10px rgba(255, 63, 180, .25); }
+
+/* leftover files of an earlier replace (snapshot.backupCleanup, web/backupCleanup.js) */
+.backup-cleanup { margin: 0 0 12px; padding: 8px 12px; border-left: 2px solid var(--cyan); background: var(--glass-hi); font-size: 12.5px; line-height: 1.5; color: var(--ink); overflow-wrap: anywhere; }
+.backup-cleanup details { margin-top: 6px; }
+.backup-cleanup summary { cursor: pointer; }
+.backup-cleanup ul { margin: 6px 0 0; padding-left: 18px; }
+.backup-cleanup li { margin: 3px 0; }
+.backup-cleanup code { font: 11.5px/1.4 var(--mono); color: var(--dim); word-break: break-all; }

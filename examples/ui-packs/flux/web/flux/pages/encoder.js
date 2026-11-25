@@ -2,6 +2,7 @@
 // the /api/converter/events stream. Per-lane throughput comes from /api/stats.
 import '/web/vehicleEncoding.js';
 import { clipFailureWhy } from '/web/clipFailure.js';
+import { backupCleanupHtml } from '/web/backupCleanup.js';
 import { esc, api, invoke, state, current, sourceOf, bytes, rate, pct, num, dur, energy, watts, money, icon, toast, confirmDialog, busy, store, fin, plural, isoish, debounce, bus, CLIENT_ID, liveDraw } from '../core.js';
 import { split, seg, wireSeg, meter, chip, empty } from '../ui.js';
 import { spark, C, PALETTE } from '../charts.js';
@@ -76,6 +77,7 @@ export default {
         <div><h1>Encoder <span id="enc-state"></span></h1><p class="muted small" id="enc-sub">Loading the converter…</p></div>
         <div class="phead-actions" id="enc-actions"></div>
       </div>
+      <div id="enc-backup"></div>
       <div class="kpis" id="enc-kpis"></div>
       <div id="enc-split">
         <section class="enc-setup" aria-label="Setup">
@@ -153,6 +155,13 @@ export default {
       if (s && s.state === 'completed') a.push(`<button class="btn" type="button" data-job="dismissSummary">Dismiss</button>`);
       if (s && (s.state === 'paused' || s.state === 'paused_network' || s.recovery)) a.push(`<button class="btn ghost" type="button" data-job="discard">Set aside…</button>`);
       $('#enc-actions').innerHTML = a.join('');
+      // leftover files of an earlier replace (redrawn only when they change: an open list stays open)
+      const bc = backupCleanupHtml(s?.backupCleanup, esc, 'backup-cleanup');
+      const slot = $('#enc-backup');
+      if (slot.dataset.html !== bc) {
+        slot.innerHTML = bc;
+        slot.dataset.html = bc;
+      }
     }
     $('#enc-actions').addEventListener('click', (e) => {
       const b = e.target.closest('[data-job]');

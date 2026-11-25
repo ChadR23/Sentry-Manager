@@ -56,7 +56,9 @@ impl CanCtx for Ctx {
         Some(self.generation.load(Ordering::SeqCst))
     }
     fn protected_rels(&self, _: &str) -> Result<Vec<String>, String> {
-        Ok(self.protected.lock().unwrap().clone())
+        // (as the server's own ctx: read from a set, in another order each time)
+        let set: std::collections::HashSet<String> = self.protected.lock().unwrap().iter().cloned().collect();
+        Ok(set.into_iter().collect())
     }
     fn rescan(&self, _: &str) -> Result<(), String> {
         Ok(())
@@ -91,21 +93,57 @@ fn the_oldest_footage_kept_is_worked_out_once_per_scan() {
     for _ in 0..20 {
         assert_eq!(can.logs.status(Some(&names), Some(KEY)).unwrap()["files"][format!("{KEY}_20261108T100000Z_1.log.xz")]["check"], "verified");
         assert_eq!(can.kept_footage(KEY), Kept::Since(utc(14, 30)));
+        assert_eq!(can.kept_starts(KEY).as_deref(), Some(&vec![utc(14, 30), utc(16, 0)]));
     }
-    assert_eq!(ctx.copies.load(Ordering::SeqCst), 1, "the file list copied once, not per call");
+    // (once for the oldest clip, once for every clip's start: the logs deleted for good as not
+    // linked to footage go by them)
+    assert_eq!(ctx.copies.load(Ordering::SeqCst), 2, "the file list copied once each, not per call");
     // a new scan result: worked out again
     ctx.rescanned(&["2026-11-08_15-00-00-front.mp4"]);
     assert_eq!(can.kept_footage(KEY), Kept::Since(utc(15, 0)));
     assert_eq!(can.kept_footage(KEY), Kept::Since(utc(15, 0)));
-    assert_eq!(ctx.copies.load(Ordering::SeqCst), 2);
+    assert_eq!(can.kept_starts(KEY).as_deref(), Some(&vec![utc(15, 0)]));
+    assert_eq!(can.kept_starts(KEY).as_deref(), Some(&vec![utc(15, 0)]));
+    assert_eq!(ctx.copies.load(Ordering::SeqCst), 4);
     // a protected clip (protecting changes no scan): counted at once, and when unprotected
     ctx.protected.lock().unwrap().push("SavedClips/2026-11-08/2026-11-08_09-00-00-front.mp4".into());
     assert_eq!(can.kept_footage(KEY), Kept::Since(utc(9, 0)));
+    assert_eq!(can.kept_starts(KEY).as_deref(), Some(&vec![utc(9, 0), utc(15, 0)]));
     ctx.protected.lock().unwrap().clear();
+    assert_eq!(can.kept_starts(KEY).as_deref(), Some(&vec![utc(15, 0)]));
     assert_eq!(can.kept_footage(KEY), Kept::Since(utc(15, 0)));
     // another time zone: the clip names read again
     *ctx.zone.lock().unwrap() = "Europe/Berlin".into();
     assert_eq!(can.kept_footage(KEY), Kept::Since(utc(14, 0)));
-    assert_eq!(ctx.copies.load(Ordering::SeqCst), 3);
+    assert_eq!(can.kept_starts(KEY).as_deref(), Some(&vec![utc(14, 0)]));
+    assert_eq!(ctx.copies.load(Ordering::SeqCst), 8);
     let _ = std::fs::remove_dir_all(&data);
+}
+
+#[test]
+fn several_protected_clips_read_in_any_order_still_hit_the_cache() {
+    let data = std::env::temp_dir().join(format!("can-kept-cache-prot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(data.join("can").join(KEY)).unwrap();
+    let protected: Vec<String> = (0..8).map(|i| format!("SavedClips/2026-11-08/2026-11-08_09-0{i}-00-front.mp4")).collect();
+    let ctx = Arc::new(Ctx {
+        data: data.clone(),
+        settings: Mutex::new(HashMap::from([("can-vehicles".to_string(), json!({ KEY: "car1" }))])),
+        clips: Mutex::new(vec!["2026-11-08_14-30-00-front.mp4".into()]),
+        protected: Mutex::new(protected),
+        zone: Mutex::new(String::new()),
+        generation: AtomicU64::new(1),
+        copies: AtomicUsize::new(0),
+    });
+    let can = Can::new(ctx.clone());
+    let name = format!("{KEY}_20261108T100000Z_1.log.xz");
+    can.trust.bury(KEY, &name, json!({ "size": 5, "sha256": util::sha256_hex(b"12345"), "side": null, "check": "verified", "why": "unlinked", "end": utc(10, 10) }));
+    let names = json!([name.clone()]);
+    for _ in 0..20 {
+        assert_eq!(can.logs.status(Some(&names), Some(KEY)).unwrap()["files"][&name]["check"], "verified");
+        assert_eq!(can.kept_starts(KEY).map(|s| s.len()), Some(9));
+    }
+    let copies = ctx.copies.load(Ordering::SeqCst);
+    let _ = std::fs::remove_dir_all(&data);
+    assert!(copies <= 2, "the file list was copied {copies} times for 20 status calls with no change");
 }

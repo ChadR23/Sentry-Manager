@@ -116,6 +116,7 @@ impl Tx {
         let backup = valid_abs(Some(paths.get("replacementBackup").cloned().unwrap_or(eb).as_str()))?;
         let persisted = paths.get("publicationSnapshot").filter(|p| same_path(p, &artifact.path)).map(|_| artifact.clone());
         self.assert_replacement_names(&source, &candidate, &backup, &job, &item, &arts, op.codec.as_deref())?;
+        let _held = self.hold(&[&source, &backup]);
         if persisted.is_some() && !arts.contains_key("publicationSnapshot") {
             return Err(txe("INVALID_PUBLICATION_ARTIFACT"));
         }

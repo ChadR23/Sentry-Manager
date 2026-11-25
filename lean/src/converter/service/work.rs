@@ -575,7 +575,11 @@ impl Service {
                 }
             }
         };
-        let scan = super::super::scanner::scan(&config, Some(&signal), Some(&retry), &mut |d| {
+        // a replace job settles leftover BACKUP- names of an earlier replace first (leftovers.rs)
+        let replace = config.get("outputMode").and_then(Value::as_str) == Some("replace");
+        let tidy = |d: &super::super::scanner::TidyDir| -> bool { !stopped(rt) && !rt.aborted() && self.tidy_backups(rt, d) };
+        let tidy_ref: Option<super::super::scanner::Tidy> = if replace { Some(&tidy) } else { None };
+        let scan = super::super::scanner::scan_tidy(&config, Some(&signal), Some(&retry), tidy_ref, &mut |d| {
             if stopped(rt) {
                 return false;
             }
@@ -659,6 +663,59 @@ impl Service {
             }
         }
         Ok(())
+    }
+
+    /// The leftover BACKUP- names of one folder, before any of its clips is queued; true
+    /// when an original was put back (the folder is listed again).
+    fn tidy_backups(&self, rt: &Arc<Runtime>, d: &super::super::scanner::TidyDir) -> bool {
+        use super::super::leftovers::{self, Folder, Outcome, Tidy};
+        let job = rt.manifest().id().to_string();
+        let owners = || self.backup_owners(rt);
+        let tools = self.0.o.tools.clone();
+        let verify = move |original: &std::path::Path, converted: &std::path::Path, codec: &'static str| tools.verify_converted(original, converted, codec);
+        let t = Tidy { tx: &self.0.o.staging, bin: self.0.o.originals_bin.as_deref(), verify: Some(&verify), owners: &owners };
+        let results = leftovers::tidy_folder(&t, &Folder { real_root: d.real_root, dir: d.dir, real_dir: &d.real_dir, found: &d.found });
+        let mut changed = false;
+        for (name, outcome) in &results {
+            changed |= *outcome == Outcome::Restored;
+            super::note_backup_cleanup(&job, &d.rel, name, outcome);
+        }
+        if !results.is_empty() {
+            // (the snapshot's backupCleanup)
+            self.queue_snapshot(rt, false);
+        }
+        changed
+    }
+
+    /// Everything the job records own (every job's, read in full: one that cannot be read
+    /// keeps the folder as it is), the runtimes' copies first, with the clips' files they
+    /// hold in memory.
+    fn backup_owners(&self, rt: &Arc<Runtime>) -> Result<super::super::leftovers::Owners, String> {
+        let mut o = super::super::leftovers::Owners::default();
+        let me = rt.manifest().id().to_string();
+        let stored = self.0.o.store.list_strict().map_err(|e| format!("the Encoder's job records could not all be read: {e}"))?;
+        let live: Vec<Arc<Runtime>> = self.0.jobs.lock().unwrap().values().cloned().collect();
+        let mut seen = std::collections::HashSet::new();
+        for r in &live {
+            let (m, held) = {
+                let s = r.lock();
+                (s.manifest.clone(), s.ownerships.values().map(|own| own.to_value()).collect::<Vec<_>>())
+            };
+            seen.insert(m.id().to_string());
+            for h in &held {
+                o.add_owned(h, m.id());
+            }
+            o.add_manifest(&m, m.id() == me);
+        }
+        for m in &stored.manifests {
+            if !seen.contains(m.id()) {
+                o.add_manifest(m, m.id() == me);
+            }
+        }
+        for d in &stored.damaged {
+            o.add_damaged(&d.id, &d.parts)?;
+        }
+        Ok(o)
     }
 
     /// convertedCodecOf(runtime, discovered): 'h265' / 'av1' for a clip that

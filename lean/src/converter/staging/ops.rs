@@ -510,6 +510,7 @@ impl Tx {
         let backup = valid_abs(paths.get("replacementBackup").map(String::as_str))?;
         let persisted = paths.get("publicationSnapshot").filter(|p| same_path(p, &artifact.path)).map(|_| artifact.clone());
         self.assert_replacement_names(&source, &candidate, &backup, &validate_id(&op.job_id)?, &validate_id(&op.item_id)?, &arts, op.codec.as_deref())?;
+        let _held = self.hold(&[&source, &backup]);
         let r = (|| -> R<Saved> {
             if let Some(a) = &persisted {
                 self.validate_publication(a, Validate::Reconcile(a))?;
@@ -636,6 +637,8 @@ impl Tx {
         let original = self.assert_source_identity(&source, &expected)?;
         let (cn, bn) = (new_nonce(), new_nonce());
         let (candidate, backup) = replacement_paths(&source, &job, &item, Some(&cn), Some(&bn), op.codec.as_deref())?;
+        // (the copy is written beside the original: a leftover tidy never takes the name meanwhile)
+        let _held = self.hold(&[&source, &candidate, &backup]);
         if lstat_or_none(&candidate)?.is_some() || lstat_or_none(&backup)?.is_some() {
             return Err(txe("REPLACEMENT_COLLISION"));
         }
@@ -707,6 +710,7 @@ impl Tx {
         let (artifact, source, source_root, backup) = (&p.artifact, &p.source, &p.source_root, &p.backup);
         let expected = p.expected_source.clone().ok_or_else(|| txe("INVALID_TRANSACTION_INPUT"))?;
         let candidate = p.owned_paths["replacementCandidate"].clone();
+        let _held = self.hold(&[source, backup, &candidate]);
         let mut paths = p.owned_paths.clone();
         paths.insert("replacementBackup".into(), backup.clone());
         let mut arts = p.owned_artifacts.clone();

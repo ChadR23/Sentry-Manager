@@ -871,6 +871,18 @@ impl CanTrust {
         self.save(key, &t);
     }
 
+    /// The starts (UTC ms, sorted, once each) of every log of this car key with a record or a
+    /// tombstone: the logs it received, here or deleted.
+    pub fn log_starts(&self, key: &str) -> Arc<Vec<f64>> {
+        let tf = self.load(key);
+        let t = tf.lock().unwrap();
+        let mut v: Vec<f64> = t.logs.keys().chain(t.tombstones.keys()).filter_map(|k| parse_name(k)).filter(|n| !n.sidecar).map(|n| n.started_at as f64).collect();
+        drop(t);
+        v.sort_by(|a, b| a.total_cmp(b));
+        v.dedup();
+        Arc::new(v)
+    }
+
     /// The tombstone of a log deleted here, or None.
     pub fn tomb(&self, key: &str, name: &str) -> Option<Value> {
         let tf = self.load(key);
@@ -910,7 +922,7 @@ impl CanTrust {
     }
 
     /// unbury(key, name): a deleted log sent again while its car still keeps footage of its
-    /// time: kept as a new log from here on (its tombstone goes; it is judged as usual).
+    /// time (deleted by a rule, see CanLogs::buried_older): kept as a new log from here on (its tombstone goes; it is judged as usual).
     pub fn unbury(&self, key: &str, name: &str) -> bool {
         let tf = self.load(key);
         let mut t = tf.lock().unwrap();
@@ -921,7 +933,7 @@ impl CanTrust {
         true
     }
 
-    /// rebury(key, name, size, side): a deleted log older than its car's footage, sent again
+    /// rebury(key, name, size, side): a deleted log that counts as delivered (CanLogs::buried_older), sent again
     /// (`size`: its copy's size, `side`: its sidecar's, when here) and judged: the check its
     /// record now says (worked out as `status` does, with both halves here) goes into its
     /// tombstone, and the record is marked deleted again (the copy is deleted next). None while

@@ -67,9 +67,19 @@ pub enum Kept {
 
 /// Why a tombstone's log was deleted, for the owner's own deletes: by name in the Nerd
 /// settings, or with its footage ("Also delete its CAN data"). Those are never asked for again
-/// whatever footage the car keeps; the automatic rules ("unlinked", "footage", "old",
-/// "before-tombstones") go by the footage kept.
+/// whatever footage the car keeps.
 pub const OWNER_WHYS: [&str; 2] = ["owner", "with-footage"];
+
+/// The automatic rules (*Keeping logs*) whose reason holds for good, so their logs are not
+/// asked for again either: "unlinked" (not linked to footage after N days: a copy sent again
+/// would be kept, linked to nothing, and deleted again N days later, every time) and "footage"
+/// (its footage deleted for good). Both were deleted because no clip the car keeps covers the
+/// log, so they are asked for again only once one does (clips that came late, or the car's
+/// time zone set right): see `CanLogs::buried_older`. The others go by the oldest footage
+/// kept: "old" (older than all of it: delivered unless older footage is kept again, and then
+/// its log is wanted again) and "before-tombstones" (an older server's delete, its rule not
+/// known: it may have been one that goes by the footage).
+pub const FOR_GOOD_WHYS: [&str; 2] = ["unlinked", "footage"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Name {
@@ -131,7 +141,8 @@ fn with_received(mut e: CanError, r: f64) -> CanError {
     e
 }
 
-/// sideFacts: what the Nerd panel shows of a sidecar.
+/// sideFacts: what the Nerd panel shows of a sidecar, and when it says the log ended (for
+/// the newest log of its key, see `prune::spans`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SideFacts {
     pub frames: Option<f64>,
@@ -139,6 +150,7 @@ pub struct SideFacts {
     pub app_version: Option<String>,
     pub format: Option<String>,
     pub closed_because: Option<String>,
+    pub end: Option<f64>,
 }
 
 fn word_ok(s: &str, max: usize, extra: &[u8]) -> bool {
@@ -153,6 +165,7 @@ pub fn side_facts(side: &Value) -> SideFacts {
         app_version: ["app_version", "appVersion"].iter().find_map(|k| side.get(*k).and_then(|v| v.as_str())).map(|s| util::utf16_slice(s, 40)),
         format: side.get("format").and_then(|v| v.as_str()).filter(|s| word_ok(s, 64, b"./-")).map(String::from),
         closed_because: side.get("closed_because").and_then(|v| v.as_str()).filter(|s| word_ok(s, 20, b"-")).map(String::from),
+        end: log_end(side),
     }
 }
 
@@ -209,6 +222,9 @@ pub struct CanLogs {
     before_swap: OnceLock<Box<dyn Fn() + Send + Sync>>,
     /// the oldest footage each car key's car keeps (set once; without it: `Kept::Nothing`)
     footage: OnceLock<Box<dyn Fn(&str) -> Kept + Send + Sync>>,
+    /// every clip start each car key's car keeps, sorted (None: not known now; set once;
+    /// without it: none)
+    starts: OnceLock<Box<dyn Fn(&str) -> Option<Arc<Vec<f64>>> + Send + Sync>>,
 }
 
 fn stat(p: &Path) -> Option<fs::Metadata> {
@@ -217,10 +233,10 @@ fn stat(p: &Path) -> Option<fs::Metadata> {
 
 impl CanLogs {
     pub fn new(dir: PathBuf, free_bytes: Box<dyn Fn() -> f64 + Send + Sync>, now: Box<dyn Fn() -> f64 + Send + Sync>) -> Arc<CanLogs> {
-        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car: MAX_LOGS_PER_CAR, min_free: 2.0 * 1024f64.powi(3), busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new(), before_swap: OnceLock::new(), footage: OnceLock::new() })
+        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car: MAX_LOGS_PER_CAR, min_free: 2.0 * 1024f64.powi(3), busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new(), before_swap: OnceLock::new(), footage: OnceLock::new(), starts: OnceLock::new() })
     }
     pub fn with_limits(dir: PathBuf, max_files_per_car: usize, min_free: f64, free_bytes: Box<dyn Fn() -> f64 + Send + Sync>, now: Box<dyn Fn() -> f64 + Send + Sync>) -> Arc<CanLogs> {
-        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car, min_free, busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new(), before_swap: OnceLock::new(), footage: OnceLock::new() })
+        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car, min_free, busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new(), before_swap: OnceLock::new(), footage: OnceLock::new(), starts: OnceLock::new() })
     }
 
     /// The checks the status answers and replacements go by.
@@ -239,6 +255,34 @@ impl CanLogs {
         self.footage.get().map_or(Kept::Nothing, |f| f(key))
     }
 
+    /// Where each car key's car keeps clips (the share, the Recycle Bin and protected clips,
+    /// as the rules that delete logs link them): the logs deleted for good as not linked to
+    /// footage go by it.
+    pub fn set_starts(&self, f: Box<dyn Fn(&str) -> Option<Arc<Vec<f64>>> + Send + Sync>) {
+        let _ = self.starts.set(f);
+    }
+
+    /// The clip starts `key`'s car keeps, sorted (None: not known now).
+    pub fn starts(&self, key: &str) -> Option<Arc<Vec<f64>>> {
+        self.starts.get().map_or_else(|| Some(Arc::new(Vec::new())), |f| f(key))
+    }
+
+    /// The starts of every log of a car key trust.json knows (see `CanTrust::log_starts`).
+    pub fn log_starts(&self, key: &str) -> Arc<Vec<f64>> {
+        self.trust.get().map_or_else(|| Arc::new(Vec::new()), |t| t.log_starts(key))
+    }
+
+
+    /// How a tombstone's log was deleted, for the server's log.
+    pub fn buried_why(tomb: Option<&Value>) -> &'static str {
+        match tomb.and_then(|t| t.get("why")).and_then(|w| w.as_str()) {
+            Some(w) if OWNER_WHYS.contains(&w) => "deleted here by the owner",
+            Some("unlinked") => "deleted here, not linked to footage",
+            Some("footage") => "deleted here, its footage deleted for good",
+            _ => "deleted here, older than the car's footage",
+        }
+    }
+
     /// Whether a deleted log that ended at `end` is older than all the footage its car keeps,
     /// with rule "old"'s margin (prune::MARGIN_MS: clip names are read in the car's time zone,
     /// which may be wrong or missing): None while that is not known.
@@ -250,12 +294,32 @@ impl CanLogs {
         }
     }
 
-    /// Whether a tombstone's log counts as delivered for good (Some(true)), may be sent again
-    /// (Some(false): its time still has footage), or is not known yet (None). The owner's own
-    /// deletes (OWNER_WHYS) count as delivered whatever footage is kept.
-    pub fn buried_older(tomb: &Value, kept: Kept) -> Option<bool> {
-        if tomb.get("why").and_then(|w| w.as_str()).is_some_and(|w| OWNER_WHYS.contains(&w)) {
+    /// Whether a tombstone's log `name` counts as delivered for good (Some(true)), may be sent
+    /// again (Some(false): its time has footage), or is not known yet (None). The owner's own
+    /// deletes (OWNER_WHYS) count as delivered whatever footage is kept. The rules whose reason
+    /// holds for good (FOR_GOOD_WHYS) count as delivered while no clip the car keeps (`starts`,
+    /// None while not known) covers the span the rule judged (to its tombstone's `linkedTo`; for
+    /// a tombstone without one, written before it was kept, to the next log of its key among
+    /// `names` (every log name trust.json knows, sorted starts: at or before the next log the
+    /// rule saw, as every log received keeps its record), one to ten minutes, else the log's
+    /// first minute, the least a log runs): so a log the
+    /// rule found linked to nothing is never found covered by the same clips (that would send
+    /// it again, every time), while a clip of its time that turned up since asks for it again.
+    /// The others go by the oldest footage kept.
+    /// (`starts` is asked only for those rules.)
+    pub fn buried_older(name: &str, tomb: &Value, kept: Kept, starts: impl FnOnce() -> Option<Arc<Vec<f64>>>, names: impl FnOnce() -> Arc<Vec<f64>>) -> Option<bool> {
+        let why = tomb.get("why").and_then(|w| w.as_str());
+        if why.is_some_and(|w| OWNER_WHYS.contains(&w)) {
             return Some(true);
+        }
+        if why.is_some_and(|w| FOR_GOOD_WHYS.contains(&w)) {
+            let from = parse_name(name).map(|n| n.started_at as f64)?;
+            let to = tomb.get("linkedTo").and_then(|x| x.as_f64()).filter(|t| *t > from && *t <= from + super::prune::LOG_MAX_MS).unwrap_or_else(|| {
+                let after = names();
+                let next = after.get(after.partition_point(|&s| s <= from)).copied();
+                from + next.map_or(super::prune::LOG_MIN_MS, |nx| super::prune::LOG_MAX_MS.min(super::prune::LOG_MIN_MS.max(nx - from)))
+            });
+            return starts().map(|s| !super::prune::overlaps(&s, from, to));
         }
         let end = tomb.get("end").and_then(|x| x.as_f64()).unwrap_or(f64::INFINITY);
         Self::older_than_footage(kept, end)
@@ -355,7 +419,9 @@ impl CanLogs {
                 }
                 // (worked out once per car key, and only when one of its names was deleted here)
                 let mut kept = None;
-                for (tomb, (_, asked_as)) in tombs.into_iter().zip(list) {
+                let mut starts: Option<Option<Arc<Vec<f64>>>> = None;
+                let mut names: Option<Arc<Vec<f64>>> = None;
+                for (tomb, (log, asked_as)) in tombs.into_iter().zip(list) {
                     let e = match tomb {
                         Buried::No => continue,
                         // deleted before tombstones were kept, and not worked out yet (just after
@@ -366,7 +432,7 @@ impl CanLogs {
                         }
                         Buried::Tomb(tomb) => {
                             let k = *kept.get_or_insert_with(|| self.kept(&key));
-                            Self::buried_json(&tomb, asked_as.ends_with(".json"), k)
+                            Self::buried_json(&log, &tomb, asked_as.ends_with(".json"), k, || starts.get_or_insert_with(|| self.starts(&key)).clone(), || names.get_or_insert_with(|| trust.log_starts(&key)).clone())
                         }
                     };
                     if let Some(e) = e {
@@ -406,7 +472,9 @@ impl CanLogs {
     }
 
     /// The status entry of a name not here whose log was deleted here on purpose (None:
-    /// `missing`, send it). A log the owner deleted (by name or with its footage), or one older
+    /// `missing`, send it). A log the owner deleted (by name or with its footage), one a rule
+    /// deleted for good (not linked to footage, or its footage deleted for good) while no clip
+    /// kept covers it, or one older
     /// than all the footage its car keeps (see `buried_older`), counts as delivered:
     /// `complete` with the size it had and the check it had (or its re-upload got, see
     /// `CanTrust::rebury`). Its sidecar answers the same with the sidecar's size, when known
@@ -414,8 +482,8 @@ impl CanLogs {
     /// guess). While the footage is not known it is `complete` and `pending` (ask again later).
     /// A check that was never made (`pending`) answers `missing`: the bridge sends it again,
     /// and that copy is checked and dropped again (see `Can::judge`).
-    fn buried_json(tomb: &Value, sidecar: bool, kept: Kept) -> Option<Value> {
-        let older = Self::buried_older(tomb, kept);
+    fn buried_json(log: &str, tomb: &Value, sidecar: bool, kept: Kept, starts: impl FnOnce() -> Option<Arc<Vec<f64>>>, names: impl FnOnce() -> Arc<Vec<f64>>) -> Option<Value> {
+        let older = Self::buried_older(log, tomb, kept, starts, names);
         if older == Some(false) {
             return None;
         }
@@ -840,6 +908,13 @@ impl CanLogs {
     /// tombstone (the log is then missing, and may be sent again), never a tombstone for a log
     /// still here.
     pub fn delete_log(&self, name: &str, why: &str) -> Result<(), CanError> {
+        self.delete_log_span(name, why, None)
+    }
+
+    /// delete_log, by a rule that judged the log over its span up to `linked_to` (the end of
+    /// its span `prune::spans` gives): kept on its tombstone as `linkedTo`, so a clip
+    /// that turns up anywhere in that span asks for it again (see `buried_older`).
+    pub fn delete_log_span(&self, name: &str, why: &str, linked_to: Option<f64>) -> Result<(), CanError> {
         let nm = parse_name(name).filter(|n| !n.sidecar).ok_or_else(|| can_error(400, "bad_name", "That is not a CAN Bridge log name."))?;
         let key = nm.vehicle_key.clone();
         let Some(trust) = self.trust.get() else { return self.remove(name) };
@@ -863,7 +938,11 @@ impl CanLogs {
         let longest = nm.started_at as f64 + super::prune::LOG_MAX_MS;
         let end = util::read_json(&side_path).as_ref().and_then(log_end).map_or(longest, |e| e.max(longest));
         self.remove(name)?;
-        trust.bury(&key, name, json!({ "size": n(size), "sha256": sha, "side": side_size.map(n), "sideSha256": side_sha, "check": check, "checkReason": reason, "at": n((self.now)()), "why": why, "end": n(end) }));
+        let mut tomb = json!({ "size": n(size), "sha256": sha, "side": side_size.map(n), "sideSha256": side_sha, "check": check, "checkReason": reason, "at": n((self.now)()), "why": why, "end": n(end) });
+        if let Some(to) = linked_to.filter(|t| t.is_finite()) {
+            tomb["linkedTo"] = n(to);
+        }
+        trust.bury(&key, name, tomb);
         Ok(())
     }
 

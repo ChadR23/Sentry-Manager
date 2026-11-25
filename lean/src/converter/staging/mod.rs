@@ -396,6 +396,73 @@ pub struct Tx {
     owned_identities: Mutex<IndexMap<PathBuf, String>>,
     staged: Mutex<Vec<PathBuf>>,
     encoded: Mutex<Vec<PathBuf>>,
+    /// The originals and backup names a replace, its rollback or its recovery has in hand
+    /// right now (by thread: a nested call takes them again), so a tidy of leftover
+    /// BACKUP- names (converter/leftovers.rs) never touches one while it runs, even one
+    /// whose job was discarded meanwhile.
+    in_hand: Mutex<std::collections::HashMap<PathBuf, (std::thread::ThreadId, usize)>>,
+    in_hand_cv: std::sync::Condvar,
+}
+
+/// Paths held by `Tx::hold` / `Tx::try_hold`; let go when dropped.
+pub struct Held<'a> {
+    tx: &'a Tx,
+    keys: Vec<PathBuf>,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        let mut m = self.tx.in_hand.lock().unwrap_or_else(|p| p.into_inner());
+        for k in &self.keys {
+            if let Some(e) = m.get_mut(k) {
+                e.1 -= 1;
+                if e.1 == 0 {
+                    m.remove(k);
+                }
+            }
+        }
+        drop(m);
+        self.tx.in_hand_cv.notify_all();
+    }
+}
+
+/// A folder by what it is, not how it is spelled: "@<st_dev>:<st_ino>" of the folder (links
+/// followed), with `name` below it when given. Two mount points of one folder (a bind
+/// mount, the share mounted twice) give the same key, which their path text never does
+/// (canonicalize keeps a bind mount's spelling). Never a path (it does not start with "/").
+pub fn folder_identity(dir: &Path, name: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let m = fs::metadata(dir).ok().filter(|m| m.is_dir())?;
+    let mut k = PathBuf::from(format!("@{}:{}", m.dev(), m.ino()));
+    if let Some(n) = name {
+        k.push(n);
+    }
+    Some(k)
+}
+
+/// The names a path is held under: as given (made lexical), through its folder's real path,
+/// and by its folder's identity (folder_identity).
+pub fn hold_keys(paths: &[&str]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        let l = lex(p);
+        if let (Some(parent), Some(name)) = (l.parent(), l.file_name()) {
+            if let Ok(real) = fs::canonicalize(parent) {
+                let r = real.join(name);
+                if !out.contains(&r) {
+                    out.push(r);
+                }
+            }
+            if let Some(k) = folder_identity(parent, Some(name)) {
+                if !out.contains(&k) {
+                    out.push(k);
+                }
+            }
+        }
+        if !out.contains(&l) {
+            out.push(l);
+        }
+    }
+    out
 }
 
 // ---- paths
@@ -798,7 +865,38 @@ impl Tx {
             owned_identities: Mutex::new(IndexMap::new()),
             staged: Mutex::new(vec![]),
             encoded: Mutex::new(vec![]),
+            in_hand: Mutex::new(Default::default()),
+            in_hand_cv: std::sync::Condvar::new(),
         })
+    }
+
+    fn take_held(&self, m: &mut std::collections::HashMap<PathBuf, (std::thread::ThreadId, usize)>, keys: &[PathBuf]) -> bool {
+        let me = std::thread::current().id();
+        if keys.iter().any(|k| m.get(k).is_some_and(|(t, _)| *t != me)) {
+            return false;
+        }
+        for k in keys {
+            m.entry(k.clone()).or_insert((me, 0)).1 += 1;
+        }
+        true
+    }
+
+    /// Hold an original and its backup name while a replace, rollback or recovery runs
+    /// (waits while another thread holds one of them).
+    pub fn hold(&self, paths: &[&str]) -> Held<'_> {
+        let keys = hold_keys(paths);
+        let mut m = self.in_hand.lock().unwrap_or_else(|p| p.into_inner());
+        while !self.take_held(&mut m, &keys) {
+            m = self.in_hand_cv.wait(m).unwrap_or_else(|p| p.into_inner());
+        }
+        Held { tx: self, keys }
+    }
+
+    /// Hold them only if no other thread does (None: in use right now).
+    pub fn try_hold(&self, paths: &[&str]) -> Option<Held<'_>> {
+        let keys = hold_keys(paths);
+        let mut m = self.in_hand.lock().unwrap_or_else(|p| p.into_inner());
+        self.take_held(&mut m, &keys).then(|| Held { tx: self, keys })
     }
 
     /// the converter's private temp folder

@@ -558,3 +558,11 @@ dialog.dlg[open] { animation: pop 240ms var(--ease) both; }
 /* a failed clip's reason, under it on the Encoder page */
 .files li .clip-why { grid-column: 1 / -1; display: block; margin-top: 4px; padding: 6px 9px; border-left: 2px solid var(--bad); border-radius: 4px; background: color-mix(in srgb, var(--bad) 8%, transparent); font-size: 13px; line-height: 1.45; white-space: normal; overflow-wrap: anywhere; }
 .files li .clip-why code { display: block; margin-top: 3px; font-size: 12px; opacity: 0.8; font-variant-ligatures: none; }
+
+/* leftover files of an earlier replace (snapshot.backupCleanup, web/backupCleanup.js) */
+.note.backup-cleanup { display: block; overflow-wrap: anywhere; }
+.backup-cleanup details { margin-top: 6px; }
+.backup-cleanup summary { cursor: pointer; }
+.backup-cleanup ul { margin: 6px 0 0; padding-left: 18px; }
+.backup-cleanup li { margin: 3px 0; }
+.backup-cleanup code { font-size: 12px; word-break: break-all; }

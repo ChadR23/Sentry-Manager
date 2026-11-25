@@ -133,6 +133,22 @@ impl ConverterCtx for CoreConverter {
     }
 }
 
+/// The Recycle Bin, for an original a replace left beside its converted copy
+/// (converter/leftovers.rs case c, footage/bin.rs adopt_original).
+struct OriginalsBin {
+    srv: std::sync::Weak<Server>,
+}
+
+impl crate::converter::leftovers::OriginalsBin for OriginalsBin {
+    fn adopt_original(&self, backup: &std::path::Path, original: &std::path::Path, dev: u64, ino: u64) -> Result<String, String> {
+        let s = self.srv.upgrade().ok_or("the server is stopping")?;
+        crate::footage::bin::adopt_original(s.app(), backup, original, dev, ino)
+    }
+    fn holds(&self, original: &std::path::Path) -> bool {
+        self.srv.upgrade().is_some_and(|s| crate::footage::bin::holds_original(s.app(), original))
+    }
+}
+
 fn counts(s: &Value) -> (u64, u64, u64) {
     if let (Some(c), true) = (s.get("itemCounts").filter(|c| c.is_object()), s["items"].as_array().is_none_or(|a| a.is_empty())) {
         let n = |k: &str| c[k].as_u64().unwrap_or(0);
@@ -382,6 +398,7 @@ pub fn spawn(srv: &Arc<Server>) {
                     w.upgrade().is_some_and(|srv| super::arrival::holds(&srv, discovered["sourcePath"].as_str().unwrap_or("")))
                 }));
                 o.power_meter = Some(meter.clone());
+                o.originals_bin = Some(Arc::new(OriginalsBin { srv: Arc::downgrade(&s) }));
                 o.is_cheap_now = Some(cheap_now(st.db.clone(), st.logger.scope("converter")));
                 o.nodes = s.nodes().map(|n| {
                     let remote: Arc<dyn crate::nodes::lanes::RemoteNodes> = Arc::new(n.nodes.clone());

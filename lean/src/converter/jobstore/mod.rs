@@ -416,6 +416,19 @@ struct Cached {
     journal: JournalState,
 }
 
+/// list_strict(): the jobs read in full, and those whose record does not replay.
+#[derive(Default)]
+pub struct Strict {
+    pub manifests: Vec<Manifest>,
+    pub damaged: Vec<Damaged>,
+}
+
+/// A job whose record does not replay: its job file and the journal lines that are JSON.
+pub struct Damaged {
+    pub id: String,
+    pub parts: Vec<Value>,
+}
+
 struct Paths {
     directory: PathBuf,
     manifest: PathBuf,
@@ -917,6 +930,67 @@ impl JobStore {
             }
         }
         Ok(out)
+    }
+
+    /// list(), refusing instead of skipping: every job folder's record must be read (one
+    /// that cannot be, or that has a journal or a half-written record but no job file, is
+    /// an error naming it). A corrupt record is set aside as list() does; while its job
+    /// file or journal is still there, what can be read of them is returned as damaged.
+    /// For the leftover-backup tidy, which touches a file only when no job can own it.
+    pub fn list_strict(&self) -> Result<Strict, String> {
+        let mut out = Strict::default();
+        let names = self.job_folders().map_err(|e| format!("the job folders could not be listed ({})", e.code))?;
+        for name in names {
+            match self.exclusive(&name, || self.read_manifest(&name)) {
+                Ok(Some(m)) => out.manifests.push(m),
+                Ok(None) => {
+                    let Ok(paths) = self.job_paths(&name) else { return Err(format!("job {name} could not be read")) };
+                    let left = [&paths.journal, &paths.temporary].into_iter().find(|p| fs::symlink_metadata(p).is_ok());
+                    if let Some(p) = left {
+                        return Err(format!("job {name} has {} but no readable job file", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+                    }
+                }
+                Err(e) if e.code == "CORRUPT_MANIFEST" => {
+                    // (set aside as list() does, but its job file and journal are still there:
+                    // what can be read of them is kept as the job's, see Damaged)
+                    if let Some(d) = self.exclusive(&name, || Ok(self.damaged(&name))).map_err(|e| format!("job {name} could not be read ({})", e.code))? {
+                        out.damaged.push(d?);
+                    }
+                }
+                Err(e) => return Err(format!("job {name} could not be read ({})", e.code)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// A job folder whose record does not replay: None once neither its job file nor its
+    /// journal is there; the job file and each journal line that is JSON; Err when the job
+    /// file is there but cannot be read as JSON.
+    fn damaged(&self, id: &str) -> Option<Result<Damaged, String>> {
+        let paths = self.job_paths(id).ok()?;
+        let present = |p: &Path| fs::symlink_metadata(p).is_ok();
+        if !present(&paths.manifest) && !present(&paths.journal) {
+            return None;
+        }
+        let read = |p: &Path| -> Result<Option<Vec<u8>>, String> {
+            match Self::bounded_read(p) {
+                Ok((ReadOutcome::Bytes(b), _)) => Ok(Some(b)),
+                Ok((ReadOutcome::Missing, _)) => Ok(None),
+                _ => Err(format!("job {id}'s record is damaged and could not be read")),
+            }
+        };
+        let mut parts = Vec::new();
+        let r = (|| {
+            match read(&paths.manifest)? {
+                Some(b) => parts.push(serde_json::from_slice::<Value>(&b).map_err(|_| format!("job {id}'s record is damaged (its job file is not readable)"))?),
+                None => return Err(format!("job {id}'s record is damaged (a journal but no job file)")),
+            }
+            if let Some(b) = read(&paths.journal)? {
+                parts.extend(b.split(|c| *c == b'\n').filter_map(|l| serde_json::from_slice::<Value>(l).ok()));
+            }
+            Ok(())
+        })();
+        Some(r.map(|()| Damaged { id: id.to_string(), parts }))
     }
 
     fn stamp_of(&self, id: &str) -> R<String> {

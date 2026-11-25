@@ -46,6 +46,12 @@ pub trait Tools: Send + Sync {
     fn read_timeline(&self, source: &str, cancel: &AtomicBool) -> CResult<Timeline>;
     fn write_telemetry(&self, codec: &str, candidate: &str, timeline: &Timeline, cancel: &AtomicBool) -> CResult<()>;
     fn verify(&self, r: &VerifyRequest) -> Verdict;
+    /// The leftover tidy's proof that `converted` is a whole, good copy of `original`
+    /// (leftovers::verify_converted): only reads both. Tools that cannot run the verifier
+    /// say so, and the original is kept.
+    fn verify_converted(&self, _original: &Path, _converted: &Path, _codec: &str) -> Result<(), String> {
+        Err("no verifier here".into())
+    }
     fn select(&self, codec: &str) -> CResult<Selected>;
     fn select_cpu_fallback(&self, codec: &str) -> CResult<Selected>;
     /// planner.selectFor(codec, device): a lane's GPU proven with its own arguments
@@ -246,6 +252,9 @@ impl Tools for RealTools {
     }
     fn write_telemetry(&self, codec: &str, candidate: &str, timeline: &Timeline, cancel: &AtomicBool) -> CResult<()> {
         adapters::write_telemetry(Path::new(candidate), timeline, codec_of(codec)?, cancel)
+    }
+    fn verify_converted(&self, original: &Path, converted: &Path, codec: &str) -> Result<(), String> {
+        super::super::leftovers::verify_converted(original, converted, codec, &self.ffprobe, &self.ffmpeg, &self.runner, &self.registry, None)
     }
     fn verify(&self, r: &VerifyRequest) -> Verdict {
         let codec = match codec_of(r.codec) {

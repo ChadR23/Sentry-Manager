@@ -1230,3 +1230,11 @@ body.converter-mode #driveList {
     color: var(--text-muted);
     font-size: 11px;
 }
+
+/* leftover files of an earlier replace (snapshot.backupCleanup) */
+.converter-backup-cleanup { overflow-wrap: anywhere; }
+.converter-backup-cleanup details { margin-top: 6px; }
+.converter-backup-cleanup summary { cursor: pointer; }
+.converter-backup-cleanup ul { margin: 6px 0 0; padding-left: 18px; }
+.converter-backup-cleanup li { margin: 3px 0; }
+.converter-backup-cleanup code { font-size: 11.5px; word-break: break-all; }

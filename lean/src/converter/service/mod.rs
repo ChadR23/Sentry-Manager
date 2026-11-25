@@ -40,7 +40,7 @@ use super::jobstore::{ItemIn, JobStore, Manifest, Patch};
 use super::staging::{self, Tx};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use tools::Tools;
@@ -188,6 +188,68 @@ fn with_failure_detail(job: &str, v: &Value) -> Option<Value> {
     let mut c = v.clone();
     c["failure"]["detail"] = Value::String(d);
     Some(c)
+}
+
+// ---- leftover BACKUP- names ---------------------------------------------------------
+
+/// What a replace job's discovery did with leftover BACKUP- names (leftovers.rs), by job
+/// id. In memory only, as FAILURE_DETAILS: the snapshot shows it as `backupCleanup`; the
+/// job file and its journal keep their format.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BackupCleanup {
+    pub removed: u64,
+    pub restored: u64,
+    pub binned: u64,
+    pub kept: u64,
+    /// of the kept: originals beside a converted copy that is not proven good
+    pub unverified: u64,
+    pub kept_why: Vec<(String, String)>,
+}
+static BACKUP_CLEANUP: Mutex<Option<HashMap<String, BackupCleanup>>> = Mutex::new(None);
+const MAX_BACKUP_CLEANUP_JOBS: usize = 256;
+pub const MAX_KEPT_WHY: usize = 20;
+
+/// Count one name's outcome for the job, with its log line.
+pub fn note_backup_cleanup(job: &str, rel_dir: &str, name: &str, o: &super::leftovers::Outcome) {
+    use super::leftovers::Outcome;
+    log_line(super::leftovers::log_line(rel_dir, name, o));
+    let mut g = BACKUP_CLEANUP.lock().unwrap_or_else(|p| p.into_inner());
+    let map = g.get_or_insert_with(HashMap::new);
+    if map.len() >= MAX_BACKUP_CLEANUP_JOBS && !map.contains_key(job) {
+        if let Some(k) = map.keys().next().cloned() {
+            map.remove(&k);
+        }
+    }
+    let c = map.entry(job.to_string()).or_default();
+    match o {
+        Outcome::Removed | Outcome::RemovedCopy(_) | Outcome::RemovedExtra(_) => c.removed += 1,
+        Outcome::Restored => c.restored += 1,
+        Outcome::Binned { .. } => c.binned += 1,
+        Outcome::Kept(why) => {
+            c.kept += 1;
+            if why.starts_with(super::leftovers::UNVERIFIED) {
+                c.unverified += 1;
+            }
+            if c.kept_why.len() < MAX_KEPT_WHY {
+                let rel = if rel_dir.is_empty() { name.to_string() } else { format!("{rel_dir}/{name}") };
+                c.kept_why.push((rel, why.clone()));
+            }
+        }
+    }
+}
+
+pub fn backup_cleanup(job: &str) -> Option<BackupCleanup> {
+    let g = BACKUP_CLEANUP.lock().unwrap_or_else(|p| p.into_inner());
+    g.as_ref().and_then(|m| m.get(job).cloned())
+}
+
+fn backup_cleanup_json(job: &str) -> Option<Value> {
+    let c = backup_cleanup(job)?;
+    if c == BackupCleanup::default() {
+        return None;
+    }
+    let why: Vec<Value> = c.kept_why.iter().map(|(p, w)| json!({ "path": p, "why": w })).collect();
+    Some(json!({ "removed": c.removed, "restored": c.restored, "binned": c.binned, "kept": c.kept, "unverified": c.unverified, "keptWhy": why }))
 }
 
 impl std::fmt::Display for Fail {
@@ -367,6 +429,10 @@ pub fn public_snapshot(m: &Manifest) -> Value {
             Value::Object(c)
         })
         .collect();
+    // (only when this process tidied something for the job: every other snapshot is as before)
+    if let Some(c) = backup_cleanup_json(m.id()) {
+        out.insert("backupCleanup".into(), c);
+    }
     out.insert("items".into(), Value::Array(items));
     Value::Object(out)
 }
@@ -432,6 +498,8 @@ pub struct Options {
     pub compare_picture: Option<Arc<dyn Fn(&str, &str, &Arc<AtomicBool>, Option<f64>) -> Value + Send + Sync>>,
     /// decodeAccel(encoder, zeroCopy, device): GPU decode arguments (None: CPU decode)
     pub decode_accel: Option<Arc<dyn Fn(&str, bool, Option<&super::planner::Device>) -> Option<Vec<String>> + Send + Sync>>,
+    /// the Recycle Bin for an original left beside its converted copy (leftovers.rs)
+    pub originals_bin: Option<Arc<dyn super::leftovers::OriginalsBin>>,
 }
 
 impl Options {
@@ -460,6 +528,7 @@ impl Options {
             decode_accel: None,
             remote_nodes: None,
             compare_picture: None,
+            originals_bin: None,
         }
     }
 }
@@ -1005,6 +1074,19 @@ impl Service {
         f()
     }
 
+    /// Whether two source folders are one inside the other by what they are, not by how they
+    /// are spelled (a bind mount or a second mount of the share): either one, or a folder
+    /// above it, is the other (staging::folder_identity). A folder that does not resolve now
+    /// may be either, so it overlaps. Also by place (mount_place): when only a folder below
+    /// one of them is bind-mounted inside the other, the folders above each split at the
+    /// mount point and identity alone does not see it.
+    fn overlap_by_identity(x: &Path, y: &Path) -> bool {
+        use super::staging::folder_identity;
+        let (Some(ix), Some(iy)) = (folder_identity(x, None), folder_identity(y, None)) else { return true };
+        let above = |p: &Path, k: &PathBuf| p.ancestors().any(|a| folder_identity(a, None).as_ref() == Some(k));
+        above(x, &iy) || above(y, &ix) || super::mount_place::folders_overlap(x, y)
+    }
+
     fn may_run_alongside(config: &Value, others: &[Value]) -> bool {
         let devices = |c: &Value| c.get("lanes").and_then(Value::as_array).map(|a| a.iter().filter_map(|l| l["device"].as_str().map(str::to_string)).collect::<Vec<_>>());
         let Some(mine) = devices(config).filter(|d| !d.is_empty()) else { return false };
@@ -1014,7 +1096,7 @@ impl Service {
         let overlaps = |a: Option<&str>, b: Option<&str>| match (a, b) {
             (Some(a), Some(b)) => {
                 let (x, y) = (super::owned::resolve(Path::new(a)), super::owned::resolve(Path::new(b)));
-                x == y || x.starts_with(&y) || y.starts_with(&x)
+                x == y || x.starts_with(&y) || y.starts_with(&x) || Self::overlap_by_identity(&x, &y)
             }
             _ => true,
         };
@@ -1663,5 +1745,194 @@ mod state_tests {
         let e = svc.update(&rt, |_| Some(Patch::new().state(JobState::Waiting))).unwrap_err();
         assert_eq!(e.code.as_deref(), Some("INVALID_STATE_TRANSITION"));
         assert_eq!(svc.get(&id).unwrap()["state"], "cancelled");
+    }
+}
+
+#[cfg(test)]
+mod alongside_tests {
+    use super::Service;
+    use serde_json::json;
+    use std::fs;
+    use std::path::Path;
+
+    fn cfg(root: &Path, device: &str) -> serde_json::Value {
+        json!({ "sourceRoot": root, "autoConvert": true, "lanes": [{ "device": device }] })
+    }
+
+    #[test]
+    fn jobs_of_one_folder_through_two_mount_points_never_run_alongside() {
+        let tmp = crate::converter::testutil::tempdir().unwrap();
+        let a = tmp.path().join("share/TeslaCam");
+        fs::create_dir_all(a.join("SentryClips")).unwrap();
+        let other = tmp.path().join("other/TeslaCam");
+        fs::create_dir_all(&other).unwrap();
+        let running = |root: &Path| json!({ "config": cfg(root, "gpu0"), "state": "running" });
+        assert!(Service::may_run_alongside(&cfg(&other, "cpu"), &[running(&a)]), "two unrelated folders");
+        assert!(!Service::may_run_alongside(&cfg(&a.join("SentryClips"), "cpu"), &[running(&a)]), "one inside the other");
+        assert!(!Service::may_run_alongside(&cfg(&tmp.path().join("gone"), "cpu"), &[running(&a)]), "a folder that cannot be reached may be either");
+        // a bind mount of the share (needs root)
+        let at = tmp.path().join("bind");
+        fs::create_dir_all(&at).unwrap();
+        let ok = std::process::Command::new("mount").arg("--bind").arg(tmp.path().join("share")).arg(&at).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+        if !ok {
+            eprintln!("skipped: a bind mount needs root");
+            return;
+        }
+        let r1 = Service::may_run_alongside(&cfg(&at.join("TeslaCam"), "cpu"), &[running(&a)]);
+        let r2 = Service::may_run_alongside(&cfg(&a, "cpu"), &[running(&at.join("TeslaCam/SentryClips"))]);
+        let _ = std::process::Command::new("umount").arg(&at).status();
+        assert!(!r1, "the same folder through a bind mount");
+        assert!(!r2, "a folder inside it through a bind mount");
+    }
+
+    #[test]
+    fn a_job_above_a_bind_mount_point_overlaps() {
+        let tmp = crate::converter::testutil::tempdir().unwrap();
+        let a = tmp.path().join("share/TeslaCam");
+        fs::create_dir_all(a.join("SentryClips")).unwrap();
+        let other = tmp.path().join("other/TeslaCam");
+        fs::create_dir_all(&other).unwrap();
+        // only SentryClips is bind-mounted, under another folder "view" (needs root)
+        let view = tmp.path().join("view");
+        let at = view.join("SentryClips");
+        fs::create_dir_all(&at).unwrap();
+        let ok = std::process::Command::new("mount").arg("--bind").arg(a.join("SentryClips")).arg(&at).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+        if !ok {
+            eprintln!("skipped: a bind mount needs root");
+            return;
+        }
+        let running = |root: &Path| json!({ "config": cfg(root, "gpu0"), "state": "running" });
+        let r1 = Service::may_run_alongside(&cfg(&view, "cpu"), &[running(&a)]);
+        let r2 = Service::may_run_alongside(&cfg(&a, "cpu"), &[running(&view)]);
+        let r3 = Service::may_run_alongside(&cfg(&at, "cpu"), &[running(&a)]);
+        let r4 = Service::may_run_alongside(&cfg(&a.join("SentryClips"), "cpu"), &[running(&view)]);
+        let r5 = Service::may_run_alongside(&cfg(&other, "cpu"), &[running(&view)]);
+        let _ = std::process::Command::new("umount").arg(&at).status();
+        assert!(!r1, "a folder above the bind mount point and the real folder");
+        assert!(!r2, "the real folder and a folder above the bind mount point");
+        assert!(!r3, "the bind spelling inside the real folder");
+        assert!(!r4, "the real subfolder inside the folder above the bind mount point");
+        assert!(r5, "an unrelated folder still runs alongside");
+    }
+    #[test]
+    fn by_parent_chain_jobs_of_one_folder_through_two_mount_points_never_run_alongside() {
+        crate::converter::mount_place::with_parent_chain(jobs_of_one_folder_through_two_mount_points_never_run_alongside);
+    }
+
+    #[test]
+    fn by_parent_chain_a_job_above_a_bind_mount_point_overlaps() {
+        crate::converter::mount_place::with_parent_chain(a_job_above_a_bind_mount_point_overlaps);
+    }
+}
+
+#[cfg(test)]
+mod rc3_alongside_tests {
+    use super::Service;
+    use serde_json::json;
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::path::Path;
+
+    fn cfg(root: &Path, device: &str) -> serde_json::Value {
+        json!({ "sourceRoot": root, "autoConvert": true, "lanes": [{ "device": device }] })
+    }
+    fn mnt(args: &[&OsStr]) -> bool {
+        std::process::Command::new("mount").args(args).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+    }
+    fn um(p: &Path) {
+        let _ = std::process::Command::new("umount").arg(p).status();
+    }
+
+    #[test]
+    fn rc3_a_job_through_a_hidden_mount_point_overlaps_a_job_above_the_bind_point() {
+        let tmp = crate::converter::testutil::tempdir().unwrap();
+        let real = tmp.path().join("real/TeslaCam");
+        fs::create_dir_all(real.join("SentryClips/evt")).unwrap();
+        let share = tmp.path().join("share/TeslaCam");
+        fs::create_dir_all(share.join("SentryClips")).unwrap();
+        let view = tmp.path().join("view");
+        fs::create_dir_all(view.join("SentryClips")).unwrap();
+        if !mnt(&[OsStr::new("-t"), OsStr::new("tmpfs"), OsStr::new("t"), share.join("SentryClips").as_os_str()]) {
+            eprintln!("skipped: needs root");
+            return;
+        }
+        assert!(mnt(&[OsStr::new("--bind"), real.as_os_str(), share.as_os_str()]));
+        assert!(mnt(&[OsStr::new("--bind"), real.join("SentryClips").as_os_str(), view.join("SentryClips").as_os_str()]));
+        let seen = share.join("SentryClips/evt").exists();
+        let running = |root: &Path| json!({ "config": cfg(root, "gpu0"), "state": "running" });
+        // share/TeslaCam/SentryClips is real/TeslaCam/SentryClips, which view/SentryClips also is
+        let r1 = Service::may_run_alongside(&cfg(&share.join("SentryClips"), "cpu"), &[running(&view)]);
+        let r2 = Service::may_run_alongside(&cfg(&view, "cpu"), &[running(&share.join("SentryClips"))]);
+        um(&view.join("SentryClips"));
+        um(&share);
+        um(&share.join("SentryClips"));
+        assert!(seen);
+        assert!(!r1 && !r2, "two jobs over the same clips: r1={r1} r2={r2}");
+    }
+
+    #[test]
+    fn rc3_probe_overlayfs_lower_and_merged() {
+        let tmp = crate::converter::testutil::tempdir().unwrap();
+        let lower = tmp.path().join("lower/TeslaCam");
+        fs::create_dir_all(lower.join("SentryClips/evt")).unwrap();
+        let (up, work, merged) = (tmp.path().join("up"), tmp.path().join("work"), tmp.path().join("merged"));
+        for d in [&up, &work, &merged] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let o = format!("lowerdir={},upperdir={},workdir={}", tmp.path().join("lower").display(), up.display(), work.display());
+        if !mnt(&[OsStr::new("-t"), OsStr::new("overlay"), OsStr::new("ov"), OsStr::new("-o"), OsStr::new(&o), merged.as_os_str()]) {
+            eprintln!("skipped: no overlay");
+            return;
+        }
+        let running = |root: &Path| json!({ "config": cfg(root, "gpu0"), "state": "running" });
+        let r = Service::may_run_alongside(&cfg(&merged.join("TeslaCam"), "cpu"), &[running(&lower)]);
+        let r2 = Service::may_run_alongside(&cfg(&lower.join("SentryClips"), "cpu"), &[running(&merged.join("TeslaCam"))]);
+        um(&merged);
+        assert!(!r && !r2, "an overlay and its lower folder are one set of files: {r} {r2}");
+    }
+
+    #[test]
+    fn by_parent_chain_a_job_through_a_hidden_mount_point_overlaps_a_job_above_the_bind_point() {
+        crate::converter::mount_place::with_parent_chain(rc3_a_job_through_a_hidden_mount_point_overlaps_a_job_above_the_bind_point);
+    }
+
+    #[test]
+    fn by_parent_chain_an_overlay_and_its_lower_folder_overlap() {
+        crate::converter::mount_place::with_parent_chain(rc3_probe_overlayfs_lower_and_merged);
+    }
+
+    /// After `mount --bind X /` this process keeps its old root and sees every mount below;
+    /// the parent chain cannot tell that, so a share and a bind of its SentryClips never
+    /// run alongside. Runs in a private mount namespace (root only).
+    #[test]
+    fn rc5_root_overmounted_alongside_by_parent_chain() {
+        if crate::converter::mount_place::in_private_mount_namespace(concat!(module_path!(), "::rc5_root_overmounted_alongside_by_parent_chain")) {
+            return;
+        }
+        let both = |x: &Path, y: &Path| {
+            let running = |root: &Path| json!({ "config": cfg(root, "gpu0"), "state": "running" });
+            (Service::may_run_alongside(&cfg(x, "cpu"), &[running(y)]), Service::may_run_alongside(&cfg(y, "cpu"), &[running(x)]))
+        };
+        let tmp = crate::converter::testutil::tempdir().unwrap();
+        let (share, view, over, other) = (tmp.path().join("share"), tmp.path().join("view"), tmp.path().join("over"), tmp.path().join("other"));
+        fs::create_dir_all(share.join("TeslaCam/SentryClips")).unwrap();
+        for d in [&view, &over, &other] {
+            fs::create_dir_all(d).unwrap();
+        }
+        assert!(mnt(&[OsStr::new("--bind"), share.join("TeslaCam/SentryClips").as_os_str(), view.as_os_str()]));
+        assert!(mnt(&[OsStr::new("--bind"), over.as_os_str(), OsStr::new("/")]));
+        assert!(share.join("TeslaCam/SentryClips").is_dir(), "this process still reaches its old root");
+        let by_kernel = (both(&share, &view), both(&other, &share));
+        crate::converter::mount_place::force_parent_chain(true);
+        let by_chain = (both(&share, &view), both(&other, &share));
+        crate::converter::mount_place::force_parent_chain(false);
+        // (the namespace drops every mount when it exits; this one is unmounted now so the
+        // test's folder can be removed)
+        um(&view);
+        if crate::converter::mount_place::mnt_id(Path::new("/")).is_some() {
+            assert_eq!(by_kernel, ((false, false), (true, true)), "the kernel way: share and view overlap, other is apart");
+        }
+        assert_eq!(by_chain.0, (false, false), "two jobs over the same clips");
+        assert_eq!(by_chain.1, (false, false), "the chain cannot place anything: nothing runs alongside");
     }
 }

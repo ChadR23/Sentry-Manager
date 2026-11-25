@@ -377,6 +377,8 @@ impl Can {
     fn with_footage_hook(self: Arc<Self>) -> Arc<Self> {
         let w = Arc::downgrade(&self);
         self.logs.set_footage(Box::new(move |key| w.upgrade().map_or(Kept::Unknown, |c| c.kept_footage(key))));
+        let w = Arc::downgrade(&self);
+        self.logs.set_starts(Box::new(move |key| w.upgrade().and_then(|c| c.kept_starts(key))));
         self
     }
 
@@ -393,6 +395,13 @@ impl Can {
             None => Kept::Unknown,
             Some(v) => self.prune.oldest_kept(&v),
         }
+    }
+
+    /// Every clip start the car of a CAN key keeps (share, Recycle Bin, protected), sorted;
+    /// None whenever `kept_footage` is not known.
+    pub fn kept_starts(&self, key: &str) -> Option<Arc<Vec<f64>>> {
+        let map = self.can_map().ok()?;
+        self.prune.kept_starts(&self.car_in(&map, key)?)
     }
 
     /// The background work the Node server starts: the index after 20 s, the checks after 15 s
@@ -604,12 +613,13 @@ impl Can {
         rec
     }
     /// A copy of a log deleted here on purpose, sent again (either half here). Deleted by the
-    /// owner (by name, or with its footage), or older than all the footage its car keeps (see
-    /// CanLogs::buried_older): judged as any log (SHA-256, signature, chain), the result kept
-    /// on its tombstone, and the copy deleted again (never indexed: CanTrust::usable). Deleted
-    /// by an automatic rule and inside the footage kept: kept as a new log (its tombstone goes;
-    /// None: judged as usual). While the footage is not known: judged, kept unindexed, and
-    /// decided by a later pass. (Another copy than the tombstone's never gets here: the upload
+    /// owner (by name, or with its footage), by a rule for good (not linked to footage, its
+    /// footage deleted for good) while no clip kept covers it, or older than all the footage
+    /// its car keeps (see CanLogs::buried_older): judged as any log (SHA-256, signature,
+    /// chain), the result kept on its tombstone, and the copy deleted again (never indexed:
+    /// CanTrust::usable). Otherwise (a rule's log whose time has footage now): kept as a new
+    /// log (its tombstone goes; None: judged as usual). While the footage is not
+    /// known: judged, kept unindexed, and decided by a later pass. (Another copy than the tombstone's never gets here: the upload
     /// answers it 409 exists_different, see CanLogs::plan.)
     fn judge_buried(self: &Arc<Self>, key: &str, name: &str, tomb: &Value) -> Option<Value> {
         let here = self.logs.size_of(name);
@@ -617,7 +627,7 @@ impl Can {
         if here.is_none() && side.is_none() {
             return Some(self.trust.record(key, name).unwrap_or(json!({})));
         }
-        match CanLogs::buried_older(tomb, self.logs.kept(key)) {
+        match CanLogs::buried_older(name, tomb, self.logs.kept(key), || self.logs.starts(key), || self.logs.log_starts(key)) {
             Some(false) => {
                 self.trust.unbury(key, name);
                 self.ctx.log("info", &format!("CAN Bridge {}: {} was deleted here and sent again; its car keeps footage of its time, so it is kept as a new log", key, name));
@@ -641,7 +651,7 @@ impl Can {
                 if let Some((check, reason)) = self.trust.rebury(key, name, size, side.map(|sd| (sd, self.side_sha(key, name)))) {
                     self.logs.discard(name);
                     self.drop_log(key, name);
-                    self.ctx.log("info", &format!("CAN Bridge {}: {} ({}) was sent again: checked ({}{}) and deleted again", key, name, if self.trust.tombs(key, &[name.to_string()]).into_iter().next().flatten().as_ref().and_then(|t| t.get("why")).and_then(|w| w.as_str()).is_some_and(|w| super::logs::OWNER_WHYS.contains(&w)) { "deleted here by the owner" } else { "deleted here, older than the car's footage" }, check, reason.map(|r| format!(": {r}")).unwrap_or_default()));
+                    self.ctx.log("info", &format!("CAN Bridge {}: {} ({}) was sent again: checked ({}{}) and deleted again", key, name, CanLogs::buried_why(self.trust.tombs(key, &[name.to_string()]).into_iter().next().flatten().as_ref()), check, reason.map(|r| format!(": {r}")).unwrap_or_default()));
                     self.ctx.announce("can");
                 }
                 Some(rec)
@@ -675,7 +685,7 @@ impl Can {
                 let old = std::fs::metadata(self.logs.dir.join(&key).join(&side)).is_ok_and(|m| util::now_ms() - util::mtime_ms(&m) > LONE_SIDE_MS);
                 if old && !self.logs.arriving(&name) {
                     if let Some(tomb) = self.trust.tomb(&key, &name) {
-                        match CanLogs::buried_older(&tomb, self.logs.kept(&key)) {
+                        match CanLogs::buried_older(&name, &tomb, self.logs.kept(&key), || self.logs.starts(&key), || self.logs.log_starts(&key)) {
                             Some(true) => {
                                 if let Some(sd) = self.logs.size_of(&side) {
                                     self.trust.note_side(&key, &name, sd, self.side_sha(&key, &name));

@@ -4,6 +4,7 @@
 
 import '/web/vehicleEncoding.js';
 import { clipFailureWhy } from '/web/clipFailure.js';
+import { backupCleanupHtml } from '/web/backupCleanup.js';
 import {
   $, $$, esc, icon, api, invoke, state, current, footageRoot, bytes, plural, pct, num, dur, when, ago, fin, ring, meter, toast,
   confirmDialog, openDialog, store, empty, liveDraw, watts, hourName
@@ -126,8 +127,9 @@ export default {
           ${snap.state === 'completed' ? `<button class="btn" type="button" data-act="dismissSummary">${icon('check')} Dismiss</button>` : ''}
           <button class="btn${active || snap.state === 'completed' ? ' ghost' : ''}" type="button" data-act="discard" title="${active ? 'For a job that can’t be cancelled: set it aside' : 'Clear this job from the Encoder'}">${active ? 'Set aside' : `${icon('x')} Clear`}</button>
         </div>
-        ${snap.error?.code ? `<p class="note bad" style="margin-top:14px">${esc(explain(snap.error))}</p>` : ''}`;
-      const shape = JSON.stringify([snap.id, active ? (paused ? 'paused' : 'run') : snap.state, lanes, cfg.concurrency, c.failed > 0, snap.error?.code || '']);
+        ${snap.error?.code ? `<p class="note bad" style="margin-top:14px">${esc(explain(snap.error))}</p>` : ''}
+        ${backupCleanupHtml(snap.backupCleanup, esc, 'backup-cleanup')}`;
+      const shape = JSON.stringify([snap.id, active ? (paused ? 'paused' : 'run') : snap.state, lanes, cfg.concurrency, c.failed > 0, snap.error?.code || '', snap.backupCleanup || null]);
       if (shape !== liveShape || !$('#live-ctrl', el)) {
         liveShape = shape;
         el.innerHTML = `<div id="live-head">${headHtml}</div><div id="live-stats">${statsHtml}</div><div id="live-ctrl">${ctrlHtml}</div>`;

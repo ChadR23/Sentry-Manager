@@ -318,6 +318,95 @@ pub fn trash(app: &Arc<App>, vid: &str, ids: &[String], reason: &str) -> Res<Tra
     Ok(result)
 }
 
+/// The vehicle whose folder (its real path) holds `path`, the deepest one if several do,
+/// and that real folder.
+fn vehicle_holding(app: &App, path: &Path) -> Option<(Vehicle, PathBuf)> {
+    app.vehicles
+        .list()
+        .into_iter()
+        .filter_map(|v| std::fs::canonicalize(&v.root).ok().map(|r| (v, r)))
+        .filter(|(_, r)| path.starts_with(r) && path != r.as_path())
+        .max_by_key(|(_, r)| r.components().count())
+}
+
+fn rel_below(real_root: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(real_root).ok()?.to_str()?.to_string();
+    (!rel.is_empty() && rel.split('/').all(|c| !c.is_empty() && c != "." && c != "..")).then_some(rel)
+}
+
+/// The Recycle Bin lists a file that was at `original` (a real path in a vehicle's folder).
+pub fn holds_original(app: &App, original: &Path) -> bool {
+    let Some((v, real_root)) = vehicle_holding(app, original) else { return false };
+    let Some(rel) = rel_below(&real_root, original) else { return false };
+    app.core.db().bin_items(Some(&v.id)).is_ok_and(|items| items.iter().any(|i| i.files.iter().any(|f| f.rel == rel)))
+}
+
+/// The Encoder's leftover original (BACKUP-<name>, still the file dev:ino) beside its
+/// converted copy <name>: into the Recycle Bin as the original of <name>, so Restore puts
+/// it back as <name> (refused as a conflict while the converted copy is there) and
+/// "empty after N days" frees its space. The same order as `trash`: the item is listed
+/// with its file pending first, the file is moved without following a link and without
+/// replacing anything, then checked; a mismatch puts it back. Ok(item id), or why not
+/// (the file is then where it was).
+pub fn adopt_original(app: &App, backup: &Path, original: &Path, dev: u64, ino: u64) -> Result<String, String> {
+    use std::os::unix::fs::MetadataExt;
+    let (vehicle, real_root) = vehicle_holding(app, backup).ok_or("this folder has no Recycle Bin (it is not a vehicle's footage folder)")?;
+    if backup.parent() != original.parent() {
+        return Err("the two names are not in one folder".into());
+    }
+    let rel = rel_below(&real_root, original).ok_or("the clip's name cannot be listed in the Recycle Bin")?;
+    let (vehicle, _) = root_of(app, &vehicle.id).map_err(|f| f.message)?;
+    let vid = vehicle.id.clone();
+    with_lock(app, &vid, || {
+        let in_hand = app.core.busy_paths();
+        if in_hand.contains(original) || in_hand.contains(backup) {
+            return Err("a conversion has the clip in hand".to_string());
+        }
+        let st = std::fs::symlink_metadata(backup).map_err(|e| io_message(&e, "lstat", backup, None))?;
+        if !st.is_file() || st.dev() != dev || st.ino() != ino {
+            return Err("it changed before it was moved".into());
+        }
+        let id = item_id();
+        let bin_rel = format!("{BIN_DIR}/{id}/{rel}.binned");
+        let name = original.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let lower = rel.to_lowercase();
+        let category = if lower.contains("sentryclips") { "Sentry" } else if lower.contains("savedclips") { "Saved" } else if lower.contains("recentclips") { "Recent" } else { "Other" };
+        let planned = BinFile { rel: rel.clone(), bin_rel: bin_rel.clone(), size: st.len(), pending: true, conflict: false };
+        let record = BinItem {
+            id: id.clone(), vehicle_id: vid.clone(), label: format!("Original of {name} (kept by the Encoder)"), category: category.into(), start_at: None,
+            bytes: st.len(), files: vec![planned.clone()], trashed_at: super::js::now().trunc(), reason: "encoder-backup".into(),
+        };
+        app.core.db().add_bin_item(&record).map_err(|e| e.to_string())?;
+        let to = real_root.join(&bin_rel);
+        let undo = |why: String| -> Result<String, String> {
+            if let Ok(dir) = safe_join(&real_root, &format!("{BIN_DIR}/{id}")) {
+                let _ = safe_fs::rmrf_inside(&real_root, &dir);
+            }
+            let _ = app.core.db().remove_bin_item(&id);
+            Err(why)
+        };
+        let moved = safe_fs::mkdirp_inside(&real_root, to.parent().unwrap_or(&real_root)).and_then(|_| safe_fs::rename_inside_noreplace(&real_root, backup, &to));
+        if let Err(e) = moved {
+            return undo(if safe_fs::is_escape(&e) { e.to_string() } else { io_message(&e, "rename", backup, Some(&to)) });
+        }
+        let landed = std::fs::symlink_metadata(&to);
+        if !landed.as_ref().is_ok_and(|m| m.is_file() && m.dev() == dev && m.ino() == ino) {
+            // (another file was there by then: back where it was, never over a name)
+            if safe_fs::rename_inside_noreplace(&real_root, &to, backup).is_err() {
+                let _ = app.core.db().update_bin_files(&id, &[BinFile { pending: false, ..planned }], st.len());
+                return Err(format!("another file took its place while it moved; it is in the Recycle Bin as item {id}, check it by hand"));
+            }
+            return undo("another file took its place while it moved".into());
+        }
+        if let Err(e) = app.core.db().update_bin_files(&id, &[BinFile { pending: false, ..planned }], st.len()) {
+            // (moved either way: a restart's settling lists it)
+            log(app, Level::Warn, &format!("{}: the Encoder's original of {rel} is in the Recycle Bin (item {id}), its listing was not updated: {e}", vehicle.name));
+        }
+        log(app, Level::Info, &format!("{}: the Encoder's original of {rel} moved to the Recycle Bin (item {id}); the clip itself is the converted copy", vehicle.name));
+        Ok(id)
+    })
+}
+
 /// A readable thumbnail of a bin item, without needing write access: ("image" | "clip", path).
 /// An error when manager.db could not be read.
 pub fn thumbnail_source(app: &App, item_id: &str) -> Res<Option<(&'static str, PathBuf)>> {
@@ -603,5 +692,54 @@ mod tests {
         assert_eq!(skip_why(&[s("a", "protected", None), s("b", "error", Some("EACCES: x")), s("c", "protected", None), s("d", "error", Some("other"))]), "2 protected, 2 could not be moved (EACCES: x)");
         assert!(is_kept_dir("TeslaCam") && is_kept_dir("a/SentryClips") && !is_kept_dir("TeslaCam/SentryClips/2025-01-01_10-00-00"));
         assert!(adoptable("m7x2k1-0a1b2c3d") && !adoptable("x-0A1B2C3D") && !adoptable("nope"));
+    }
+
+    #[test]
+    fn an_encoder_original_is_listed_under_its_clip_and_restores_once_the_copy_is_gone() {
+        use std::os::unix::fs::MetadataExt;
+        let c = crate::footage::testing::on_core("bin-orig");
+        let car = std::fs::canonicalize(c.dir.join("footage/car")).unwrap();
+        let ev = car.join("TeslaCam/SentryClips/2026-08-30_20-53-04");
+        std::fs::create_dir_all(&ev).unwrap();
+        let x = ev.join("2026-08-30_20-53-04-front.mp4");
+        let backup = ev.join("BACKUP-2026-08-30_20-53-04-front.mp4");
+        std::fs::write(&x, b"converted").unwrap();
+        std::fs::write(&backup, b"original").unwrap();
+        let st = std::fs::metadata(&backup).unwrap();
+        // not the file that was checked: refused, nothing listed or moved
+        let e = adopt_original(&c.app, &backup, &x, st.dev(), st.ino() + 1).unwrap_err();
+        assert_eq!(e, "it changed before it was moved");
+        assert!(backup.exists() && c.app.core.db().bin_items(Some("car")).unwrap().is_empty());
+        // outside every vehicle's folder: no Recycle Bin
+        let elsewhere = c.dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let ew = std::fs::canonicalize(&elsewhere).unwrap();
+        assert!(adopt_original(&c.app, &ew.join("BACKUP-a.mp4"), &ew.join("a.mp4"), 1, 1).unwrap_err().contains("no Recycle Bin"));
+        let id = adopt_original(&c.app, &backup, &x, st.dev(), st.ino()).unwrap();
+        assert!(!backup.exists());
+        let item = c.app.core.db().bin_item(&id).unwrap().unwrap();
+        assert_eq!(item.reason, "encoder-backup");
+        assert_eq!(item.label, "Original of 2026-08-30_20-53-04-front.mp4 (kept by the Encoder)");
+        assert_eq!(item.category, "Sentry");
+        assert_eq!(item.files.len(), 1);
+        let f = &item.files[0];
+        assert_eq!(f.rel, "TeslaCam/SentryClips/2026-08-30_20-53-04/2026-08-30_20-53-04-front.mp4");
+        assert!(!f.pending && f.size == 8);
+        assert_eq!(std::fs::metadata(car.join(&f.bin_rel)).unwrap().ino(), st.ino(), "the same file, moved");
+        assert!(holds_original(&c.app, &x) && !holds_original(&c.app, &ev.join("2026-08-30_20-53-04-back.mp4")));
+        // Restore: refused while the converted copy has the name, then the original back as the clip
+        assert_eq!(restore(&c.app, &id).unwrap(), json!({ "restored": 0, "conflicts": 1 }));
+        assert_eq!(std::fs::read(&x).unwrap(), b"converted");
+        std::fs::remove_file(&x).unwrap();
+        assert_eq!(restore(&c.app, &id).unwrap(), json!({ "restored": 1, "conflicts": 0 }));
+        assert_eq!(std::fs::read(&x).unwrap(), b"original");
+        assert!(c.app.core.db().bin_item(&id).unwrap().is_none());
+        // and deleted for good
+        std::fs::write(&backup, b"original two").unwrap();
+        let st = std::fs::metadata(&backup).unwrap();
+        let id = adopt_original(&c.app, &backup, &x, st.dev(), st.ino()).unwrap();
+        assert_eq!(delete_forever(&c.app, &id).unwrap(), 12);
+        assert!(c.app.core.db().bin_item(&id).unwrap().is_none());
+        assert_eq!(std::fs::read(&x).unwrap(), b"original", "the clip is untouched");
     }
 }

@@ -290,6 +290,19 @@ impl Registry {
     }
 }
 
+/// Remove a verified snapshot that will never be published (a check that only reads, such
+/// as the leftover tidy's check of a converted copy), and forget it.
+pub fn discard_artifact(registry: &Registry, a: &Artifact) {
+    if !registry.structurally_owned(a) {
+        return;
+    }
+    let p = Path::new(&a.path);
+    if let Some(dir) = p.parent() {
+        let _ = remove_snapshot_file(dir, p);
+    }
+    registry.live.lock().unwrap().remove(&a.token);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

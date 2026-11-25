@@ -49,11 +49,14 @@ pub struct RuntimeOptions {
     /// the helper servers (nodes::main_side::Nodes): their devices as lanes,
     /// remote encodes, trust, slots and each one's vehicles first
     pub nodes: Option<Arc<dyn super::service::lanes::NodeLanes>>,
+    /// the Recycle Bin, for an original a replace left beside its converted copy
+    /// (leftovers.rs case c); None: such an original is kept and reported
+    pub originals_bin: Option<Arc<dyn super::leftovers::OriginalsBin>>,
 }
 
 impl RuntimeOptions {
     pub fn new(data_path: PathBuf, temp_path: PathBuf, ffmpeg: &str, ffprobe: &str) -> RuntimeOptions {
-        RuntimeOptions { data_path, temp_path, ffmpeg: ffmpeg.into(), ffprobe: ffprobe.into(), before_replace_original: None, tools: None, tune: None, hooks: None, encoders: None, discovery: None, gpu_decode: true, hold_discovered: None, power_meter: None, is_cheap_now: None, auto_timer: true, nodes: None }
+        RuntimeOptions { data_path, temp_path, ffmpeg: ffmpeg.into(), ffprobe: ffprobe.into(), before_replace_original: None, tools: None, tune: None, hooks: None, encoders: None, discovery: None, gpu_decode: true, hold_discovered: None, power_meter: None, is_cheap_now: None, auto_timer: true, nodes: None, originals_bin: None }
     }
 }
 
@@ -163,6 +166,7 @@ impl Converter {
         converted_index.load();
         let mut so = Options::new(store.clone(), staging.clone(), tools);
         so.converted_index = Some(converted_index.clone());
+        so.originals_bin = o.originals_bin.clone();
         let d2 = devices.clone();
         so.resolve_device = Some(Arc::new(move |id: &str| d2.resolve_device(id)));
         let d3 = devices.clone();

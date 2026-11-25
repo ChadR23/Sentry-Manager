@@ -168,7 +168,7 @@ fn leftovers(base: &Path) -> Vec<String> {
     let mut found = vec![];
     for e in fs::read_dir(base.join("footage").join(EVENT)).unwrap() {
         let n = e.unwrap().file_name().to_string_lossy().to_string();
-        if n.starts_with("TEMP-") || n.starts_with("BACKUP-") || n.starts_with(".sentry-owned-remove-") || n.ends_with(".partial") {
+        if n.starts_with("TEMP-") || n.starts_with("BACKUP-") || n.starts_with(".sentry-owned-remove-") || n.starts_with(".sentry-tidy-") || n.ends_with(".partial") {
             found.push(n);
         }
     }
@@ -775,4 +775,139 @@ fn a_paused_job_stays_paused_through_a_restart_and_resume_finishes_it() {
     c.shutdown();
     fs::remove_dir_all(&base).unwrap();
     fs::remove_dir_all(&base2).unwrap();
+}
+
+// ---- leftover BACKUP- names after a discarded job ------------------------------
+
+/// A Recycle Bin that keeps what it is given in `<base>/bin` (the real one is footage/bin.rs).
+struct SinkBin(PathBuf);
+
+impl super::super::leftovers::OriginalsBin for SinkBin {
+    fn adopt_original(&self, backup: &Path, original: &Path, dev: u64, ino: u64) -> Result<String, String> {
+        use std::os::unix::fs::MetadataExt;
+        let st = fs::symlink_metadata(backup).map_err(|e| e.to_string())?;
+        assert_eq!((st.dev(), st.ino()), (dev, ino));
+        fs::create_dir_all(&self.0).unwrap();
+        fs::rename(backup, self.0.join(original.file_name().unwrap())).map_err(|e| e.to_string())?;
+        Ok("sink-1".into())
+    }
+    fn holds(&self, _original: &Path) -> bool {
+        false
+    }
+}
+
+/// Killed at `point` in a replace, the job then discarded (its record set aside, as the
+/// owner's Discard does), and a new replace job of the same folder run to the end.
+fn discard_then_replace_again(point: &str, no_links: bool, bin: bool) -> (PathBuf, Vec<String>, Vec<String>, Value, String) {
+    let base = make_base(&format!("tidy-{point}"), 1);
+    let (names, before) = names_and_hashes(&base);
+    let died = crash(&base, point, "replace", "direct", 1, no_links);
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(died.status.signal(), Some(libc::SIGKILL), "died at {point}: {}", String::from_utf8_lossy(&died.stderr).chars().take(600).collect::<String>());
+    let backup = format!("BACKUP-{}", names[0]);
+    assert!(base.join("footage").join(EVENT).join(&backup).exists(), "{point}: the crash left {backup}");
+    // Discard, before anything recovers it: the record is set aside
+    let jobs = fs::canonicalize(base.join("data")).unwrap().join("converter-jobs");
+    let store = super::super::jobstore::JobStore::new(&jobs).unwrap();
+    let old = store.list().unwrap()[0].id().to_string();
+    assert!(store.discard(&old).unwrap());
+    let c = Converter::open(RuntimeOptions {
+        tune: Some(Box::new(|o| {
+            o.backoff_initial_ms = 50;
+            o.backoff_max_ms = 200;
+        })),
+        originals_bin: if bin { Some(Arc::new(SinkBin(base.join("bin")))) } else { None },
+        ..RuntimeOptions::new(fs::canonicalize(base.join("data")).unwrap(), fs::canonicalize(base.join("temp")).unwrap(), "ffmpeg", "ffprobe")
+    })
+    .unwrap();
+    c.start().unwrap();
+    let id = c.service.start(&config(&base, "replace", "direct", 1)).unwrap();
+    let job = c.service.when_idle(&id).unwrap();
+    let snap = c.service.get(&id).unwrap();
+    c.shutdown();
+    // the job file and its journal keep their format
+    for f in ["job.json", "job.journal"] {
+        let text = fs::read_to_string(jobs.join(&id).join(f)).unwrap_or_default();
+        assert!(!text.contains("backupCleanup"), "{f}");
+    }
+    let mut job = job;
+    job["backupCleanup"] = snap["backupCleanup"].clone();
+    (base, names, before, job, backup)
+}
+
+fn tidy_logged(needle: &str) -> usize {
+    super::LOGGED.lock().unwrap_or_else(|p| p.into_inner()).iter().filter(|l| l.starts_with("[CONVERTER] BACKUP cleanup: ") && l.contains(needle)).count()
+}
+
+#[test]
+fn a_discarded_jobs_leftover_backup_is_tidied_by_the_next_replace() {
+    if !available() {
+        eprintln!("skipped: needs ffmpeg with libx265 and node");
+        return;
+    }
+    // killed after the backup link (P1): the second name goes, the clip converts
+    let (base, names, before, job, backup) = discard_then_replace_again("backup-renamed", false, false);
+    assert_recovered(&base, &job, "replace", &names, &before);
+    // (the second name, and the unfinished copy the replace had written beside the clip)
+    assert_eq!(job["backupCleanup"], json!({ "removed": 2, "restored": 0, "binned": 0, "kept": 0, "unverified": 0, "keptWhy": [] }));
+    assert_eq!(tidy_logged(&format!("removed the second name \"{backup}\" in \"SentryClips/2026-10-20_07-44-14/\"")), 1);
+    assert_eq!(tidy_logged(&format!("removed the unfinished copy \"TEMP-H265-{}\" in \"SentryClips/2026-10-20_07-44-14/\" (H.265;", names[0])), 1);
+    fs::remove_dir_all(&base).unwrap();
+
+    // no hard links, killed after the original was moved aside (P6): it is put back and converted
+    let (base, names, before, job, backup) = discard_then_replace_again("backup-renamed", true, false);
+    assert_recovered(&base, &job, "replace", &names, &before);
+    assert_eq!(job["backupCleanup"], json!({ "removed": 1, "restored": 1, "binned": 0, "kept": 0, "unverified": 0, "keptWhy": [] }));
+    assert_eq!(tidy_logged(&format!("put the original back: \"{backup}\" -> \"{}\"", names[0])), 1);
+    fs::remove_dir_all(&base).unwrap();
+
+    // killed after the copy was renamed over the original (P3): the clip is the converted
+    // copy, its original goes to the Recycle Bin
+    let (base, names, before, job, backup) = discard_then_replace_again("after-final", false, true);
+    assert_eq!(job["state"], "completed");
+    assert_eq!(job["items"][0]["resultCode"], "already-converted", "{}", job["items"][0]);
+    assert_eq!(job["backupCleanup"]["binned"], 1, "{}", job["backupCleanup"]);
+    assert_eq!(sha(&base.join("bin").join(&names[0])), before[0], "the original, whole, in the bin");
+    assert_eq!(codec_of(&base.join("footage").join(EVENT).join(&names[0])), "hevc");
+    assert!(!base.join("footage").join(EVENT).join(&backup).exists());
+    assert_eq!(tidy_logged(&format!("moved \"{backup}\" in \"SentryClips/2026-10-20_07-44-14/\" to the Recycle Bin as the original of \"{}\" (item sink-1;", names[0])), 1);
+    fs::remove_dir_all(&base).unwrap();
+
+    // the same without a Recycle Bin: kept, and the snapshot says why
+    let (base, names, before, job, backup) = discard_then_replace_again("after-final", false, false);
+    assert_eq!(job["backupCleanup"]["kept"], 1);
+    let why = &job["backupCleanup"]["keptWhy"][0];
+    assert_eq!(why["path"], format!("SentryClips/2026-10-20_07-44-14/{backup}"));
+    assert!(why["why"].as_str().unwrap().contains("no Recycle Bin"), "{why}");
+    assert_eq!(sha(&base.join("footage").join(EVENT).join(&backup)), before[0], "the original is kept");
+    let _ = names;
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn a_backup_a_stopped_job_can_still_recover_is_left_to_it() {
+    if !available() {
+        eprintln!("skipped: needs ffmpeg with libx265 and node");
+        return;
+    }
+    // killed after the backup link, not discarded: a new replace job of that folder is
+    // refused while the stopped one is unfinished, and its recovery settles the name itself
+    let base = make_base("tidy-owned", 1);
+    let (names, before) = names_and_hashes(&base);
+    crash(&base, "backup-renamed", "replace", "direct", 1, false);
+    let c = open(&base, "ffmpeg", "ffprobe", None);
+    let jobs = c.store.list().unwrap();
+    let old = jobs[0].id().to_string();
+    // its record owns the backup: the tidy keeps it
+    let mut o = super::super::leftovers::Owners::default();
+    o.add_manifest(&jobs[0], false);
+    let folder = fs::canonicalize(base.join("footage").join(EVENT)).unwrap();
+    let why = o.why(&[folder.join(&names[0])], &[folder.join(format!("BACKUP-{}", names[0]))]).unwrap();
+    assert!(why.starts_with(&format!("job {old} ")), "{why}");
+    c.start().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let job = c.service.when_idle(&old).unwrap();
+    c.shutdown();
+    assert_recovered(&base, &job, "replace", &names, &before);
+    fs::remove_dir_all(&base).unwrap();
 }

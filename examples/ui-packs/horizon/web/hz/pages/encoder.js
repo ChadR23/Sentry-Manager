@@ -3,6 +3,7 @@
 // Everything goes through /api/converter/invoke/* and /api/converter/events.
 import '/web/vehicleEncoding.js';
 import { clipFailureWhy } from '/web/clipFailure.js';
+import { backupCleanupHtml } from '/web/backupCleanup.js';
 import { h, ico, api, conv, app, car, carRoot, size, perSec, pc, fixed, count, span, stampFull, watt, wh, cash, ok, toast, ask, act, local, segs, onSegs, pill, bar, panelHead, bus, debounce, CLIENT, liveDraw } from '../core.js';
 import { dial, setDial, ring, setRing } from '../gauges.js';
 import { splitDevices, deviceLabel, laneValue, jobLanes, groupMemory, groupBodyId, wireGroups } from '../nodelanes.js';
@@ -80,6 +81,7 @@ export default {
         <div><h1 class="chrome">Encoder <span id="e-state"></span></h1><p id="e-sub">Warming up the converter…</p></div>
         <div class="pacts" id="e-acts"></div>
       </section>
+      <div id="e-backup"></div>
       <section class="dyno hud" aria-label="Dyno">
         <div class="dy-tach" id="e-tach"></div>
         <div class="dy-lap">${ring('Lap')}</div>
@@ -170,6 +172,13 @@ export default {
       if (s && s.state === 'completed') a.push(`<button class="btn" type="button" data-job="dismissSummary">${ico('check')}Dismiss</button>`);
       if (s && (s.state === 'paused' || s.state === 'paused_network' || s.recovery)) a.push(`<button class="btn ghost" type="button" data-job="discard">Set aside…</button>`);
       setHtml($('#e-acts'), a.join(''));
+      // leftover files of an earlier replace (redrawn only when they change: an open list stays open)
+      const bc = backupCleanupHtml(s?.backupCleanup, h, 'backup-cleanup');
+      const slot = $('#e-backup');
+      if (slot.dataset.html !== bc) {
+        slot.innerHTML = bc;
+        slot.dataset.html = bc;
+      }
     }
     $('#e-acts').addEventListener('click', (e) => {
       const b = e.target.closest('[data-job]');
