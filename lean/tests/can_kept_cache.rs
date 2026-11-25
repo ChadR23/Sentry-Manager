@@ -91,21 +91,29 @@ fn the_oldest_footage_kept_is_worked_out_once_per_scan() {
     for _ in 0..20 {
         assert_eq!(can.logs.status(Some(&names), Some(KEY)).unwrap()["files"][format!("{KEY}_20261108T100000Z_1.log.xz")]["check"], "verified");
         assert_eq!(can.kept_footage(KEY), Kept::Since(utc(14, 30)));
+        assert_eq!(can.kept_starts(KEY).as_deref(), Some(&vec![utc(14, 30), utc(16, 0)]));
     }
-    assert_eq!(ctx.copies.load(Ordering::SeqCst), 1, "the file list copied once, not per call");
+    // (once for the oldest clip, once for every clip's start: the logs deleted for good as not
+    // linked to footage go by them)
+    assert_eq!(ctx.copies.load(Ordering::SeqCst), 2, "the file list copied once each, not per call");
     // a new scan result: worked out again
     ctx.rescanned(&["2026-11-08_15-00-00-front.mp4"]);
     assert_eq!(can.kept_footage(KEY), Kept::Since(utc(15, 0)));
     assert_eq!(can.kept_footage(KEY), Kept::Since(utc(15, 0)));
-    assert_eq!(ctx.copies.load(Ordering::SeqCst), 2);
+    assert_eq!(can.kept_starts(KEY).as_deref(), Some(&vec![utc(15, 0)]));
+    assert_eq!(can.kept_starts(KEY).as_deref(), Some(&vec![utc(15, 0)]));
+    assert_eq!(ctx.copies.load(Ordering::SeqCst), 4);
     // a protected clip (protecting changes no scan): counted at once, and when unprotected
     ctx.protected.lock().unwrap().push("SavedClips/2026-11-08/2026-11-08_09-00-00-front.mp4".into());
     assert_eq!(can.kept_footage(KEY), Kept::Since(utc(9, 0)));
+    assert_eq!(can.kept_starts(KEY).as_deref(), Some(&vec![utc(9, 0), utc(15, 0)]));
     ctx.protected.lock().unwrap().clear();
+    assert_eq!(can.kept_starts(KEY).as_deref(), Some(&vec![utc(15, 0)]));
     assert_eq!(can.kept_footage(KEY), Kept::Since(utc(15, 0)));
     // another time zone: the clip names read again
     *ctx.zone.lock().unwrap() = "Europe/Berlin".into();
     assert_eq!(can.kept_footage(KEY), Kept::Since(utc(14, 0)));
-    assert_eq!(ctx.copies.load(Ordering::SeqCst), 3);
+    assert_eq!(can.kept_starts(KEY).as_deref(), Some(&vec![utc(14, 0)]));
+    assert_eq!(ctx.copies.load(Ordering::SeqCst), 8);
     let _ = std::fs::remove_dir_all(&data);
 }

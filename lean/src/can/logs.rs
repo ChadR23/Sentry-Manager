@@ -70,10 +70,12 @@ pub enum Kept {
 /// whatever footage the car keeps.
 pub const OWNER_WHYS: [&str; 2] = ["owner", "with-footage"];
 
-/// The automatic rules (*Keeping logs*) whose reason holds for good, so their logs are never
+/// The automatic rules (*Keeping logs*) whose reason holds for good, so their logs are not
 /// asked for again either: "unlinked" (not linked to footage after N days: a copy sent again
 /// would be kept, linked to nothing, and deleted again N days later, every time) and "footage"
-/// (its footage deleted for good: that footage never comes back). The others go by the footage
+/// (its footage deleted for good). Both were deleted because no clip the car keeps covers the
+/// log, so they are asked for again only once one does (clips that came late, or the car's
+/// time zone set right): see `CanLogs::buried_older`. The others go by the oldest footage
 /// kept: "old" (older than all of it: delivered unless older footage is kept again, and then
 /// its log is wanted again) and "before-tombstones" (an older server's delete, its rule not
 /// known: it may have been one that goes by the footage).
@@ -217,6 +219,9 @@ pub struct CanLogs {
     before_swap: OnceLock<Box<dyn Fn() + Send + Sync>>,
     /// the oldest footage each car key's car keeps (set once; without it: `Kept::Nothing`)
     footage: OnceLock<Box<dyn Fn(&str) -> Kept + Send + Sync>>,
+    /// every clip start each car key's car keeps, sorted (None: not known now; set once;
+    /// without it: none)
+    starts: OnceLock<Box<dyn Fn(&str) -> Option<Arc<Vec<f64>>> + Send + Sync>>,
 }
 
 fn stat(p: &Path) -> Option<fs::Metadata> {
@@ -225,10 +230,10 @@ fn stat(p: &Path) -> Option<fs::Metadata> {
 
 impl CanLogs {
     pub fn new(dir: PathBuf, free_bytes: Box<dyn Fn() -> f64 + Send + Sync>, now: Box<dyn Fn() -> f64 + Send + Sync>) -> Arc<CanLogs> {
-        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car: MAX_LOGS_PER_CAR, min_free: 2.0 * 1024f64.powi(3), busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new(), before_swap: OnceLock::new(), footage: OnceLock::new() })
+        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car: MAX_LOGS_PER_CAR, min_free: 2.0 * 1024f64.powi(3), busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new(), before_swap: OnceLock::new(), footage: OnceLock::new(), starts: OnceLock::new() })
     }
     pub fn with_limits(dir: PathBuf, max_files_per_car: usize, min_free: f64, free_bytes: Box<dyn Fn() -> f64 + Send + Sync>, now: Box<dyn Fn() -> f64 + Send + Sync>) -> Arc<CanLogs> {
-        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car, min_free, busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new(), before_swap: OnceLock::new(), footage: OnceLock::new() })
+        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car, min_free, busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new(), before_swap: OnceLock::new(), footage: OnceLock::new(), starts: OnceLock::new() })
     }
 
     /// The checks the status answers and replacements go by.
@@ -246,6 +251,19 @@ impl CanLogs {
     pub fn kept(&self, key: &str) -> Kept {
         self.footage.get().map_or(Kept::Nothing, |f| f(key))
     }
+
+    /// Where each car key's car keeps clips (the share, the Recycle Bin and protected clips,
+    /// as the rules that delete logs link them): the logs deleted for good as not linked to
+    /// footage go by it.
+    pub fn set_starts(&self, f: Box<dyn Fn(&str) -> Option<Arc<Vec<f64>>> + Send + Sync>) {
+        let _ = self.starts.set(f);
+    }
+
+    /// The clip starts `key`'s car keeps, sorted (None: not known now).
+    pub fn starts(&self, key: &str) -> Option<Arc<Vec<f64>>> {
+        self.starts.get().map_or_else(|| Some(Arc::new(Vec::new())), |f| f(key))
+    }
+
 
     /// How a tombstone's log was deleted, for the server's log.
     pub fn buried_why(tomb: Option<&Value>) -> &'static str {
@@ -268,13 +286,23 @@ impl CanLogs {
         }
     }
 
-    /// Whether a tombstone's log counts as delivered for good (Some(true)), may be sent again
-    /// (Some(false): its time still has footage), or is not known yet (None). The owner's own
-    /// deletes (OWNER_WHYS) and the rules whose reason holds for good (FOR_GOOD_WHYS) count as
-    /// delivered whatever footage is kept.
-    pub fn buried_older(tomb: &Value, kept: Kept) -> Option<bool> {
-        if tomb.get("why").and_then(|w| w.as_str()).is_some_and(|w| OWNER_WHYS.contains(&w) || FOR_GOOD_WHYS.contains(&w)) {
+    /// Whether a tombstone's log `name` counts as delivered for good (Some(true)), may be sent
+    /// again (Some(false): its time has footage), or is not known yet (None). The owner's own
+    /// deletes (OWNER_WHYS) count as delivered whatever footage is kept. The rules whose reason
+    /// holds for good (FOR_GOOD_WHYS) count as delivered while no clip the car keeps (`starts`,
+    /// None while not known) covers the log's first minute: the least a log runs, so a log the
+    /// rule found linked to nothing is never found covered by the same clips (that would send
+    /// it again, every time), while a clip of its time that turned up since asks for it again.
+    /// The others go by the oldest footage kept.
+    /// (`starts` is asked only for those rules.)
+    pub fn buried_older(name: &str, tomb: &Value, kept: Kept, starts: impl FnOnce() -> Option<Arc<Vec<f64>>>) -> Option<bool> {
+        let why = tomb.get("why").and_then(|w| w.as_str());
+        if why.is_some_and(|w| OWNER_WHYS.contains(&w)) {
             return Some(true);
+        }
+        if why.is_some_and(|w| FOR_GOOD_WHYS.contains(&w)) {
+            let from = parse_name(name).map(|n| n.started_at as f64)?;
+            return starts().map(|s| !super::prune::overlaps(&s, from, from + super::prune::LOG_MIN_MS));
         }
         let end = tomb.get("end").and_then(|x| x.as_f64()).unwrap_or(f64::INFINITY);
         Self::older_than_footage(kept, end)
@@ -374,7 +402,8 @@ impl CanLogs {
                 }
                 // (worked out once per car key, and only when one of its names was deleted here)
                 let mut kept = None;
-                for (tomb, (_, asked_as)) in tombs.into_iter().zip(list) {
+                let mut starts: Option<Option<Arc<Vec<f64>>>> = None;
+                for (tomb, (log, asked_as)) in tombs.into_iter().zip(list) {
                     let e = match tomb {
                         Buried::No => continue,
                         // deleted before tombstones were kept, and not worked out yet (just after
@@ -385,7 +414,7 @@ impl CanLogs {
                         }
                         Buried::Tomb(tomb) => {
                             let k = *kept.get_or_insert_with(|| self.kept(&key));
-                            Self::buried_json(&tomb, asked_as.ends_with(".json"), k)
+                            Self::buried_json(&log, &tomb, asked_as.ends_with(".json"), k, || starts.get_or_insert_with(|| self.starts(&key)).clone())
                         }
                     };
                     if let Some(e) = e {
@@ -426,7 +455,8 @@ impl CanLogs {
 
     /// The status entry of a name not here whose log was deleted here on purpose (None:
     /// `missing`, send it). A log the owner deleted (by name or with its footage), one a rule
-    /// deleted for good (not linked to footage, or its footage deleted for good), or one older
+    /// deleted for good (not linked to footage, or its footage deleted for good) while no clip
+    /// kept covers it, or one older
     /// than all the footage its car keeps (see `buried_older`), counts as delivered:
     /// `complete` with the size it had and the check it had (or its re-upload got, see
     /// `CanTrust::rebury`). Its sidecar answers the same with the sidecar's size, when known
@@ -434,8 +464,8 @@ impl CanLogs {
     /// guess). While the footage is not known it is `complete` and `pending` (ask again later).
     /// A check that was never made (`pending`) answers `missing`: the bridge sends it again,
     /// and that copy is checked and dropped again (see `Can::judge`).
-    fn buried_json(tomb: &Value, sidecar: bool, kept: Kept) -> Option<Value> {
-        let older = Self::buried_older(tomb, kept);
+    fn buried_json(log: &str, tomb: &Value, sidecar: bool, kept: Kept, starts: impl FnOnce() -> Option<Arc<Vec<f64>>>) -> Option<Value> {
+        let older = Self::buried_older(log, tomb, kept, starts);
         if older == Some(false) {
             return None;
         }

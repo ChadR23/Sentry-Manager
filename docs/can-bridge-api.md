@@ -405,19 +405,29 @@ chain and marked `lost`, never tombstoned.
 For a name with a tombstone and no file here, `status` answers:
 
 - **deleted by the owner** (by name in the Nerd settings, or with its
-  footage: "Also delete its CAN data"), or **by a rule whose reason holds
-  for good** (*Keeping logs*: not linked to footage after N days, or with its
-  footage deleted for good): never asked for again, whatever footage the car
-  keeps: `complete`, with the size it had (`received`, `length` and `size`)
-  and its `check`: `verified` counts as delivered (the bridge may delete its
-  copy); `failed` with its `check_reason` (the bridge keeps it and lists it;
-  only a *Resend all* sends it again, see below). A check that was never
-  made answers `missing`. Its sidecar answers the same, with the sidecar's
-  size (`missing` when its size is not known). (A log not linked to footage
-  that was sent again would be kept, still linked to nothing, and deleted
-  again by the same rule N days later, every time; footage deleted for good
-  never comes back. Before this version these went by the footage kept, as
-  below, and answered `missing` inside it);
+  footage: "Also delete its CAN data"): never asked for again, whatever
+  footage the car keeps: `complete`, with the size it had (`received`,
+  `length` and `size`) and its `check`: `verified` counts as delivered (the
+  bridge may delete its copy); `failed` with its `check_reason` (the bridge
+  keeps it and lists it; only a *Resend all* sends it again, see below). A
+  check that was never made answers `missing`. Its sidecar answers the same,
+  with the sidecar's size (`missing` when its size is not known);
+- **deleted by a rule that goes by the clips kept** (*Keeping logs*: not
+  linked to footage after N days, or with its footage deleted for good):
+  both delete a log no clip the car keeps covers (its clips on the share,
+  in the Recycle Bin and protected, as the rules link logs), so they go by
+  those clips:
+  - while still **no clip covers the log's first minute**: `complete`, as
+    above, never asked for again. (Sent again, it would be kept, still
+    linked to nothing, and deleted again by the same rule N days later,
+    every time. Before this version these answered `missing` inside the
+    footage kept.) The first minute is the least a log runs, so a log the
+    rule found linked to nothing is never found covered by the same clips;
+  - once a clip **covers it** (clips that came late, or the car's time zone
+    set right): `missing`, so the bridge may send it again. It is then
+    stored and checked as a new log, and its tombstone goes;
+  - while the clips cannot be told (as below): `complete` with
+    `check: pending`; ask again;
 - **deleted by a rule that goes by the footage kept** (*Keeping logs*:
   older than the car's oldest footage; and the tombstones worked out for
   logs deleted before this update, below, whose rule is not known): by the
@@ -733,8 +743,8 @@ logs with their footage" (Nerd settings, *Keeping logs*; on by default):
   the Nerd settings is (the file and sidecar, its minutes in the index, the
   sync, its trust record kept as deleted for the chain, and a tombstone so
   the bridge is not asked for it again (a log not linked to footage or with
-  its footage deleted for good: never; one older than the footage: while it
-  is older than the footage kept): see "Logs deleted here"; a log already gone gets none), with one audit line a
+  its footage deleted for good: while no clip kept covers it; one older than
+  the footage: while it is older than the footage kept): see "Logs deleted here"; a log already gone gets none), with one audit line a
   run ("CAN logs deleted (car …): N (… with their footage deleted, … older
   than the car's oldest footage, … not linked to footage after 7 days)").
 

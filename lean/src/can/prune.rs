@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 pub const CLIP_MS: f64 = 62_000.0;
-const LOG_MIN_MS: f64 = 60_000.0;
+pub const LOG_MIN_MS: f64 = 60_000.0;
 pub const LOG_MAX_MS: f64 = 10.0 * 60_000.0;
 pub const MARGIN_MS: f64 = 3_600_000.0;
 pub const BATCH: usize = 500;
@@ -104,11 +104,16 @@ pub struct CanPrune {
     /// the start of each car's oldest clip on the share (see `oldest_kept`), with the scan's
     /// generation and time zone it was worked out for
     oldest: Mutex<HashMap<String, ((u64, String), Option<f64>)>>,
+    /// every clip start each car keeps (see `kept_starts`), with the scan's generation, time
+    /// zone, Recycle Bin and protected clips it was worked out for
+    kept: Mutex<HashMap<String, (KeptSig, Arc<Vec<f64>>)>>,
 }
+
+type KeptSig = (u64, String, Vec<String>, Vec<String>);
 
 impl CanPrune {
     pub fn new(ctx: Arc<dyn CanCtx>, logs: Arc<CanLogs>, trust: Arc<CanTrust>, drop: Box<dyn Fn(&str, &str) + Send + Sync>, on_change: Box<dyn Fn(&str) + Send + Sync>) -> CanPrune {
-        CanPrune { ctx, logs, trust, drop, on_change, now: Box::new(super::util::now_ms), batch: BATCH, fresh_ms: FRESH_MS, soon_ms: 30_000.0, running: Mutex::new(HashMap::new()), timers: Mutex::new(HashMap::new()), covers: Mutex::new(HashMap::new()), oldest: Mutex::new(HashMap::new()) }
+        CanPrune { ctx, logs, trust, drop, on_change, now: Box::new(super::util::now_ms), batch: BATCH, fresh_ms: FRESH_MS, soon_ms: 30_000.0, running: Mutex::new(HashMap::new()), timers: Mutex::new(HashMap::new()), covers: Mutex::new(HashMap::new()), oldest: Mutex::new(HashMap::new()), kept: Mutex::new(HashMap::new()) }
     }
 
     // (a setting that cannot be read is an error here: nothing is deleted, nor written over, on a guess)
@@ -263,6 +268,36 @@ impl CanPrune {
         };
         let own = protected.iter().filter(|r| is_mp4(r)).filter_map(|rel| clip_start(v, rel)).fold(share, |o, t| Some(o.map_or(t, |o| o.min(t))));
         own.map_or(Kept::Nothing, Kept::Since)
+    }
+
+    /// Every clip start this car keeps, sorted: its clips on the share, in the Recycle Bin and
+    /// protected, what the rules link logs to (see `plan`). None while its footage cannot be
+    /// trusted or read.
+    /// Worked out again only when the scan result (its generation), the time zone, the Recycle
+    /// Bin or the protected clips change, so a status call never copies the file list.
+    pub fn kept_starts(&self, v: &Car) -> Option<Arc<Vec<f64>>> {
+        if self.untrusted(v).is_some() {
+            return None;
+        }
+        let bin: Vec<String> = self.ctx.bin_rels(&v.id).ok()?.into_iter().filter(|r| is_mp4(r)).collect();
+        let protected: Vec<String> = self.ctx.protected_rels(&v.id).ok()?.into_iter().filter(|r| is_mp4(r)).collect();
+        let generation = self.ctx.scan_generation(&v.id)?;
+        let sig: KeptSig = (generation, v.timezone.clone(), bin, protected);
+        if let Some((sg, starts)) = self.kept.lock().unwrap().get(&v.id) {
+            if *sg == sig {
+                return Some(starts.clone());
+            }
+        }
+        let s = self.ctx.scan_of(&v.id)?;
+        let mut set: HashSet<i64> = s.files.iter().filter(|f| f.kind == "clip").filter_map(|f| clip_start(v, &f.rel)).map(|t| t as i64).collect();
+        set.extend(sig.2.iter().chain(sig.3.iter()).filter_map(|rel| clip_start(v, rel)).map(|t| t as i64));
+        let mut out: Vec<f64> = set.into_iter().map(|x| x as f64).collect();
+        out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let out = Arc::new(out);
+        // (keyed by the generation of the scan read, not the one asked before it)
+        let sig = (s.generation, sig.1, sig.2, sig.3);
+        self.kept.lock().unwrap().insert(v.id.clone(), (sig, out.clone()));
+        Some(out)
     }
 
     /// pairing(key): name -> 'paired' | 'none' for one key's logs, or None (not mapped, or its car

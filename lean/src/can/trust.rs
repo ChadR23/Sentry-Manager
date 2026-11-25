@@ -910,7 +910,7 @@ impl CanTrust {
     }
 
     /// unbury(key, name): a deleted log sent again while its car still keeps footage of its
-    /// time (deleted by a rule that goes by the footage kept, see CanLogs::buried_older): kept as a new log from here on (its tombstone goes; it is judged as usual).
+    /// time (deleted by a rule, see CanLogs::buried_older): kept as a new log from here on (its tombstone goes; it is judged as usual).
     pub fn unbury(&self, key: &str, name: &str) -> bool {
         let tf = self.load(key);
         let mut t = tf.lock().unwrap();

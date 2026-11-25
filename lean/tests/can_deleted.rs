@@ -1,7 +1,7 @@
 //! CAN logs deleted here on purpose are not sent again (the owner's rule): each leaves a
-//! tombstone, `status` answers it as delivered (the owner's deletes and the rules that hold for
-//! good: always; the others while it is older than all the footage its car keeps, else
-//! missing), a copy sent again is checked and dropped again, logs deleted before
+//! tombstone, `status` answers it as delivered (the owner's deletes: always; the rules that
+//! delete logs linked to no clip: while no clip kept covers it; the others while it is older
+//! than all the footage its car keeps; else missing), a copy sent again is checked and dropped again, logs deleted before
 //! this server kept tombstones get theirs from trust.json, and logs from before the checks are
 //! judged in the background. Also: no stored file is hashed before `100 Continue`.
 
@@ -596,11 +596,11 @@ fn the_owners_own_deletes_are_never_asked_for_again_whatever_the_footage() {
 
 #[test]
 fn a_log_a_rule_deleted_for_good_answers_its_stored_check_whatever_the_footage() {
-    // footage of 14:00 kept: every log here is inside it. Deleted "not linked to footage"
-    // (sent again, it would be deleted again a week later, every time) or with its footage
-    // deleted for good: delivered for good, as the owner's own deletes
+    // footage from 13:50 kept: every log here is inside it, and no clip covers one. Deleted
+    // "not linked to footage" (sent again, it would be deleted again a week later, every time)
+    // or with its footage deleted for good: delivered for good, as the owner's own deletes
     let src = tmp("forgood-bridge");
-    let (can, ctx, dir) = area("forgood", &[clip(14, 0)]);
+    let (can, ctx, dir) = area("forgood", &[clip(13, 50)]);
     let mut b = Bridge::new(56);
     let f1 = buried_as(&can, &src, &mut b, 1, "unlinked");
     let f2 = buried_as(&can, &src, &mut b, 2, "footage");
@@ -627,15 +627,15 @@ fn a_log_a_rule_deleted_for_good_answers_its_stored_check_whatever_the_footage()
     for i in [4, 5, 6] {
         assert_eq!(f[&nm(i)], json!({ "state": "missing", "received": 0, "length": null, "size": 0 }), "{i}: {f}");
     }
-    // the car's footage not known: still its stored check (never pending), and one with no
-    // check made still missing; "old" asks again
+    // the car's footage not known (a clip of its time may be kept): pending, never delivered
+    // and never missing (one with no check made too, as the other rules: asked again later)
     ctx.settings.lock().unwrap().insert("can-vehicles".into(), json!({ KEY: "a-removed-car" }));
     assert_eq!(can.kept_footage(KEY), Kept::Unknown);
+    assert_eq!(can.kept_starts(KEY), None);
     let f = ask(&can.logs, &[nm(1), nm(3), nm(4), nm(5)]);
-    assert_eq!(f[&nm(1)]["check"], "verified", "{f}");
-    assert_eq!(f[&nm(3)]["check"], "failed", "{f}");
-    assert_eq!(f[&nm(4)]["check"], "pending", "{f}");
-    assert_eq!(f[&nm(5)]["state"], "missing", "{f}");
+    for i in [1, 3, 4, 5] {
+        assert_eq!((f[&nm(i)]["state"].as_str(), f[&nm(i)]["check"].as_str()), (Some("complete"), Some("pending")), "{i}: {f}");
+    }
     ctx.settings.lock().unwrap().insert("can-vehicles".into(), json!({ KEY: "car1" }));
     // another copy under a deleted name: refused, its tombstone as it was
     let tomb1 = can.trust.tomb(KEY, &nm(1)).unwrap();
@@ -664,6 +664,35 @@ fn a_log_a_rule_deleted_for_good_answers_its_stored_check_whatever_the_footage()
     assert_eq!(can.trust.summary(KEY)["counts"]["verified"], counted, "not counted again");
     assert!(ctx.logs.lock().unwrap().iter().any(|l| l.contains("deleted here, not linked to footage") && l.contains("deleted again")), "{:?}", ctx.logs.lock().unwrap());
     assert!(ctx.logs.lock().unwrap().iter().any(|l| l.contains("its footage deleted for good")), "{:?}", ctx.logs.lock().unwrap());
+}
+
+#[test]
+fn a_log_a_rule_deleted_for_good_is_asked_for_again_once_a_clip_kept_covers_it() {
+    // clips of 14:00 (late, or read in the car's zone set right since): logs 0 (14:00) and 1
+    // (14:01, the 14:00 clip runs past 14:01) are covered now; log 3 (14:03) still is not
+    let src = tmp("covered-bridge");
+    let (can, ctx, dir) = area("covered", &[clip(13, 50), clip(14, 0)]);
+    let mut b = Bridge::new(57);
+    let f0 = buried_as(&can, &src, &mut b, 0, "unlinked");
+    let f1 = buried_as(&can, &src, &mut b, 1, "footage");
+    buried_as(&can, &src, &mut b, 3, "unlinked");
+    let f = ask(&can.logs, &[nm(0), side(&nm(0)), nm(1), nm(3)]);
+    let missing = json!({ "state": "missing", "received": 0, "length": null, "size": 0 });
+    assert_eq!((&f[&nm(0)], &f[&side(&nm(0))], &f[&nm(1)]), (&missing, &missing, &missing), "{f}");
+    assert_eq!(f[&nm(3)]["check"], "verified", "{f}");
+    // sent again: kept as a new log (its tombstone goes), never verified and deleted
+    for (i, files) in [(0, &f0), (1, &f1)] {
+        send(&can.logs, &nm(i), &files.0).unwrap();
+        send(&can.logs, &side(&nm(i)), &files.1).unwrap();
+    }
+    can.backfill(4, Duration::ZERO);
+    for i in [0, 1] {
+        assert!(dir.join(KEY).join(nm(i)).exists() && dir.join(KEY).join(side(&nm(i))).exists(), "kept: {i}");
+        assert!(can.trust.tomb(KEY, &nm(i)).is_none(), "its tombstone goes: {i}");
+    }
+    let f = ask(&can.logs, &[nm(0), nm(1)]);
+    assert_eq!((f[&nm(0)]["check"].as_str(), f[&nm(1)]["check"].as_str()), (Some("verified"), Some("verified")), "{f}");
+    assert!(ctx.logs.lock().unwrap().iter().any(|l| l.contains("kept as a new log")), "{:?}", ctx.logs.lock().unwrap());
 }
 
 #[test]
