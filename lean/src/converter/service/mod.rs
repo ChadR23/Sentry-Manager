@@ -1628,3 +1628,69 @@ mod alongside_tests {
         assert!(r5, "an unrelated folder still runs alongside");
     }
 }
+
+#[cfg(test)]
+mod rc3_alongside_tests {
+    use super::Service;
+    use serde_json::json;
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::path::Path;
+
+    fn cfg(root: &Path, device: &str) -> serde_json::Value {
+        json!({ "sourceRoot": root, "autoConvert": true, "lanes": [{ "device": device }] })
+    }
+    fn mnt(args: &[&OsStr]) -> bool {
+        std::process::Command::new("mount").args(args).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+    }
+    fn um(p: &Path) {
+        let _ = std::process::Command::new("umount").arg(p).status();
+    }
+
+    #[test]
+    fn rc3_a_job_through_a_hidden_mount_point_overlaps_a_job_above_the_bind_point() {
+        let tmp = crate::converter::testutil::tempdir().unwrap();
+        let real = tmp.path().join("real/TeslaCam");
+        fs::create_dir_all(real.join("SentryClips/evt")).unwrap();
+        let share = tmp.path().join("share/TeslaCam");
+        fs::create_dir_all(share.join("SentryClips")).unwrap();
+        let view = tmp.path().join("view");
+        fs::create_dir_all(view.join("SentryClips")).unwrap();
+        if !mnt(&[OsStr::new("-t"), OsStr::new("tmpfs"), OsStr::new("t"), share.join("SentryClips").as_os_str()]) {
+            eprintln!("skipped: needs root");
+            return;
+        }
+        assert!(mnt(&[OsStr::new("--bind"), real.as_os_str(), share.as_os_str()]));
+        assert!(mnt(&[OsStr::new("--bind"), real.join("SentryClips").as_os_str(), view.join("SentryClips").as_os_str()]));
+        let seen = share.join("SentryClips/evt").exists();
+        let running = |root: &Path| json!({ "config": cfg(root, "gpu0"), "state": "running" });
+        // share/TeslaCam/SentryClips is real/TeslaCam/SentryClips, which view/SentryClips also is
+        let r1 = Service::may_run_alongside(&cfg(&share.join("SentryClips"), "cpu"), &[running(&view)]);
+        let r2 = Service::may_run_alongside(&cfg(&view, "cpu"), &[running(&share.join("SentryClips"))]);
+        um(&view.join("SentryClips"));
+        um(&share);
+        um(&share.join("SentryClips"));
+        assert!(seen);
+        assert!(!r1 && !r2, "two jobs over the same clips: r1={r1} r2={r2}");
+    }
+
+    #[test]
+    fn rc3_probe_overlayfs_lower_and_merged() {
+        let tmp = crate::converter::testutil::tempdir().unwrap();
+        let lower = tmp.path().join("lower/TeslaCam");
+        fs::create_dir_all(lower.join("SentryClips/evt")).unwrap();
+        let (up, work, merged) = (tmp.path().join("up"), tmp.path().join("work"), tmp.path().join("merged"));
+        for d in [&up, &work, &merged] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let o = format!("lowerdir={},upperdir={},workdir={}", tmp.path().join("lower").display(), up.display(), work.display());
+        if !mnt(&[OsStr::new("-t"), OsStr::new("overlay"), OsStr::new("ov"), OsStr::new("-o"), OsStr::new(&o), merged.as_os_str()]) {
+            eprintln!("skipped: no overlay");
+            return;
+        }
+        let running = |root: &Path| json!({ "config": cfg(root, "gpu0"), "state": "running" });
+        let r = Service::may_run_alongside(&cfg(&merged.join("TeslaCam"), "cpu"), &[running(&lower)]);
+        um(&merged);
+        eprintln!("rc3 probe overlay: may_run_alongside(merged, lower) = {r}");
+    }
+}

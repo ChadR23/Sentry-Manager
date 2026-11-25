@@ -824,3 +824,136 @@ fn a_job_of_the_real_folder_owns_it_through_a_bind_mount_point_below() {
     assert!(matches!(outcome(&r, &format!("BACKUP-{A}")), Outcome::Removed), "{:?}", outcome(&r, &format!("BACKUP-{A}")));
     assert_eq!(fs::metadata(&x).unwrap().nlink(), 1, "the second name went");
 }
+
+// ---- rc3 attacks: mounts listed in /proc/self/mountinfo that are hidden
+
+fn rc3_mount(args: &[&std::ffi::OsStr]) -> bool {
+    std::process::Command::new("mount").args(args).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+}
+/// umounts each path in order on drop
+struct Rc3Um(Vec<PathBuf>);
+impl Drop for Rc3Um {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::process::Command::new("umount").arg(p).status();
+        }
+    }
+}
+
+fn rc3_tidy_via(e: &Env, store: &JobStore, root: &Path, via: &Path) -> Vec<(String, Outcome)> {
+    let f = found(via);
+    let owners = || owners_of(store, None);
+    tidy_folder(&Tidy { tx: &e.tx, bin: None, verify: e.verify.as_deref(), owners: &owners }, &Folder { real_root: root, dir: via, real_dir: via, found: &f })
+}
+
+#[test]
+fn rc3_a_tidy_through_a_path_whose_deeper_mount_is_hidden_keeps_a_job_above_the_bind_point() {
+    use std::ffi::OsStr;
+    let e = env();
+    let tmp = e.root.parent().unwrap().to_path_buf();
+    let jobs = tmp.join("rc3jobs");
+    fs::create_dir_all(&jobs).unwrap();
+    let store = JobStore::new(&jobs).unwrap();
+    // share/TeslaCam: a tmpfs at share/TeslaCam/SentryClips first, then the real TeslaCam bound
+    // over share/TeslaCam (hiding the tmpfs, still listed in mountinfo with the longer mount point)
+    let share = tmp.join("share/TeslaCam");
+    fs::create_dir_all(share.join("SentryClips")).unwrap();
+    let view = tmp.join("view");
+    fs::create_dir_all(view.join("SentryClips")).unwrap();
+    let mut um = Rc3Um(vec![]);
+    if !rc3_mount(&[OsStr::new("-t"), OsStr::new("tmpfs"), OsStr::new("t"), share.join("SentryClips").as_os_str()]) {
+        eprintln!("skipped: needs root");
+        return;
+    }
+    um.0.insert(0, share.join("SentryClips"));
+    assert!(rc3_mount(&[OsStr::new("--bind"), e.root.as_os_str(), share.as_os_str()]));
+    um.0.insert(0, share.clone());
+    // only SentryClips bound under "view" (as in rc2)
+    assert!(rc3_mount(&[OsStr::new("--bind"), e.root.join("SentryClips").as_os_str(), view.join("SentryClips").as_os_str()]));
+    um.0.insert(0, view.join("SentryClips"));
+    let x = e.dir.join(A);
+    fs::write(&x, h264()).unwrap();
+    fs::hard_link(&x, e.dir.join(format!("BACKUP-{A}"))).unwrap();
+    let via = share.join("SentryClips/2026-08-30_20-53-04");
+    assert!(via.join(A).exists(), "the clip through share/TeslaCam");
+    let paused = job(&store, &view, "paused", vec![], vec![]);
+    let r = rc3_tidy_via(&e, &store, &share, &via);
+    let o = outcome(&r, &format!("BACKUP-{A}")).clone();
+    let nlink = fs::metadata(&x).unwrap().nlink();
+    drop(um);
+    assert_eq!(o, Outcome::Kept(format!("job {paused} still has files to settle in this folder")), "nlink now {nlink}");
+}
+
+#[test]
+fn rc3_a_tidy_through_a_moved_mount_listed_before_the_one_below_it_keeps_a_job_above_the_bind_point() {
+    use std::ffi::OsStr;
+    let e = env();
+    let tmp = e.root.parent().unwrap().to_path_buf();
+    let jobs = tmp.join("rc3jobs2");
+    fs::create_dir_all(&jobs).unwrap();
+    let store = JobStore::new(&jobs).unwrap();
+    // a bind of TeslaCam at y, then a tmpfs at x, then y moved onto x: on top, but listed first
+    let (xm, ym) = (tmp.join("x"), tmp.join("y"));
+    fs::create_dir_all(&xm).unwrap();
+    fs::create_dir_all(&ym).unwrap();
+    let view = tmp.join("view3");
+    fs::create_dir_all(view.join("SentryClips")).unwrap();
+    let mut um = Rc3Um(vec![]);
+    if !rc3_mount(&[OsStr::new("--bind"), e.root.as_os_str(), ym.as_os_str()]) {
+        eprintln!("skipped: needs root");
+        return;
+    }
+    um.0.push(ym.clone());
+    assert!(rc3_mount(&[OsStr::new("-t"), OsStr::new("tmpfs"), OsStr::new("t"), xm.as_os_str()]));
+    um.0 = vec![xm.clone(), ym.clone()];
+    assert!(rc3_mount(&[OsStr::new("--move"), ym.as_os_str(), xm.as_os_str()]));
+    um.0 = vec![xm.clone(), xm.clone()];
+    assert!(rc3_mount(&[OsStr::new("--bind"), e.root.join("SentryClips").as_os_str(), view.join("SentryClips").as_os_str()]));
+    um.0.insert(0, view.join("SentryClips"));
+    let x = e.dir.join(A);
+    fs::write(&x, h264()).unwrap();
+    fs::hard_link(&x, e.dir.join(format!("BACKUP-{A}"))).unwrap();
+    let via = xm.join("SentryClips/2026-08-30_20-53-04");
+    assert!(via.join(A).exists(), "the clip through x");
+    let paused = job(&store, &view, "paused", vec![], vec![]);
+    let r = rc3_tidy_via(&e, &store, &xm, &via);
+    let o = outcome(&r, &format!("BACKUP-{A}")).clone();
+    let nlink = fs::metadata(&x).unwrap().nlink();
+    drop(um);
+    assert_eq!(o, Outcome::Kept(format!("job {paused} still has files to settle in this folder")), "nlink now {nlink}");
+}
+
+#[test]
+fn rc3_spaces_and_recursive_binds_keep_a_job_above_the_bind_point() {
+    use std::ffi::OsStr;
+    let e = env();
+    let tmp = e.root.parent().unwrap().to_path_buf();
+    let jobs = tmp.join("rc3jobs3");
+    fs::create_dir_all(&jobs).unwrap();
+    let store = JobStore::new(&jobs).unwrap();
+    // the event folder's files really live in "else where/evt", bound at TeslaCam/SentryClips/<event>;
+    // TeslaCam/SentryClips is rbind-mounted under "my view\tx\\y"
+    let elsewhere = tmp.join("else where/evt");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let view = tmp.join("my view\tx\\y");
+    fs::create_dir_all(view.join("SentryClips")).unwrap();
+    let mut um = Rc3Um(vec![]);
+    if !rc3_mount(&[OsStr::new("--bind"), elsewhere.as_os_str(), e.dir.as_os_str()]) {
+        eprintln!("skipped: needs root");
+        return;
+    }
+    um.0.push(e.dir.clone());
+    assert!(rc3_mount(&[OsStr::new("--rbind"), e.root.join("SentryClips").as_os_str(), view.join("SentryClips").as_os_str()]));
+    um.0.insert(0, view.join("SentryClips/2026-08-30_20-53-04"));
+    um.0.insert(1, view.join("SentryClips"));
+    let x = elsewhere.join(A);
+    fs::write(&x, h264()).unwrap();
+    fs::hard_link(&x, elsewhere.join(format!("BACKUP-{A}"))).unwrap();
+    let paused = job(&store, &view, "paused", vec![], vec![]);
+    // tidy through the folder that really holds the files
+    let r = rc3_tidy_via(&e, &store, &tmp.join("else where"), &elsewhere);
+    let o = outcome(&r, &format!("BACKUP-{A}")).clone();
+    drop(um);
+    assert_eq!(o, Outcome::Kept(format!("job {paused} still has files to settle in this folder")));
+    assert_eq!(fs::metadata(&x).unwrap().nlink(), 2);
+}
