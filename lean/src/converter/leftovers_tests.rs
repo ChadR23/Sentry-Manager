@@ -957,3 +957,76 @@ fn rc3_spaces_and_recursive_binds_keep_a_job_above_the_bind_point() {
     assert_eq!(o, Outcome::Kept(format!("job {paused} still has files to settle in this folder")));
     assert_eq!(fs::metadata(&x).unwrap().nlink(), 2);
 }
+
+// ---- the same layouts on a kernel without mount ids (placed by the mountinfo parent chain)
+
+#[test]
+fn by_parent_chain_a_job_of_the_real_folder_owns_it_through_a_bind_mount_point_below() {
+    crate::converter::mount_place::with_parent_chain(a_job_of_the_real_folder_owns_it_through_a_bind_mount_point_below);
+}
+
+#[test]
+fn by_parent_chain_a_tidy_through_a_path_whose_deeper_mount_is_hidden_keeps_a_job_above_the_bind_point() {
+    crate::converter::mount_place::with_parent_chain(rc3_a_tidy_through_a_path_whose_deeper_mount_is_hidden_keeps_a_job_above_the_bind_point);
+}
+
+#[test]
+fn by_parent_chain_a_tidy_through_a_moved_mount_listed_before_the_one_below_it_keeps_a_job_above_the_bind_point() {
+    crate::converter::mount_place::with_parent_chain(rc3_a_tidy_through_a_moved_mount_listed_before_the_one_below_it_keeps_a_job_above_the_bind_point);
+}
+
+#[test]
+fn by_parent_chain_spaces_and_recursive_binds_keep_a_job_above_the_bind_point() {
+    crate::converter::mount_place::with_parent_chain(rc3_spaces_and_recursive_binds_keep_a_job_above_the_bind_point);
+}
+
+// ---- an overlay: its merged folder and its lower folder are one set of files on two devices
+
+fn overlay_tidy_keeps_across_merged_and_lower() {
+    use std::ffi::OsStr;
+    let e = env();
+    let tmp = e.root.parent().unwrap().to_path_buf();
+    let x = e.dir.join(A);
+    fs::write(&x, h264()).unwrap();
+    fs::hard_link(&x, e.dir.join(format!("BACKUP-{A}"))).unwrap();
+    let (up, work, merged) = (tmp.join("ovup"), tmp.join("ovwork"), tmp.join("ovmerged"));
+    for d in [&up, &work, &merged] {
+        fs::create_dir_all(d).unwrap();
+    }
+    let o = format!("lowerdir={},upperdir={},workdir={}", e.root.display(), up.display(), work.display());
+    if !rc3_mount(&[OsStr::new("-t"), OsStr::new("overlay"), OsStr::new("ov"), OsStr::new("-o"), OsStr::new(&o), merged.as_os_str()]) {
+        eprintln!("skipped: no overlay (or not root)");
+        return;
+    }
+    let um = Rc3Um(vec![merged.clone()]);
+    let rel = e.dir.strip_prefix(&e.root).unwrap().to_path_buf();
+    // a paused job on the lower folder; the tidy goes through the merged folder
+    let jobs = tmp.join("ovjobs");
+    fs::create_dir_all(&jobs).unwrap();
+    let store = JobStore::new(&jobs).unwrap();
+    let paused = job(&store, &e.root, "paused", vec![], vec![]);
+    let via = merged.join(&rel);
+    let seen = via.join(A).exists();
+    let r1 = rc3_tidy_via(&e, &store, &merged, &via);
+    // a paused job on the merged folder; the tidy goes through the lower folder
+    let jobs2 = tmp.join("ovjobs2");
+    fs::create_dir_all(&jobs2).unwrap();
+    let store2 = JobStore::new(&jobs2).unwrap();
+    let paused2 = job(&store2, &merged, "paused", vec![], vec![]);
+    let r2 = rc3_tidy_via(&e, &store2, &e.root, &e.dir);
+    drop(um);
+    assert!(seen, "the clip through the merged folder");
+    assert_eq!(kept_why(&r1, &format!("BACKUP-{A}")), format!("this folder is on a merged or network mount and cannot be told apart from job {paused}'s folder"));
+    assert_eq!(kept_why(&r2, &format!("BACKUP-{A}")), format!("job {paused2}'s folder is on a merged or network mount and cannot be told apart from this folder"));
+    assert_eq!(fs::metadata(&x).unwrap().nlink(), 2, "both names kept");
+}
+
+#[test]
+fn a_tidy_keeps_a_leftover_an_overlay_and_its_lower_folder_share() {
+    overlay_tidy_keeps_across_merged_and_lower();
+}
+
+#[test]
+fn by_parent_chain_a_tidy_keeps_a_leftover_an_overlay_and_its_lower_folder_share() {
+    crate::converter::mount_place::with_parent_chain(overlay_tidy_keeps_across_merged_and_lower);
+}

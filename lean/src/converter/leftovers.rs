@@ -345,6 +345,15 @@ impl Owners {
                         if super::mount_place::holds(ps, h) {
                             return Some(format!("job {id} still has files to settle in this folder"));
                         }
+                        // (another device that may show the same files: an overlay, a FUSE
+                        // union or a network share of them, which paths cannot compare)
+                        if let Some(o) = ps.iter().find(|o| super::mount_place::cannot_tell(o, h)) {
+                            return Some(if o.opaque {
+                                format!("job {id}'s folder is on a merged or network mount and cannot be told apart from this folder")
+                            } else {
+                                format!("this folder is on a merged or network mount and cannot be told apart from job {id}'s folder")
+                            });
+                        }
                     }
                     _ => return Some(format!("job {id} still has files to settle in \"{root}\", which cannot be told apart from this folder now")),
                 }

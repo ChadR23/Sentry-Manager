@@ -1627,6 +1627,15 @@ mod alongside_tests {
         assert!(!r4, "the real subfolder inside the folder above the bind mount point");
         assert!(r5, "an unrelated folder still runs alongside");
     }
+    #[test]
+    fn by_parent_chain_jobs_of_one_folder_through_two_mount_points_never_run_alongside() {
+        crate::converter::mount_place::with_parent_chain(jobs_of_one_folder_through_two_mount_points_never_run_alongside);
+    }
+
+    #[test]
+    fn by_parent_chain_a_job_above_a_bind_mount_point_overlaps() {
+        crate::converter::mount_place::with_parent_chain(a_job_above_a_bind_mount_point_overlaps);
+    }
 }
 
 #[cfg(test)]
@@ -1690,7 +1699,18 @@ mod rc3_alongside_tests {
         }
         let running = |root: &Path| json!({ "config": cfg(root, "gpu0"), "state": "running" });
         let r = Service::may_run_alongside(&cfg(&merged.join("TeslaCam"), "cpu"), &[running(&lower)]);
+        let r2 = Service::may_run_alongside(&cfg(&lower.join("SentryClips"), "cpu"), &[running(&merged.join("TeslaCam"))]);
         um(&merged);
-        eprintln!("rc3 probe overlay: may_run_alongside(merged, lower) = {r}");
+        assert!(!r && !r2, "an overlay and its lower folder are one set of files: {r} {r2}");
+    }
+
+    #[test]
+    fn by_parent_chain_a_job_through_a_hidden_mount_point_overlaps_a_job_above_the_bind_point() {
+        crate::converter::mount_place::with_parent_chain(rc3_a_job_through_a_hidden_mount_point_overlaps_a_job_above_the_bind_point);
+    }
+
+    #[test]
+    fn by_parent_chain_an_overlay_and_its_lower_folder_overlap() {
+        crate::converter::mount_place::with_parent_chain(rc3_probe_overlayfs_lower_and_merged);
     }
 }
