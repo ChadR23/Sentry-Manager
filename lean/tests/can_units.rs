@@ -7,7 +7,7 @@
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 
 use sentry_lean::can::json::stringify;
-use sentry_lean::can::logs::{parse_name, CanLogs, Row};
+use sentry_lean::can::logs::{parse_name, CanLogs, Row, SideFacts};
 use sentry_lean::can::trust::{base64, fingerprint_of, signed_message, CanTrust, Half};
 use sentry_lean::can::{prune, reader, search, sentry_usb, tz, util};
 use serde_json::{json, Value};
@@ -259,6 +259,16 @@ fn logs_spans_and_footage_overlap() {
     assert!(prune::overlaps(&[t0 - 61_000.0], t0, t0 + 60_000.0), "a clip a minute before reaches into it");
     assert!(!prune::overlaps(&[t0 - 62_000.0], t0, t0 + 60_000.0));
     assert!(!prune::overlaps(&[t0 + 60_000.0], t0, t0 + 60_000.0));
+    // the newest: to the end its own sidecar gives, one to ten minutes
+    let t3 = tz::utc_ms(2026, 11, 8, 14, 30, 0) as f64;
+    for (end, len) in [(Some(t3 + 8.0 * 60_000.0), 480_000.0), (Some(t3 + 10_000.0), 60_000.0), (Some(t3 - 3_600_000.0), 60_000.0), (Some(t3 + 86_400_000.0), 600_000.0), (None, 60_000.0)] {
+        let mut rows = rows.clone();
+        rows[2].side = Some(SideFacts { end, ..Default::default() });
+        rows[0].side = Some(SideFacts { end: Some(t0 + 600_000.0), ..Default::default() });
+        let s = prune::spans(&rows);
+        assert_eq!(s[2].to - s[2].from, len, "{end:?}");
+        assert_eq!(s[0].to - s[0].from, 60_000.0, "the next log's start, not its own end");
+    }
 }
 
 #[test]

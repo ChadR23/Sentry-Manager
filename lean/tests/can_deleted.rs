@@ -872,3 +872,56 @@ fn a_log_deleted_as_unlinked_is_asked_for_again_once_a_clip_covers_any_minute_of
     assert_eq!(t0["linkedTo"].as_f64(), Some(at(1)), "{t0}");
     assert_eq!(ask(&can.logs, &[nm(0)])[&nm(0)]["check"], "verified");
 }
+// ---- review (rc2)
+
+#[test]
+fn rc2_the_newest_log_whose_own_sidecar_says_a_kept_clip_covers_it_is_not_answered_delivered() {
+    // one log, 14:00 to 14:09 by its own sidecar, the newest of its key; a clip of 14:05 is kept
+    let src = tmp("rc2-last-bridge");
+    let (can, _ctx, dir) = area("rc2-last", &[clip(13, 0), clip(14, 5)]);
+    _ctx.settings.lock().unwrap().insert("can-keep".into(), json!({ "withFootage": false, "deleteUnlinked": true, "unlinkedDays": 0 }));
+    let mut b = Bridge::new(71);
+    b.end = Some(at(9) - 1_000.0);
+    uploaded(&can, &src, &mut b, 0..1);
+    std::thread::sleep(Duration::from_millis(20));
+    let out = can.prune.check("car1").unwrap();
+    let gone = !dir.join(KEY).join(nm(0)).exists();
+    let f = ask(&can.logs, &[nm(0)]);
+    assert!(!(gone && f[&nm(0)]["check"] == "verified"), "a clip kept covers 14:05 of the log, yet it was deleted ({out}) and answers {f}: the bridge deletes its only copy");
+}
+
+
+#[test]
+fn rc2_a_tombstone_from_before_linked_to_answers_delivered_though_a_clip_covers_its_span() {
+    // as the running server (no linkedTo) wrote it: log 0 deleted as unlinked, the next log at 14:09
+    let src = tmp("rc2-old-bridge");
+    let (can, ctx, _dir) = area("rc2-old", &[clip(13, 0)]);
+    let mut b = Bridge::new(72);
+    let f0 = uploaded(&can, &src, &mut b, 0..1);
+    uploaded(&can, &src, &mut b, 9..10);
+    let _ = f0;
+    can.logs.delete_log(&nm(0), "unlinked").unwrap();
+    assert!(can.trust.tomb(KEY, &nm(0)).unwrap().get("linkedTo").is_none());
+    assert_eq!(ask(&can.logs, &[nm(0)])[&nm(0)]["check"], "verified", "no clip covers 14:00 to 14:09 yet");
+    ctx.clips.lock().unwrap().push(clip(14, 5));
+    let f = ask(&can.logs, &[nm(0)]);
+    assert_eq!(f[&nm(0)]["state"], "missing", "the next log (14:09) is still here, a clip of 14:05 is kept: {f}");
+}
+
+#[test]
+fn rc2_bad_linked_to_values_fall_back_to_the_first_minute() {
+    let starts = || Some(Arc::new(vec![at(5)]));
+    for bad in [json!("x"), json!(null), json!(-1), json!(at(0)), json!(at(0) - 60_000.0), json!(at(0) + 11.0 * 60_000.0), json!(1e308), json!({"a":1}), json!([at(9)])] {
+        let tomb = json!({ "size": 5, "check": "verified", "why": "unlinked", "end": at(10), "linkedTo": bad });
+        assert_eq!(CanLogs::buried_older(&nm(0), &tomb, Kept::Since(at(5)), starts, || Arc::new(vec![])), Some(true), "{bad}");
+    }
+    let good = json!({ "size": 5, "check": "verified", "why": "unlinked", "end": at(10), "linkedTo": at(9) });
+    assert_eq!(CanLogs::buried_older(&nm(0), &good, Kept::Since(at(5)), starts, || Arc::new(vec![])), Some(false));
+    // without linkedTo: to the next log trust.json knows, one to ten minutes
+    let old = json!({ "size": 5, "check": "verified", "why": "unlinked", "end": at(10) });
+    for (names, delivered) in [(vec![], true), (vec![at(0), at(9)], false), (vec![at(0), at(3), at(9)], true), (vec![at(0) - 60_000.0, at(0), at(0) + 30_000.0], true), (vec![at(0), at(0) + 20.0 * 60_000.0], false)] {
+        assert_eq!(CanLogs::buried_older(&nm(0), &old, Kept::Since(at(5)), starts, || Arc::new(names.clone())), Some(delivered), "{names:?}");
+    }
+    // (never asked for while linkedTo is there)
+    assert_eq!(CanLogs::buried_older(&nm(0), &good, Kept::Since(at(5)), starts, || panic!("names asked for")), Some(false));
+}

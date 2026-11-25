@@ -42,7 +42,9 @@ pub struct Span {
     pub to: f64,
 }
 
-/// Each log's [from, to): its start, to the next log of its key (one to ten minutes).
+/// Each log's [from, to): its start, to the next log of its key; the newest, to the end its
+/// own sidecar gives (one to ten minutes either way: a bridge clock set wrong moves it no
+/// further).
 pub fn spans(rows: &[Row]) -> Vec<Span> {
     let mut sorted: Vec<Row> = rows.to_vec();
     sorted.sort_by(|a, b| a.started_at_ms.cmp(&b.started_at_ms).then(a.seq.cmp(&b.seq)));
@@ -52,7 +54,7 @@ pub fn spans(rows: &[Row]) -> Vec<Span> {
         let next = sorted[i + 1..].iter().find(|x| x.started_at_ms > r.started_at_ms);
         let len = match next {
             Some(nx) => LOG_MAX_MS.min(LOG_MIN_MS.max((nx.started_at_ms - r.started_at_ms) as f64)),
-            None => LOG_MIN_MS,
+            None => LOG_MAX_MS.min(LOG_MIN_MS.max(r.side.as_ref().and_then(|x| x.end).map_or(0.0, |e| e - r.started_at_ms as f64))),
         };
         out.push(Span { row: r.clone(), from: r.started_at_ms as f64, to: r.started_at_ms as f64 + len });
     }

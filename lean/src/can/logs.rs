@@ -141,7 +141,8 @@ fn with_received(mut e: CanError, r: f64) -> CanError {
     e
 }
 
-/// sideFacts: what the Nerd panel shows of a sidecar.
+/// sideFacts: what the Nerd panel shows of a sidecar, and when it says the log ended (for
+/// the newest log of its key, see `prune::spans`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SideFacts {
     pub frames: Option<f64>,
@@ -149,6 +150,7 @@ pub struct SideFacts {
     pub app_version: Option<String>,
     pub format: Option<String>,
     pub closed_because: Option<String>,
+    pub end: Option<f64>,
 }
 
 fn word_ok(s: &str, max: usize, extra: &[u8]) -> bool {
@@ -163,6 +165,7 @@ pub fn side_facts(side: &Value) -> SideFacts {
         app_version: ["app_version", "appVersion"].iter().find_map(|k| side.get(*k).and_then(|v| v.as_str())).map(|s| util::utf16_slice(s, 40)),
         format: side.get("format").and_then(|v| v.as_str()).filter(|s| word_ok(s, 64, b"./-")).map(String::from),
         closed_because: side.get("closed_because").and_then(|v| v.as_str()).filter(|s| word_ok(s, 20, b"-")).map(String::from),
+        end: log_end(side),
     }
 }
 
@@ -264,6 +267,11 @@ impl CanLogs {
         self.starts.get().map_or_else(|| Some(Arc::new(Vec::new())), |f| f(key))
     }
 
+    /// The starts of every log of a car key trust.json knows (see `CanTrust::log_starts`).
+    pub fn log_starts(&self, key: &str) -> Arc<Vec<f64>> {
+        self.trust.get().map_or_else(|| Arc::new(Vec::new()), |t| t.log_starts(key))
+    }
+
 
     /// How a tombstone's log was deleted, for the server's log.
     pub fn buried_why(tomb: Option<&Value>) -> &'static str {
@@ -290,24 +298,27 @@ impl CanLogs {
     /// again (Some(false): its time has footage), or is not known yet (None). The owner's own
     /// deletes (OWNER_WHYS) count as delivered whatever footage is kept. The rules whose reason
     /// holds for good (FOR_GOOD_WHYS) count as delivered while no clip the car keeps (`starts`,
-    /// None while not known) covers the span the rule judged (to its tombstone's `linkedTo`; the
-    /// log's first minute, the least a log runs, for a tombstone without one): so a log the
+    /// None while not known) covers the span the rule judged (to its tombstone's `linkedTo`; for
+    /// a tombstone without one, written before it was kept, to the next log of its key among
+    /// `names` (every log name trust.json knows, sorted starts: at or before the next log the
+    /// rule saw, as every log received keeps its record), one to ten minutes, else the log's
+    /// first minute, the least a log runs): so a log the
     /// rule found linked to nothing is never found covered by the same clips (that would send
     /// it again, every time), while a clip of its time that turned up since asks for it again.
     /// The others go by the oldest footage kept.
     /// (`starts` is asked only for those rules.)
-    pub fn buried_older(name: &str, tomb: &Value, kept: Kept, starts: impl FnOnce() -> Option<Arc<Vec<f64>>>) -> Option<bool> {
+    pub fn buried_older(name: &str, tomb: &Value, kept: Kept, starts: impl FnOnce() -> Option<Arc<Vec<f64>>>, names: impl FnOnce() -> Arc<Vec<f64>>) -> Option<bool> {
         let why = tomb.get("why").and_then(|w| w.as_str());
         if why.is_some_and(|w| OWNER_WHYS.contains(&w)) {
             return Some(true);
         }
         if why.is_some_and(|w| FOR_GOOD_WHYS.contains(&w)) {
             let from = parse_name(name).map(|n| n.started_at as f64)?;
-            let to = tomb
-                .get("linkedTo")
-                .and_then(|x| x.as_f64())
-                .filter(|t| *t > from && *t <= from + super::prune::LOG_MAX_MS)
-                .unwrap_or(from + super::prune::LOG_MIN_MS);
+            let to = tomb.get("linkedTo").and_then(|x| x.as_f64()).filter(|t| *t > from && *t <= from + super::prune::LOG_MAX_MS).unwrap_or_else(|| {
+                let after = names();
+                let next = after.get(after.partition_point(|&s| s <= from)).copied();
+                from + next.map_or(super::prune::LOG_MIN_MS, |nx| super::prune::LOG_MAX_MS.min(super::prune::LOG_MIN_MS.max(nx - from)))
+            });
             return starts().map(|s| !super::prune::overlaps(&s, from, to));
         }
         let end = tomb.get("end").and_then(|x| x.as_f64()).unwrap_or(f64::INFINITY);
@@ -409,6 +420,7 @@ impl CanLogs {
                 // (worked out once per car key, and only when one of its names was deleted here)
                 let mut kept = None;
                 let mut starts: Option<Option<Arc<Vec<f64>>>> = None;
+                let mut names: Option<Arc<Vec<f64>>> = None;
                 for (tomb, (log, asked_as)) in tombs.into_iter().zip(list) {
                     let e = match tomb {
                         Buried::No => continue,
@@ -420,7 +432,7 @@ impl CanLogs {
                         }
                         Buried::Tomb(tomb) => {
                             let k = *kept.get_or_insert_with(|| self.kept(&key));
-                            Self::buried_json(&log, &tomb, asked_as.ends_with(".json"), k, || starts.get_or_insert_with(|| self.starts(&key)).clone())
+                            Self::buried_json(&log, &tomb, asked_as.ends_with(".json"), k, || starts.get_or_insert_with(|| self.starts(&key)).clone(), || names.get_or_insert_with(|| trust.log_starts(&key)).clone())
                         }
                     };
                     if let Some(e) = e {
@@ -470,8 +482,8 @@ impl CanLogs {
     /// guess). While the footage is not known it is `complete` and `pending` (ask again later).
     /// A check that was never made (`pending`) answers `missing`: the bridge sends it again,
     /// and that copy is checked and dropped again (see `Can::judge`).
-    fn buried_json(log: &str, tomb: &Value, sidecar: bool, kept: Kept, starts: impl FnOnce() -> Option<Arc<Vec<f64>>>) -> Option<Value> {
-        let older = Self::buried_older(log, tomb, kept, starts);
+    fn buried_json(log: &str, tomb: &Value, sidecar: bool, kept: Kept, starts: impl FnOnce() -> Option<Arc<Vec<f64>>>, names: impl FnOnce() -> Arc<Vec<f64>>) -> Option<Value> {
+        let older = Self::buried_older(log, tomb, kept, starts, names);
         if older == Some(false) {
             return None;
         }
@@ -899,8 +911,8 @@ impl CanLogs {
         self.delete_log_span(name, why, None)
     }
 
-    /// delete_log, by a rule that judged the log over its span up to `linked_to` (the next
-    /// log's start, as `prune::spans` goes): kept on its tombstone as `linkedTo`, so a clip
+    /// delete_log, by a rule that judged the log over its span up to `linked_to` (the end of
+    /// its span `prune::spans` gives): kept on its tombstone as `linkedTo`, so a clip
     /// that turns up anywhere in that span asks for it again (see `buried_older`).
     pub fn delete_log_span(&self, name: &str, why: &str, linked_to: Option<f64>) -> Result<(), CanError> {
         let nm = parse_name(name).filter(|n| !n.sidecar).ok_or_else(|| can_error(400, "bad_name", "That is not a CAN Bridge log name."))?;

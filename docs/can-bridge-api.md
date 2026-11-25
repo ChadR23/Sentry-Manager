@@ -418,8 +418,10 @@ For a name with a tombstone and no file here, `status` answers:
   in the Recycle Bin and protected, as the rules link logs), so they go by
   those clips:
   - while still **no clip covers the span the rule judged** (from the log's
-    start to the next log's start, 1 to 10 minutes, kept on its tombstone;
-    the log's first minute for logs deleted before this version):
+    start to the next log's start, or for the newest log of its key to the
+    end its own sidecar gives, 1 to 10 minutes, kept on its tombstone; for
+    logs deleted before this version, to the next log's start among the
+    logs the server received, else the log's first minute):
     `complete`, as above, never asked for again. (Sent again, it would be
     kept, still linked to nothing, and deleted again by the same rule N days
     later, every time. Before this version these answered `missing` inside

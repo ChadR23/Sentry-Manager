@@ -627,7 +627,7 @@ impl Can {
         if here.is_none() && side.is_none() {
             return Some(self.trust.record(key, name).unwrap_or(json!({})));
         }
-        match CanLogs::buried_older(name, tomb, self.logs.kept(key), || self.logs.starts(key)) {
+        match CanLogs::buried_older(name, tomb, self.logs.kept(key), || self.logs.starts(key), || self.logs.log_starts(key)) {
             Some(false) => {
                 self.trust.unbury(key, name);
                 self.ctx.log("info", &format!("CAN Bridge {}: {} was deleted here and sent again; its car keeps footage of its time, so it is kept as a new log", key, name));
@@ -685,7 +685,7 @@ impl Can {
                 let old = std::fs::metadata(self.logs.dir.join(&key).join(&side)).is_ok_and(|m| util::now_ms() - util::mtime_ms(&m) > LONE_SIDE_MS);
                 if old && !self.logs.arriving(&name) {
                     if let Some(tomb) = self.trust.tomb(&key, &name) {
-                        match CanLogs::buried_older(&name, &tomb, self.logs.kept(&key), || self.logs.starts(&key)) {
+                        match CanLogs::buried_older(&name, &tomb, self.logs.kept(&key), || self.logs.starts(&key), || self.logs.log_starts(&key)) {
                             Some(true) => {
                                 if let Some(sd) = self.logs.size_of(&side) {
                                     self.trust.note_side(&key, &name, sd, self.side_sha(&key, &name));

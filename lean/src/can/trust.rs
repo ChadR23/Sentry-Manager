@@ -871,6 +871,18 @@ impl CanTrust {
         self.save(key, &t);
     }
 
+    /// The starts (UTC ms, sorted, once each) of every log of this car key with a record or a
+    /// tombstone: the logs it received, here or deleted.
+    pub fn log_starts(&self, key: &str) -> Arc<Vec<f64>> {
+        let tf = self.load(key);
+        let t = tf.lock().unwrap();
+        let mut v: Vec<f64> = t.logs.keys().chain(t.tombstones.keys()).filter_map(|k| parse_name(k)).filter(|n| !n.sidecar).map(|n| n.started_at as f64).collect();
+        drop(t);
+        v.sort_by(|a, b| a.total_cmp(b));
+        v.dedup();
+        Arc::new(v)
+    }
+
     /// The tombstone of a log deleted here, or None.
     pub fn tomb(&self, key: &str, name: &str) -> Option<Value> {
         let tf = self.load(key);
