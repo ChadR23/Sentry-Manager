@@ -8,6 +8,9 @@ use super::*;
 use crate::converter::snapshot::Registry;
 use std::sync::Arc;
 
+// Tests replacing the process-wide owned-path hook must own its whole lifetime.
+pub(super) static OWNED_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const JOB: &str = "job-1";
 const ITEM: &str = "item-000001";
 
@@ -505,6 +508,7 @@ fn owned_meta(path: &str, nonce: &str, state: &str) -> Meta {
 /// backup's link count.
 #[test]
 fn a_backup_that_still_reports_two_links_names_the_link_count() {
+    let _hook = OWNED_HOOK_LOCK.lock().unwrap();
     let env = setup("stale-nlink");
     let rec = env.recorder();
     let prepared = env.tx.prepare_replacement(&env.op(&rec)).unwrap();

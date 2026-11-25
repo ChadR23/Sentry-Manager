@@ -71,7 +71,7 @@ export function speedStatus(state, config, now = Date.now()) {
     summary = `${canApply ? 'Recommended: ' : 'Using '}${names(result.devices)} · tested ${date}${rate == null ? '' : ` · about ${rate.toLocaleString('en-US')} ${statusNoun(rate, 'clip')} an hour`}`;
     for (const device of result.devices) {
       const memory = device.memory;
-      if (memory?.limit < 8 && Number.isFinite(memory.freeMib) && Number.isFinite(memory.totalMib))
+      if (memory?.limited === true && Number.isFinite(memory.freeMib) && Number.isFinite(memory.totalMib))
         summary += ` · ${device.name || 'GPU'} limited by GPU memory: ${(Math.max(0, memory.totalMib-memory.freeMib)/1024).toFixed(1)} GB already in use`;
     }
   }

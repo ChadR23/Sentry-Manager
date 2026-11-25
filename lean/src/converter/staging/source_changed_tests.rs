@@ -86,6 +86,7 @@ fn an_original_rewritten_before_the_swap_says_its_bytes_differ() {
 
 #[test]
 fn without_hard_links_the_move_aside_keeps_its_reason() {
+    let _hook = super::tests::OWNED_HOOK_LOCK.lock().unwrap();
     let env = setup("sc-nolinks");
     let tag = env.root.to_string_lossy().into_owned();
     let rec = env.recorder();

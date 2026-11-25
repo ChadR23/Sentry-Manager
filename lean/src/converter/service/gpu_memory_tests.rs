@@ -78,10 +78,9 @@ fn gpu_memory_legacy_retry_keeps_pause_and_excludes_invalid_h264() {
     assert_eq!(h.spawned().len(),2,"the retry action never resumes the owner pause");
 }
 
-#[test]
-fn gpu_memory_benchmark_stops_before_a_parallel_level_that_does_not_fit() {
+fn memory_benchmark(free_mib: u64, total_mib: u64) -> Value {
     let mut o=gpu_options(1);
-    o.gpu_memory=Some(Arc::new(Gate::new(Arc::new(|_|Some(Reading{free_mib:1304,total_mib:8192})))));
+    o.gpu_memory=Some(Arc::new(Gate::new(Arc::new(move |_|Some(Reading{free_mib,total_mib})))));
     let h=Harness::new(o);
     let source=fs::read_dir(h.dir.path().join("footage/RecentClips")).unwrap().next().unwrap().unwrap().path();
     let generated=std::process::Command::new("ffmpeg").args(["-v","error","-y","-f","lavfi","-i","testsrc2=size=64x64:rate=12:duration=0.5","-c:v","libx264","-bf","0","-pix_fmt","yuv420p","-use_editlist","0"]).arg(&source).output().unwrap();
@@ -89,13 +88,28 @@ fn gpu_memory_benchmark_stops_before_a_parallel_level_that_does_not_fit() {
     let original=fs::read(&source).unwrap();
     let output=h.conv.run_benchmark_mode(&crate::converter::runtime::BenchRequest{codecs:vec!["h265".into()],profile_id:"aggressive".into(),
         bitrate_kbps:None,quality_level:None,verify_mode:"quick".into(),source_root:Some(h.dir.path().join("footage").to_string_lossy().into_owned())},false,true,&|_|{}).unwrap();
-    let result=&output["devices"][0]["codecs"][0];
+    assert_eq!(fs::read(&source).unwrap(),original);
+    assert!(h.service().list().unwrap().is_empty(),"benchmark keeps its own job store");
+    output["devices"][0]["codecs"][0].clone()
+}
+
+#[test]
+fn gpu_memory_benchmark_stops_before_a_parallel_level_that_does_not_fit() {
+    let result=memory_benchmark(1304,8192);
     assert_eq!(result["results"][1]["ok"],false,"memory must bound the measured parallel level: {result}");
     assert_eq!(result["best"]["level"],1);
     assert_eq!(result["memory"]["limit"],1);
     assert_eq!(result["memory"]["perEncodeMib"],1010);
-    assert_eq!(fs::read(&source).unwrap(),original);
-    assert!(h.service().list().unwrap().is_empty(),"benchmark keeps its own job store");
+    assert_eq!(result["memory"]["limited"],true,"the refused level must be distinguished from memory telemetry");
+}
+
+#[test]
+fn gpu_memory_benchmark_does_not_call_available_memory_a_limit() {
+    let result=memory_benchmark(10000,10000);
+    assert_eq!(result["results"].as_array().unwrap().len(),5);
+    assert!(result["results"].as_array().unwrap().iter().all(|r|r["ok"]==true));
+    assert_eq!(result["memory"]["limit"],9);
+    assert_eq!(result["memory"]["limited"],false,"no tested level was refused");
 }
 
 #[test]

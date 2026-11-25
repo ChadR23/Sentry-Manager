@@ -35,11 +35,24 @@ test('GPU memory retries and older GPU shortfalls are not described as damaged v
   assert.equal(trimmed.legacyGpu,4); assert.equal(trimmed.damaged,0); assert.equal(trimmed.retrying,8);
 });
 
-test('speed result explains measured GPU memory pressure without inventing usage', () => {
+test('speed result explains GPU memory only when it capped a tested level', () => {
   const state={phase:'done',settingsSource:'test',result:{profileId:'aggressive',testedAt:1795525200000,
-    devices:[{id:'gpu',name:'GPU',concurrency:1,filesPerMinute:2,memory:{freeMib:1304,totalMib:8192,perEncodeMib:1010,limit:1}}]}};
+    devices:[{id:'gpu',name:'GPU',concurrency:1,filesPerMinute:2,memory:{freeMib:1304,totalMib:8192,perEncodeMib:1010,limit:1,limited:true}}]}};
   assert.match(model.speedStatus(state,{}).summary,/limited by GPU memory/i);
   assert.match(model.speedStatus(state,{}).summary,/6\.7 GB already in use/);
+});
+
+test('speed result omits memory telemetry that did not cap the recommendation', () => {
+  const memory={freeMib:8108,totalMib:8192,perEncodeMib:1010,limit:7};
+  for (const note of [memory, {...memory,limited:false}]) {
+    const state={phase:'done',settingsSource:'user',result:{profileId:'aggressive',testedAt:1795525200000,
+      devices:[{id:'gpu-a',name:'AMD graphics',concurrency:8,filesPerMinute:10},
+        {id:'gpu-b',name:'NVIDIA GeForce GTX 1080',concurrency:6,filesPerMinute:9.5,memory:note}]}};
+    const summary=model.speedStatus(state,{}).summary;
+    assert.match(summary,/Recommended: AMD graphics.*8 and NVIDIA GeForce GTX 1080.*6/);
+    assert.match(summary,/about 1,170 clips an hour/);
+    assert.doesNotMatch(summary,/memory|already in use/i);
+  }
 });
 
 test('status nouns use singular only for one problem, clip or file', () => {

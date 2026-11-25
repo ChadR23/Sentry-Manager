@@ -689,9 +689,15 @@ impl Service {
             for j in self.list_summaries()? {
                 if ["completed", "failed", "cancelled"].contains(&j["state"].as_str().unwrap_or("")) { continue; }
                 if !requested || j["state"] != "paused" || !j["recovery"].is_null() { return Ok(None); }
-                let Some(rt) = j["id"].as_str().and_then(|id| self.runtime_of(id)) else { return Ok(None) };
+                // A persisted owner pause has no work in this process until resumed.
+                let Some(rt) = j["id"].as_str().and_then(|id| self.runtime_of(id)) else { continue };
                 let s = rt.lock();
-                if !s.pause_requested || s.preview_pause.is_some() || !s.producer_done || s.parked_workers < s.live_workers
+                let drained = if s.running {
+                    s.pause_requested && s.producer_done && s.parked_workers >= s.live_workers
+                } else {
+                    s.live_workers == 0
+                };
+                if !drained || s.preview_pause.is_some()
                     || !s.children.is_empty() || !s.encodes.is_empty() || !s.in_flight.is_empty() || s.commit_holder.is_some()
                     || s.node_checks.values().any(|n| *n > 0) || s.recovery_required || s.cancel_requested || s.stop_requested {
                     return Ok(None);

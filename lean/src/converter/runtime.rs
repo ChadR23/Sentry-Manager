@@ -747,7 +747,15 @@ impl Converter {
                         for (k, v) in r.as_object().unwrap() {
                             m.insert(k.clone(), v.clone());
                         }
-                        if let Some(note)=memory.into_inner().unwrap() {m.insert("memory".into(),note);}
+                        if let Some(mut note)=memory.into_inner().unwrap() {
+                            // A reading alone does not mean memory limited the recommendation.
+                            let refused=r["results"].as_array().is_some_and(|levels|levels.iter().any(|level|
+                                level["failures"].as_array().is_some_and(|codes|codes.iter().any(|code|
+                                    code=="gpu-memory-limit" || code=="gpu-memory-exhausted"))));
+                            let capped=note["limit"].as_u64().zip(r["best"]["level"].as_u64()).is_some_and(|(limit,best)|limit<best);
+                            note["limited"]=json!(refused || capped);
+                            m.insert("memory".into(),note);
+                        }
                         runs.push(Value::Object(m));
                     }
                     Err(e) if e == "CANCELLED" || cancel.load(Ordering::SeqCst) => return Err(e),
