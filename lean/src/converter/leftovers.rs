@@ -36,6 +36,7 @@
 
 use super::jobstore::states::ItemState;
 use super::jobstore::Manifest;
+use super::mount_place::{Place, Table};
 use super::staging::Tx;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -128,6 +129,11 @@ pub struct Owners {
     pub mine: HashSet<PathBuf>,
     /// folders already made real (see `keys`)
     pub canon: HashMap<PathBuf, Option<PathBuf>>,
+    /// the reachable roots by place (mount_place: the folder and every mount below it),
+    /// as written, by job; None when a root cannot be placed (it is then kept)
+    pub placed: Vec<(Option<Vec<Place>>, String, String)>,
+    /// this process's mount table, read once
+    pub mounts: std::sync::OnceLock<Option<Table>>,
 }
 
 fn res(p: &str) -> PathBuf {
@@ -139,6 +145,10 @@ fn non_empty(v: Option<&Value>) -> bool {
 }
 
 impl Owners {
+    fn table(&self) -> Option<&Table> {
+        self.mounts.get_or_init(Table::read).as_ref()
+    }
+
     fn real(&mut self, dir: &Path) -> Option<PathBuf> {
         if let Some(r) = self.canon.get(dir) {
             return r.clone();
@@ -178,6 +188,8 @@ impl Owners {
                 if r != l {
                     out.push(r);
                 }
+                let places = self.table().and_then(|t| t.places(&l));
+                self.placed.push((places, p.to_string(), id.to_string()));
             }
             None => self.unreachable.push((p.to_string(), id.to_string())),
         }
@@ -319,6 +331,22 @@ impl Owners {
                             return Some(format!("job {id} still has files to settle in this folder"));
                         }
                     }
+                }
+            }
+        }
+        // (by place: a bind mount of a folder below the root is not above the clip's
+        // folder, so walking the folders above misses it; mount_place sees it)
+        for p in originals.iter().filter(|p| p.is_absolute()) {
+            let Some(dir) = p.parent() else { continue };
+            let here = self.table().and_then(|t| t.place(dir));
+            for (places, root, id) in &self.placed {
+                match (places, &here) {
+                    (Some(ps), Some(h)) => {
+                        if super::mount_place::holds(ps, h) {
+                            return Some(format!("job {id} still has files to settle in this folder"));
+                        }
+                    }
+                    _ => return Some(format!("job {id} still has files to settle in \"{root}\", which cannot be told apart from this folder now")),
                 }
             }
         }

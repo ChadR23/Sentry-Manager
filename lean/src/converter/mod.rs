@@ -27,6 +27,7 @@ pub mod ipc;
 pub mod jobstore;
 pub mod leftovers;
 pub mod lead_in;
+pub mod mount_place;
 pub mod mp4_header;
 pub mod mp4w;
 pub mod owned;

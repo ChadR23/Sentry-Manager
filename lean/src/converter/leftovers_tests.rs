@@ -120,6 +120,13 @@ fn names(dir: &Path) -> Vec<String> {
     v
 }
 
+/// The tidy hook is one for the whole process: tests that set it take turns, or one clears
+/// or replaces another's while it runs.
+fn hook_test() -> std::sync::MutexGuard<'static, ()> {
+    static ONE: Mutex<()> = Mutex::new(());
+    ONE.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 const A: &str = "2026-08-30_20-53-04-front.mp4";
 const B: &str = "2026-08-30_20-53-04-back.mp4";
 const C: &str = "2026-08-30_20-53-04-left_repeater.mp4";
@@ -172,6 +179,7 @@ fn a_clip_that_appears_while_it_is_put_back_keeps_both() {
     let backup = format!("BACKUP-{clip}");
     fs::write(e.dir.join(&backup), b"original").unwrap();
     let dir = e.dir.clone();
+    let _one = hook_test();
     *TEST_HOOK.write().unwrap() = Some(Arc::new(move |ev: &str, _from: &str, to: &str| {
         if ev == "rename-before" && to == clip {
             fs::write(dir.join(clip), b"someone else").unwrap();
@@ -285,6 +293,7 @@ fn a_backup_swapped_while_it_is_tidied_is_put_back() {
     fs::hard_link(&x, e.dir.join(&backup)).unwrap();
     let dir = e.dir.clone();
     let b2 = backup.clone();
+    let _one = hook_test();
     *TEST_HOOK.write().unwrap() = Some(Arc::new(move |ev: &str, from: &str, to: &str| {
         if ev == "quarantined" && from == b2 {
             // another file takes the quarantine name: the check after the move sees it
@@ -507,6 +516,7 @@ fn a_tidy_stopped_after_its_quarantine_rename_is_settled_next_time() {
     fs::write(e.dir.join(copy_clip), h264()).unwrap();
     fs::write(e.dir.join(format!("TEMP-H265-{copy_clip}")), h265()).unwrap();
     let (c1, c2) = (format!("BACKUP-{clip}"), format!("TEMP-H265-{copy_clip}"));
+    let _one = hook_test();
     *TEST_HOOK.write().unwrap() = Some(Arc::new(move |ev: &str, from: &str, _to: &str| {
         if ev == "quarantined" && (from == c1 || from == c2) {
             // the server stops here
@@ -760,4 +770,57 @@ fn an_original_beside_a_broken_converted_copy_is_kept() {
     let r = run(&e2, Some(&bin));
     assert_eq!(kept_why(&r, &format!("BACKUP-{F}")), format!("{UNVERIFIED} (it cannot be checked here)"));
     assert_eq!(fs::read(e2.dir.join(format!("BACKUP-{F}"))).unwrap(), original);
+}
+
+#[test]
+fn a_job_of_a_folder_above_a_bind_mount_point_owns_it() {
+    let e = env();
+    let tmp = e.root.parent().unwrap().to_path_buf();
+    let jobs = tmp.join("rc2jobs");
+    fs::create_dir_all(&jobs).unwrap();
+    let store = JobStore::new(&jobs).unwrap();
+    // only SentryClips is bind-mounted, under another folder "view"
+    let view = tmp.join("view");
+    let Some(_b) = bind(&e.root.join("SentryClips"), &view.join("SentryClips")) else { return };
+    let x = e.dir.join(A);
+    fs::write(&x, h264()).unwrap();
+    fs::hard_link(&x, e.dir.join(format!("BACKUP-{A}"))).unwrap();
+    // a paused job whose root is "view": view/SentryClips/... is this folder
+    let paused = job(&store, &view, "paused", vec![], vec![]);
+    let r = run_with(&e, None, &|| owners_of(&store, None));
+    assert_eq!(kept_why(&r, &format!("BACKUP-{A}")), format!("job {paused} still has files to settle in this folder"));
+    assert_eq!(fs::metadata(&x).unwrap().nlink(), 2, "both names kept");
+}
+
+#[test]
+fn a_job_of_the_real_folder_owns_it_through_a_bind_mount_point_below() {
+    let e = env();
+    let tmp = e.root.parent().unwrap().to_path_buf();
+    let jobs = tmp.join("rc2jobs2");
+    fs::create_dir_all(&jobs).unwrap();
+    let store = JobStore::new(&jobs).unwrap();
+    let view = tmp.join("view2");
+    let Some(_b) = bind(&e.root.join("SentryClips"), &view.join("SentryClips")) else { return };
+    let x = e.dir.join(A);
+    fs::write(&x, h264()).unwrap();
+    fs::hard_link(&x, e.dir.join(format!("BACKUP-{A}"))).unwrap();
+    // a paused job whose root is the real TeslaCam; the tidy goes through the bind spelling
+    let paused = job(&store, &e.root, "paused", vec![], vec![]);
+    let via = view.join("SentryClips/2026-08-30_20-53-04");
+    let f = found(&via);
+    let owners = || owners_of(&store, None);
+    let r = tidy_folder(&Tidy { tx: &e.tx, bin: None, verify: e.verify.as_deref(), owners: &owners }, &Folder { real_root: &view, dir: &via, real_dir: &via, found: &f });
+    assert_eq!(kept_why(&r, &format!("BACKUP-{A}")), format!("job {paused} still has files to settle in this folder"));
+    assert_eq!(fs::metadata(&x).unwrap().nlink(), 2, "both names kept");
+    // a job of an unrelated folder does not keep it
+    let other = tmp.join("other/TeslaCam");
+    fs::create_dir_all(&other).unwrap();
+    let jobs3 = tmp.join("rc2jobs3");
+    fs::create_dir_all(&jobs3).unwrap();
+    let store3 = JobStore::new(&jobs3).unwrap();
+    job(&store3, &other, "paused", vec![], vec![]);
+    let owners = || owners_of(&store3, None);
+    let r = tidy_folder(&Tidy { tx: &e.tx, bin: None, verify: e.verify.as_deref(), owners: &owners }, &Folder { real_root: &view, dir: &via, real_dir: &via, found: &f });
+    assert!(matches!(outcome(&r, &format!("BACKUP-{A}")), Outcome::Removed), "{:?}", outcome(&r, &format!("BACKUP-{A}")));
+    assert_eq!(fs::metadata(&x).unwrap().nlink(), 1, "the second name went");
 }

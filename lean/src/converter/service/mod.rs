@@ -982,12 +982,14 @@ impl Service {
     /// Whether two source folders are one inside the other by what they are, not by how they
     /// are spelled (a bind mount or a second mount of the share): either one, or a folder
     /// above it, is the other (staging::folder_identity). A folder that does not resolve now
-    /// may be either, so it overlaps.
+    /// may be either, so it overlaps. Also by place (mount_place): when only a folder below
+    /// one of them is bind-mounted inside the other, the folders above each split at the
+    /// mount point and identity alone does not see it.
     fn overlap_by_identity(x: &Path, y: &Path) -> bool {
         use super::staging::folder_identity;
         let (Some(ix), Some(iy)) = (folder_identity(x, None), folder_identity(y, None)) else { return true };
         let above = |p: &Path, k: &PathBuf| p.ancestors().any(|a| folder_identity(a, None).as_ref() == Some(k));
-        above(x, &iy) || above(y, &ix)
+        above(x, &iy) || above(y, &ix) || super::mount_place::folders_overlap(x, y)
     }
 
     fn may_run_alongside(config: &Value, others: &[Value]) -> bool {
@@ -1594,5 +1596,35 @@ mod alongside_tests {
         let _ = std::process::Command::new("umount").arg(&at).status();
         assert!(!r1, "the same folder through a bind mount");
         assert!(!r2, "a folder inside it through a bind mount");
+    }
+
+    #[test]
+    fn a_job_above_a_bind_mount_point_overlaps() {
+        let tmp = crate::converter::testutil::tempdir().unwrap();
+        let a = tmp.path().join("share/TeslaCam");
+        fs::create_dir_all(a.join("SentryClips")).unwrap();
+        let other = tmp.path().join("other/TeslaCam");
+        fs::create_dir_all(&other).unwrap();
+        // only SentryClips is bind-mounted, under another folder "view" (needs root)
+        let view = tmp.path().join("view");
+        let at = view.join("SentryClips");
+        fs::create_dir_all(&at).unwrap();
+        let ok = std::process::Command::new("mount").arg("--bind").arg(a.join("SentryClips")).arg(&at).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+        if !ok {
+            eprintln!("skipped: a bind mount needs root");
+            return;
+        }
+        let running = |root: &Path| json!({ "config": cfg(root, "gpu0"), "state": "running" });
+        let r1 = Service::may_run_alongside(&cfg(&view, "cpu"), &[running(&a)]);
+        let r2 = Service::may_run_alongside(&cfg(&a, "cpu"), &[running(&view)]);
+        let r3 = Service::may_run_alongside(&cfg(&at, "cpu"), &[running(&a)]);
+        let r4 = Service::may_run_alongside(&cfg(&a.join("SentryClips"), "cpu"), &[running(&view)]);
+        let r5 = Service::may_run_alongside(&cfg(&other, "cpu"), &[running(&view)]);
+        let _ = std::process::Command::new("umount").arg(&at).status();
+        assert!(!r1, "a folder above the bind mount point and the real folder");
+        assert!(!r2, "the real folder and a folder above the bind mount point");
+        assert!(!r3, "the bind spelling inside the real folder");
+        assert!(!r4, "the real subfolder inside the folder above the bind mount point");
+        assert!(r5, "an unrelated folder still runs alongside");
     }
 }
