@@ -4,7 +4,11 @@ use crate::converter::{adapters, lead_in, planner::Selected, process::BoundedRun
 use std::{fs, path::Path, process::Command};
 
 fn generate(path: &Path, ticks: &[u64]) {
-    let r = Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=160x96:rate=25",
+    generate_at_rate(path, ticks, 25);
+}
+
+fn generate_at_rate(path: &Path, ticks: &[u64], rate: u32) {
+    let r = Command::new("ffmpeg").args(["-v", "error", "-y", "-f", "lavfi", "-i", &format!("testsrc2=size=160x96:rate={rate}"),
         "-frames:v", &ticks.len().to_string(), "-c:v", "libx264", "-qp", "0", "-g", "12", "-bf", "0",
         "-bsf:v", "filter_units=remove_types=6,h264_metadata=tick_rate=20000/1:fixed_frame_rate_flag=0:sei_user_data=42424242-4242-4242-4242-424242426942+generated",
         "-video_track_timescale", "10000", "-use_editlist", "0"]).arg(path).output().unwrap();
@@ -52,6 +56,12 @@ fn encode(source: &Path, target: &Path) {
 }
 
 pub(super) fn encode_profile(source: &Path, target: &Path, profile: &str) {
+    let timeline = encode_without_telemetry(source, target, profile);
+    let bytes = adapters::telemetry_bytes(&fs::read(target).unwrap(), &timeline, Codec::H265).unwrap();
+    fs::write(target, bytes).unwrap();
+}
+
+fn encode_without_telemetry(source: &Path, target: &Path, profile: &str) -> Timeline {
     use crate::converter::service::{tools::Inspected, work::initial_plan};
     let source_bytes = fs::read(source).unwrap();
     let timeline = extract(&source_bytes).unwrap();
@@ -64,8 +74,7 @@ pub(super) fn encode_profile(source: &Path, target: &Path, profile: &str) {
         decode:None, lane_id:None }.local_args().unwrap();
     let r = Command::new("ffmpeg").args(args).output().unwrap();
     assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
-    let bytes = adapters::telemetry_bytes(&fs::read(target).unwrap(), &timeline, Codec::H265).unwrap();
-    fs::write(target, bytes).unwrap();
+    timeline
 }
 
 fn verify(source: &Path, candidate: &Path, mode: &str) -> Verdict {
@@ -257,7 +266,7 @@ fn source_checks_packet_frame_deficit_is_not_permission_to_ignore_broken_nals() 
 #[test]
 fn readonly_proven_source_defects_are_kept_without_encoding() {
     use crate::converter::runtime::{Converter, RuntimeOptions};
-    for kind in ["duplicate-timestamp", "nal-boundary", "unfinished-sample-table"] {
+    for kind in ["duplicate-timestamp", "nal-boundary", "unfinished-sample-table", "missing-sample-entry"] {
         let dir=tempdir().unwrap(); let root=dir.path().join("footage");
         fs::create_dir_all(root.join("RecentClips")).unwrap(); fs::create_dir_all(dir.path().join("temp")).unwrap();
         let source=root.join("RecentClips/2026-01-01_00-00-00-front.mp4");
@@ -266,6 +275,7 @@ fn readonly_proven_source_defects_are_kept_without_encoding() {
         match kind {
             "duplicate-timestamp" => { let mut ticks=vec![400;48]; ticks[12]=0; bytes=lead_in::retime_to_source(&bytes,10000,&ticks).unwrap(); }
             "nal-boundary" => {let tree=mp4w::parse(&bytes).unwrap(); let (track,_)=mp4w::select_video_track(&tree).unwrap(); let samples=mp4w::build_sample_index(&tree,track).unwrap(); let at=samples[7].offset as usize; bytes[at..at+4].copy_from_slice(&u32::MAX.to_be_bytes());}
+            "missing-sample-entry" => {let tree=mp4w::parse(&bytes).unwrap(); let at=tree.node(tree.find(mp4w::ROOT,b"stsz")[0]).content as usize+8; bytes[at..at+4].copy_from_slice(&49u32.to_be_bytes());}
             _ => {let tree=mp4w::parse(&bytes).unwrap(); let n=tree.node(tree.find(mp4w::ROOT,b"stsz")[0]); let start=n.start as usize; let end=(n.content+4) as usize; let oldend=(n.start+n.size) as usize; bytes[start..start+4].copy_from_slice(&((end-start) as u32).to_be_bytes()); bytes[end+4..end+8].copy_from_slice(b"free"); bytes[end..end+4].copy_from_slice(&((oldend-end) as u32).to_be_bytes());}
         }
         fs::write(&source,&bytes).unwrap();
@@ -276,7 +286,7 @@ fn readonly_proven_source_defects_are_kept_without_encoding() {
         let id=conv.service.start(&json!({"sourceRoot":root,"destinationRoot":null,"outputMode":"replace","replacementConfirmed":true,"codec":"h265","profileId":"balanced","verifyMode":"quick","includedGroups":["RecentClips"],"networkMode":"direct","concurrency":1})).unwrap();
         conv.service.when_idle(&id).unwrap(); let job=conv.service.get(&id).unwrap();
         assert_eq!(job["items"][0]["state"],"skipped","{kind}: {job}");
-        assert_eq!(job["items"][0]["resultCode"],format!("source-{kind}"));
+        assert_eq!(job["items"][0]["resultCode"],format!("source-{}",if kind=="missing-sample-entry" {"unfinished-sample-table"} else {kind}));
         assert!(job["items"][0]["failure"].is_null());
         assert_eq!(spawned.load(std::sync::atomic::Ordering::SeqCst),0);
         assert_eq!(fs::read(&source).unwrap(),bytes); conv.shutdown();
@@ -326,4 +336,240 @@ fn readonly_valid_fixed_size_table_is_not_reported_as_unfinished() {
     let tools=RealTools::new("ffmpeg","ffprobe",std::sync::Arc::new(Registry::new(dir.path().to_path_buf())));
     let result=tools.read_timeline(source.to_str().unwrap(),&std::sync::atomic::AtomicBool::new(false));
     assert!(!result.is_err_and(|e|e.code=="SOURCE_UNFINISHED_SAMPLE_TABLE"),"a valid fixed-size stsz is not proof of truncation");
+}
+
+fn shutdown_source(path: &Path, rate: u32) {
+    let ticks = if rate == 36 { 367u32 } else { 417 };
+    generate_at_rate(path, &[u64::from(ticks), 0], rate);
+    // Use the recorder's 1/10000 movie clock too, so the edit and format
+    // duration end at exactly 0.0367 (or 0.0417), not rounded milliseconds.
+    let mut bytes = fs::read(path).unwrap();
+    let tree = mp4w::parse(&bytes).unwrap();
+    let positions:Vec<_> = [(b"mvhd",12,10000), (b"mvhd",16,ticks), (b"tkhd",20,ticks), (b"elst",8,ticks)].into_iter()
+        .map(|(name, offset, value)| (tree.node(tree.find(mp4w::ROOT,name)[0]).content as usize + offset, value)).collect();
+    for (at, value) in positions { bytes[at..at+4].copy_from_slice(&value.to_be_bytes()); }
+    fs::write(path, bytes).unwrap();
+}
+
+fn frame_probe(path: &Path) -> Value {
+    let probe = Command::new("ffprobe").args(["-v","error","-select_streams","v:0","-count_frames","-show_entries",
+        "stream=nb_frames,nb_read_frames:format=duration","-of","json"]).arg(path).output().unwrap();
+    assert!(probe.status.success(), "{}", String::from_utf8_lossy(&probe.stderr));
+    serde_json::from_slice(&probe.stdout).unwrap()
+}
+
+#[test]
+fn shutdown_stub_candidate_single_sample_is_not_a_truncated_table() {
+    let dir = tempdir().unwrap(); let source = dir.path().join("source.mp4"); let target = dir.path().join("candidate.mp4");
+    shutdown_source(&source, 36);
+    let bytes = fs::read(&source).unwrap(); let tree = mp4w::parse(&bytes).unwrap();
+    let stsz = tree.payload(tree.find(mp4w::ROOT,b"stsz")[0]).unwrap();
+    assert_eq!(stsz.len(),20); assert_eq!(mp4w::be32(stsz,4),0); assert_eq!(mp4w::be32(stsz,8),2);
+    assert_eq!(extract(&bytes).unwrap().samples.len(),2);
+    let probe = frame_probe(&source);
+    assert_eq!(probe["streams"][0]["nb_frames"],"2"); assert_eq!(probe["streams"][0]["nb_read_frames"],"1");
+    assert_eq!(probe["format"]["duration"],"0.036700");
+    let timeline = encode_without_telemetry(&source, &target, "balanced");
+    let encoded = fs::read(&target).unwrap(); let tree = mp4w::parse(&encoded).unwrap();
+    let stsz = tree.payload(tree.find(mp4w::ROOT,b"stsz")[0]).unwrap();
+    assert_eq!(stsz.len(),12); assert!(mp4w::be32(stsz,4)>0); assert_eq!(mp4w::be32(stsz,8),1);
+    assert_eq!(adapters::output_timing(&encoded).unwrap().len(),1,"valid constant-size header");
+    assert!(adapters::telemetry_bytes(&encoded,&timeline,Codec::H265).is_ok());
+}
+
+#[test]
+fn shutdown_stub_is_kept_before_encoding_in_both_output_modes() {
+    use crate::converter::runtime::{Converter, RuntimeOptions};
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    for rate in [36,24] { for mode in ["replace","separate"] {
+        let dir = tempdir().unwrap(); let root = dir.path().join("footage");
+        for path in [root.join("RecentClips"),dir.path().join("temp"),dir.path().join("out")] {fs::create_dir_all(path).unwrap();}
+        let relative = "RecentClips/2020-01-01_00-00-00-front.mp4"; let source = root.join(relative);
+        shutdown_source(&source,rate); let before = fs::read(&source).unwrap();
+        let spawned = Arc::new(AtomicUsize::new(0)); let counter = spawned.clone();
+        let mut opts = RuntimeOptions::new(dir.path().join("data"),dir.path().join("temp"),"ffmpeg","ffprobe"); opts.auto_timer = false;
+        opts.tune = Some(Box::new(move |o|o.on_spawn=Some(Arc::new(move |_|{counter.fetch_add(1,Ordering::SeqCst);} ))));
+        let conv = Converter::open(opts).unwrap();
+        let id = conv.service.start(&json!({"sourceRoot":root,"destinationRoot":if mode=="separate" {Some(dir.path().join("out"))} else {None},
+            "outputMode":mode,"replacementConfirmed":mode=="replace","codec":"h265","profileId":"balanced","verifyMode":"quick",
+            "includedGroups":["RecentClips"],"networkMode":"direct","concurrency":1})).unwrap();
+        conv.service.when_idle(&id).unwrap(); let job = conv.service.get(&id).unwrap(); let item = &job["items"][0];
+        assert_eq!(item["resultCode"],"too-short","{rate} {mode}: {job}");
+        assert_eq!(item["state"],if mode=="replace" {"skipped"} else {"completed"});
+        assert!(item["failure"].is_null()); assert_eq!(item["attempts"],0); assert_eq!(spawned.load(Ordering::SeqCst),0);
+        assert_eq!(fs::read(&source).unwrap(),before);
+        if mode=="separate" {assert_eq!(fs::read(dir.path().join("out").join(relative)).unwrap(),before);}
+        assert!(item["ownedPaths"].as_object().is_none_or(|o|o.is_empty()));
+        conv.shutdown();
+    }}
+}
+
+#[test]
+fn shutdown_stub_checks_do_not_keep_real_short_clips() {
+    use crate::converter::service::tools::{RealTools, Tools};
+    use std::sync::{Arc,atomic::AtomicBool};
+    let dir = tempdir().unwrap();
+    let tools = RealTools::new("ffmpeg","ffprobe",Arc::new(Registry::new(dir.path().to_path_buf())));
+    for (name,ticks) in [("two",vec![367,367]),("72",vec![278;72])] {
+        let source = dir.path().join(format!("{name}.mp4")); let target = dir.path().join(format!("{name}-out.mp4"));
+        generate_at_rate(&source,&ticks,36);
+        assert!(tools.inspect_video(source.to_str().unwrap(),&Arc::new(AtomicBool::new(false))).is_ok());
+        assert_eq!(frame_probe(&source)["streams"][0]["nb_read_frames"],ticks.len().to_string());
+        encode(&source,&target);
+        for mode in ["quick","full"] {let v=verify(&source,&target,mode);assert!(v.ok,"{name} {mode}: {}",v.to_json());}
+    }
+}
+
+fn empty_encode(path: &Path, keep_track: bool) {
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-v","error","-f","lavfi","-i","testsrc2=size=160x96:rate=36","-c:v","libx265","-x265-params","pools=1","-frames:v","0"]);
+    if keep_track {cmd.args(["-movflags","empty_moov"]);}
+    let r = cmd.arg(path).output().unwrap(); assert!(r.status.success(),"{}",String::from_utf8_lossy(&r.stderr));
+    if keep_track {
+        // ffmpeg normally omits an empty track. Its empty_moov mode retains
+        // the zero-entry tables; remove the fragment declaration/index (no fragments
+        // were written) to exercise the supported, non-fragmented empty track.
+        let mut bytes=fs::read(path).unwrap();
+        let positions:Vec<_>=bytes.windows(4).enumerate().filter_map(|(i,b)|(b==b"mvex" || b==b"mfra").then_some(i)).collect();
+        assert_eq!(positions.len(),2);
+        for at in positions {bytes[at..at+4].copy_from_slice(b"free");}
+        fs::write(path,bytes).unwrap();
+    }
+}
+
+#[test]
+fn shutdown_stub_empty_encode_is_an_output_failure() {
+    let dir = tempdir().unwrap(); let source = dir.path().join("source.mp4"); generate(&source,&vec![400;48]);
+    let timeline = extract(&fs::read(&source).unwrap()).unwrap();
+    for keep_track in [false,true] {
+        let target = dir.path().join(format!("empty-{keep_track}.mp4")); empty_encode(&target,keep_track);
+        let bytes = fs::read(&target).unwrap(); let tree = mp4w::parse(&bytes).unwrap();
+        if keep_track {let p=tree.payload(tree.find(mp4w::ROOT,b"stsz")[0]).unwrap();assert_eq!(mp4w::be32(p,8),0);}
+        else {assert!(tree.find(mp4w::ROOT,b"trak").is_empty());}
+        let error = adapters::telemetry_bytes(&bytes,&timeline,Codec::H265).unwrap_err();
+        assert_eq!(error.code,"ENCODED_NO_VIDEO_SAMPLES","{error:?}");
+        assert!(error.message.contains("Encoder output"));
+    }
+}
+
+#[test]
+fn shutdown_stub_empty_encoder_output_preserves_original_and_cleans_candidate() {
+    use crate::converter::runtime::{Converter,RuntimeOptions};
+    use std::{os::unix::fs::PermissionsExt,sync::{Arc,Mutex}};
+    for mode in ["replace","separate"] {
+        let dir = tempdir().unwrap(); let root = dir.path().join("footage");
+        for p in [root.join("RecentClips"),dir.path().join("temp"),dir.path().join("out")] {fs::create_dir_all(p).unwrap();}
+        let source = root.join("RecentClips/2020-01-01_00-00-00-front.mp4"); generate(&source,&vec![400;48]);
+        let before = fs::read(&source).unwrap(); let empty = dir.path().join("empty.mp4"); empty_encode(&empty,false);
+        // Only the encode is replaced: source inspection, selection/proofs,
+        // telemetry writing, failure persistence and owned cleanup are real.
+        let encoder = dir.path().join("empty-encoder");
+        fs::write(&encoder,format!("#!/bin/sh\nempty=0\nfor arg do\n [ \"$arg\" != -progress ] || empty=1\n last=$arg\ndone\nif [ $empty = 1 ]; then cp '{}' \"$last\"; else exec ffmpeg \"$@\"; fi\n",empty.display())).unwrap();
+        fs::set_permissions(&encoder,fs::Permissions::from_mode(0o755)).unwrap();
+        let candidates = Arc::new(Mutex::new(Vec::<String>::new())); let seen = candidates.clone();
+        let mut opts = RuntimeOptions::new(dir.path().join("data"),dir.path().join("temp"),encoder.to_str().unwrap(),"ffprobe"); opts.auto_timer=false;
+        opts.tune=Some(Box::new(move |o|o.on_spawn=Some(Arc::new(move |args|seen.lock().unwrap().push(args.last().unwrap().clone())))));
+        let conv = Converter::open(opts).unwrap();
+        let id=conv.service.start(&json!({"sourceRoot":root,"destinationRoot":if mode=="separate" {Some(dir.path().join("out"))}else{None},
+            "outputMode":mode,"replacementConfirmed":mode=="replace","codec":"h265","profileId":"balanced","verifyMode":"quick",
+            "includedGroups":["RecentClips"],"networkMode":"direct","concurrency":1})).unwrap();
+        conv.service.when_idle(&id).unwrap(); let job=conv.service.get(&id).unwrap(); let item=&job["items"][0];
+        assert_eq!(item["state"],"failed","{job}"); assert_eq!(item["resultCode"],"encoded-no-video-samples","{job}");
+        assert_eq!(item["failure"]["retryable"],false); assert_eq!(item["attempts"],1);
+        assert_eq!(fs::read(&source).unwrap(),before);
+        assert_eq!(fs::read_dir(source.parent().unwrap()).unwrap().count(),1,"no replacement/backup leftovers");
+        assert!(!dir.path().join("out/RecentClips/2020-01-01_00-00-00-front.mp4").exists());
+        let candidates=candidates.lock().unwrap(); assert_eq!(candidates.len(),1);
+        for p in candidates.iter() {assert!(!Path::new(p).exists(),"candidate not cleaned: {p}");}
+        assert!(item["ownedPaths"].as_object().is_none_or(|o|o.is_empty())); conv.shutdown();
+    }
+}
+
+#[test]
+fn shutdown_stub_failed_items_become_kept_on_the_next_automatic_run() {
+    use crate::converter::{runtime::{Converter,RuntimeOptions},auto_convert::setup_key};
+    use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
+    let dir=tempdir().unwrap(); let root=dir.path().join("footage");
+    for p in [root.join("SavedClips/generated"),root.join("SentryClips/generated"),dir.path().join("temp")] {fs::create_dir_all(p).unwrap();}
+    let c=json!({"sourceRoot":root,"destinationRoot":null,"outputMode":"replace","replacementConfirmed":true,"codec":"h265",
+        "profileId":"balanced","verifyMode":"quick","includedGroups":["SavedClips","SentryClips"],"networkMode":"direct","concurrency":1,"autoConvert":true});
+    let paths=["SentryClips/generated/2020-01-01_00-00-00-back.mp4","SavedClips/generated/2020-01-01_00-00-00-left_repeater.mp4",
+        "SavedClips/generated/2020-01-01_00-00-00-right_repeater.mp4"];
+    let mut items=vec![]; let mut originals=vec![]; let mut failures=serde_json::Map::new();
+    for (n,relative) in paths.iter().enumerate() {
+        let source=root.join(relative); shutdown_source(&source,36); originals.push(fs::read(&source).unwrap()); let metadata=fs::metadata(&source).unwrap();
+        items.push(json!({"id":format!("item-{:06}",n+1),"state":"failed","eventId":null,"kind":"video","relativePath":relative,"sourcePath":source,
+            "sourceBytes":metadata.len(),"mtimeMs":crate::converter::jobstore::mtime_ms(&metadata),"group":relative.split('/').next().unwrap(),
+            "timestampKey":"2020-01-01_00-00-00","camera":"front","resultCode":"invalid-mp4","failure":{"code":"invalid-mp4","retryable":false},"attempts":1}));
+        failures.insert(relative.to_string(),json!(1));
+    }
+    let spawned=Arc::new(AtomicUsize::new(0));
+    let open=|| {
+        let counter=spawned.clone(); let mut o=RuntimeOptions::new(dir.path().join("data"),dir.path().join("temp"),"ffmpeg","ffprobe"); o.auto_timer=false;
+        o.tune=Some(Box::new(move |o|o.on_spawn=Some(Arc::new(move |_|{counter.fetch_add(1,Ordering::SeqCst);} )))); Converter::open(o).unwrap()
+    };
+    let conv=open();
+    let old=conv.store.create(json!({"config":c,"state":"completed","items":items,"discoveryComplete":true,
+        "counters":contracts::create_empty_counters(),"summary":contracts::serialize_summary(&contracts::create_empty_counters())}).as_object().unwrap()).unwrap();
+    // Persist the pre-upgrade manifest and automatic state: failed items are
+    // failure counts, never converted-index entries. No Retry/Clear action.
+    let auto=dir.path().join("data/converter-auto"); fs::create_dir_all(&auto).unwrap();
+    fs::write(auto.join("settings.json"),json!({"enabled":true,"configs":[c],"catchUp":true,"intervalMinutes":60}).to_string()).unwrap();
+    fs::write(auto.join("state.json"),json!({"catchUp":{root.to_str().unwrap():{"since":1}}}).to_string()).unwrap();
+    let index=auto.join(format!("index-{}.json",setup_key(&c)));
+    fs::write(&index,json!({"v":2,"files":{},"gaveUp":{},"failures":failures}).to_string()).unwrap();
+    conv.shutdown(); drop(conv);
+    let restarted=open(); restarted.start().unwrap(); restarted.auto.tick();
+    let state=restarted.auto.get_state(); let id=state["status"]["active"][root.to_str().unwrap()]["jobId"].as_str().expect("next automatic run").to_string();
+    restarted.service.when_idle(&id).unwrap(); restarted.auto.tick();
+    let job=restarted.service.get(&id).unwrap(); assert_eq!(job["items"].as_array().unwrap().len(),3,"{job}");
+    for item in job["items"].as_array().unwrap() {assert_eq!(item["resultCode"],"too-short","{job}");assert_eq!(item["state"],"skipped");assert!(item["failure"].is_null());}
+    assert_eq!(spawned.load(Ordering::SeqCst),0);
+    assert_eq!(restarted.service.get(old.id()).unwrap()["items"],Value::Array(items),"failure history remains intact");
+    let saved:Value=serde_json::from_slice(&fs::read(&index).unwrap()).unwrap();
+    assert!(saved["failures"].as_object().unwrap().is_empty()); assert_eq!(saved["files"].as_object().unwrap().len(),3);
+    for (n,relative) in paths.iter().enumerate() {assert_eq!(fs::read(root.join(relative)).unwrap(),originals[n]);}
+    restarted.shutdown(); drop(restarted);
+    let again=open(); again.start().unwrap(); again.auto.tick();
+    assert_eq!(again.service.list().unwrap().len(),2,"kept clips are not submitted again"); assert_eq!(spawned.load(Ordering::SeqCst),0); again.shutdown();
+}
+
+#[test]
+fn shutdown_stub_only_suspicious_sources_get_a_frame_count() {
+    use crate::converter::service::tools::{RealTools,Tools};
+    use std::{os::unix::fs::PermissionsExt,sync::{Arc,atomic::AtomicBool}};
+    let dir=tempdir().unwrap(); let probe=dir.path().join("probe"); let log=dir.path().join("counts");
+    fs::write(&probe,format!("#!/bin/sh\nfor arg do\n if [ \"$arg\" = -count_frames ]; then echo counted >> '{}'; fi\ndone\nexec ffprobe \"$@\"\n",log.display())).unwrap();
+    fs::set_permissions(&probe,fs::Permissions::from_mode(0o755)).unwrap();
+    let tools=RealTools::new("ffmpeg",probe.to_str().unwrap(),Arc::new(Registry::new(dir.path().to_path_buf())));
+    let source=dir.path().join("source.mp4"); let cancel=Arc::new(AtomicBool::new(false));
+    generate_at_rate(&source,&vec![278;72],36);
+    assert!(tools.inspect_video(source.to_str().unwrap(),&cancel).is_ok()); assert!(!log.exists(),"normal short clips use only the metadata probe");
+    generate_at_rate(&source,&[2000,2000],36);
+    assert!(tools.inspect_video(source.to_str().unwrap(),&cancel).is_ok());
+    assert_eq!(fs::read_to_string(&log).unwrap_or_default(),"counted\n","a tiny clip is decoded before deciding whether to keep it");
+    shutdown_source(&source,36);
+    assert_eq!(tools.inspect_video(source.to_str().unwrap(),&cancel).unwrap_err().code,"SOURCE_TOO_SHORT");
+    assert_eq!(fs::read_to_string(&log).unwrap(),"counted\ncounted\n");
+}
+
+#[test]
+fn shutdown_stub_inconclusive_counts_do_not_prove_one_playable_frame() {
+    use crate::converter::service::tools::{RealTools,Tools};
+    use std::{os::unix::fs::PermissionsExt,sync::{Arc,atomic::AtomicBool}};
+    let dir=tempdir().unwrap(); let source=dir.path().join("source.mp4"); shutdown_source(&source,36);
+    let probe=dir.path().join("probe"); let cancel=Arc::new(AtomicBool::new(false));
+    for (body,status,stderr) in [
+        (r#"{"streams":[{"nb_read_frames":"0"}]}"#,0,""),
+        (r#"{"streams":[{"nb_read_frames":"N/A"}]}"#,0,""),
+        (r#"{"streams":[{"nb_read_frames":"1"}]}"#,1,""),
+        (r#"{"streams":[{"nb_read_frames":"1"}]}"#,0,"decode error"),
+        (r#"{"streams":[{"nb_read_frames":"1"},{"nb_read_frames":"1"}]}"#,0,""),
+        ("not json",0,"")
+    ] {
+        fs::write(&probe,format!("#!/bin/sh\nfor arg do\n if [ \"$arg\" = -count_frames ]; then\n printf '%s' '{body}'\n printf '%s' '{stderr}' >&2\n exit {status}\n fi\ndone\nexec ffprobe \"$@\"\n")).unwrap();
+        fs::set_permissions(&probe,fs::Permissions::from_mode(0o755)).unwrap();
+        let tools=RealTools::new("ffmpeg",probe.to_str().unwrap(),Arc::new(Registry::new(dir.path().to_path_buf())));
+        assert!(!tools.inspect_video(source.to_str().unwrap(),&cancel).is_err_and(|e|e.code=="SOURCE_TOO_SHORT"),"{body} {status} {stderr}");
+    }
 }

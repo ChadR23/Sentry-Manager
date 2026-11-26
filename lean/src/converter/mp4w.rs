@@ -336,7 +336,9 @@ pub fn chunk_offsets(tree: &Tree, stbl: usize) -> CResult<(usize, Vec<u64>)> {
 
 fn sample_sizes(tree: &Tree, stbl: usize) -> CResult<Vec<u32>> {
     let node = tree.req(stbl, b"stsz")?;
-    let p = tree.full_box_data(node, 12)?;
+    // The full-box version/flags are counted by full_box_data: only
+    // sample_size and sample_count follow. Constant-size tables have no entries.
+    let p = tree.full_box_data(node, 8)?;
     if p[0] != 0 {
         return Err(unsupported("Unsupported stsz version"));
     }

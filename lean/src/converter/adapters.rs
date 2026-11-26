@@ -57,6 +57,17 @@ pub enum Codec {
 
 /// The encode with the original's telemetry (and, where needed, timing).
 pub fn telemetry_bytes(encoded: &[u8], timeline: &Timeline, codec: Codec) -> CResult<Vec<u8>> {
+    // Inspect the encoder's file before retiming or telemetry injection. An
+    // empty encode is an output failure, never evidence of source damage.
+    let tree = mp4w::parse(encoded)?;
+    let empty = || CError::new("ENCODED_NO_VIDEO_SAMPLES", "Encoder output contains no video samples.");
+    let (track, _) = mp4w::select_video_track(&tree).map_err(|e| {
+        if e.code == "UNSUPPORTED_CONTAINER" && e.message == "No video track found" { empty() } else { e }
+    })?;
+    let stbl = mp4w::sample_table(&tree, track)?;
+    let stsz = tree.unique_child(stbl, b"stsz", true)?.unwrap();
+    let sizes = tree.full_box_data(stsz, 8)?;
+    if sizes[0] == 0 && be32(sizes, 8) == 0 { return Err(empty()); }
     let timing = source_timing_for(Some(&timeline.lead_in), Some(&timeline.undecodable));
     let retimed;
     let bytes: &[u8] = match timing {

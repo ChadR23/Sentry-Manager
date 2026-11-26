@@ -235,18 +235,39 @@ impl Tools for RealTools {
     fn inspect_video(&self, source: &str, cancel: &Arc<AtomicBool>) -> CResult<Inspected> {
         let run = |timeout: u64| self.runner.run(&self.ffprobe, &probe_args(source), &RunOptions { timeout_ms: Some(timeout), cancel: Some(cancel.clone()), cwd: None }).map_err(|_| CError::code("VIDEO_INSPECTION_FAILED"));
         let first = run(30_000)?;
-        if !first.timed_out || cancel.load(std::sync::atomic::Ordering::SeqCst) {
-            return parse_video_probe(&first).or_else(|e| {
-                // A failed probe alone proves nothing. Inspect the original bytes
-                // before identifying an unfinished source sample table.
-                if e.code=="CANCELLED" || e.code=="SOURCE_TOO_SHORT" {return Err(e);}
-                if let Ok(bytes)=std::fs::read(source) { if let Err(defect)=timeline::extract(&bytes) {
-                    let classified=source_defect(defect,&bytes); if kept_code(&classified.code).is_some(){return Err(classified);}
-                }}
-                Err(e)
-            });
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) || first.aborted {
+            return Err(CError::code("CANCELLED"));
         }
-        parse_video_probe(&run(120_000)?)
+        let probe = if first.timed_out { run(120_000)? } else { first };
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) || probe.aborted {
+            return Err(CError::code("CANCELLED"));
+        }
+        let inspected = parse_video_probe(&probe).or_else(|e| {
+            // A failed probe alone proves nothing. Inspect the original bytes
+            // before identifying an unfinished source sample table.
+            if e.code=="SOURCE_TOO_SHORT" {return Err(e);}
+            if let Ok(bytes)=std::fs::read(source) { if let Err(defect)=timeline::extract(&bytes) {
+                let classified=source_defect(defect,&bytes); if kept_code(&classified.code).is_some(){return Err(classified);}
+            }}
+            Err(e)
+        })?;
+        // A shutdown edit can discard the second of two fully recorded samples.
+        // Only suspicious originals pay for a decode: two declared frames, or
+        // at most 100 ms (a few frames at the recorder's 24/36 fps).
+        if inspected.codec == "h264" && (inspected.duration_seconds <= 0.1 || probe_frame_count(&probe, "nb_frames") == Some(2)) {
+            let args = ["-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=nb_read_frames", "-of", "json", source].map(str::to_string);
+            let counted = self.runner.run(&self.ffprobe, &args, &RunOptions { timeout_ms: Some(30_000), cancel: Some(cancel.clone()), cwd: None })
+                .map_err(|_| CError::code("VIDEO_INSPECTION_FAILED"))?;
+            if cancel.load(std::sync::atomic::Ordering::SeqCst) || counted.aborted {
+                return Err(CError::code("CANCELLED"));
+            }
+            // Partial/failed counts, decoder errors and zero/unknown counts
+            // cannot justify keeping a source. Normal checks still apply.
+            if counted.stderr.trim().is_empty() && probe_frame_count(&counted, "nb_read_frames") == Some(1) {
+                return Err(CError::code("SOURCE_TOO_SHORT"));
+            }
+        }
+        Ok(inspected)
     }
     fn read_timeline(&self, source: &str, cancel: &AtomicBool) -> CResult<Timeline> {
         if cancel.load(std::sync::atomic::Ordering::SeqCst) {
@@ -322,6 +343,29 @@ pub fn bitrate_floor(codec: &str) -> i64 {
     planner::bitrate_floor(codec)
 }
 
+fn probe_frame_count(r: &ProcResult, field: &str) -> Option<u64> {
+    if r.status != Some(0) || r.error.is_some() || r.timed_out || r.aborted || r.output_limit_exceeded { return None; }
+    let parsed: Value = serde_json::from_str(&r.stdout).ok()?;
+    let streams = parsed.get("streams")?.as_array()?;
+    if streams.len() != 1 { return None; }
+    let count = streams[0].get(field)?;
+    count.as_u64().or_else(|| count.as_str()?.parse().ok())
+}
+
+#[cfg(test)]
+#[test]
+fn shutdown_stub_partial_probe_counts_are_never_proof() {
+    let good = ProcResult { status: Some(0), stdout: r#"{"streams":[{"nb_read_frames":"1"}]}"#.into(), ..Default::default() };
+    assert_eq!(probe_frame_count(&good, "nb_read_frames"), Some(1));
+    for incomplete in [
+        ProcResult { timed_out: true, ..good.clone() },
+        ProcResult { aborted: true, ..good.clone() },
+        ProcResult { output_limit_exceeded: true, ..good.clone() },
+        ProcResult { error: Some("PROCESS_START_FAILED".into()), ..good.clone() },
+        ProcResult { status: None, ..good.clone() },
+    ] { assert_eq!(probe_frame_count(&incomplete, "nb_read_frames"), None); }
+}
+
 /// Only precise defects read from the original qualify. Never classify encoder
 /// output or a generic probe/verifier failure as damage to the source.
 fn source_defect(e:CError,bytes:&[u8])->CError {
@@ -334,8 +378,7 @@ fn truncated_sample_table(bytes:&[u8])->bool {
     let Ok(tree)=mp4w::parse(bytes) else {return false;};
     tree.find(mp4w::ROOT,b"stsz").iter().any(|&id| {
         let Ok(p)=tree.payload(id) else {return false;};
-        // A constant-size table needs only the 12-byte header. The existing
-        // sample-index reader also requires an entry; that is not truncation.
+        // A constant-size table needs only the 12-byte header, no entries.
         if p.len()<12 {return true;}
         let size=u32::from_be_bytes(p[4..8].try_into().unwrap());
         let count=u32::from_be_bytes(p[8..12].try_into().unwrap());

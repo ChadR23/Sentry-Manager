@@ -12,7 +12,7 @@ export const KEPT_REASONS = {
   'too-short': 'Kept as recorded (too short to shrink).',
   'source-duplicate-timestamp': 'Two recorded frames share one timestamp. Kept as recorded.',
   'source-nal-boundary': 'Recorded video data extends beyond its frame boundary. Kept as recorded.',
-  'source-unfinished-sample-table': 'The recording has an unfinished sample table. Kept as recorded.',
+  'source-unfinished-sample-table': 'The recorded sample table is missing bytes. Kept as recorded.',
 };
 export function clipFailures(snapshot) {
   const codeOf = (i) => i.resultCode || i.failure?.code || i.code;

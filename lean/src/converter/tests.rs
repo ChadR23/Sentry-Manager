@@ -92,7 +92,15 @@ fn timeline_and_writers_match_node() {
             let err = dir.join(format!("{name}.{codec}.err"));
             if err.exists() {
                 let code = std::fs::read_to_string(&err).unwrap();
-                assert_eq!(mine.as_ref().err().map(|e| e.code.clone()), Some(code), "{name} {codec}: refused the same way");
+                // The frozen no-keyframe HEVC encode has no video track.
+                // It remains refused, now explicitly as an empty encoder output.
+                let expected = if name == "nokey" && codec == "h265" {
+                    assert_eq!(code, "UNSUPPORTED_CONTAINER");
+                    let tree = super::mp4w::parse(&enc).unwrap();
+                    assert!(tree.find(super::mp4w::ROOT, b"trak").is_empty());
+                    "ENCODED_NO_VIDEO_SAMPLES".into()
+                } else { code };
+                assert_eq!(mine.as_ref().err().map(|e| e.code.clone()), Some(expected), "{name} {codec}: refusal");
             } else {
                 let out = std::fs::read(dir.join(format!("{name}.{codec}.out"))).unwrap();
                 let mine = mine.unwrap_or_else(|e| panic!("{name} {codec}: {e}"));

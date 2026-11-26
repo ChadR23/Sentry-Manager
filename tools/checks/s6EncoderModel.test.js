@@ -92,7 +92,7 @@ test('only proven original defects are kept; old unproven failures remain action
   const originals=codes.map((resultCode,i)=>({state:'skipped',resultCode,relativePath:`RecentClips/generated-${i}.mp4`}));
   const result=model.clipFailures({items:originals});
   assert.equal(result.kept,3);assert.equal(result.attention,0);assert.equal(result.items.length,3);
-  assert.match(result.items[0].reason,/timestamp/);assert.match(result.items[1].reason,/boundary/);assert.match(result.items[2].reason,/unfinished/);
+  assert.match(result.items[0].reason,/timestamp/);assert.match(result.items[1].reason,/boundary/);assert.match(result.items[2].reason,/sample table.*missing bytes/);
   const unknown=model.clipFailures({items:['invalid-h264','frame-count-mismatch','source-invalid','cleanup-pending'].map(resultCode=>({state:'failed',resultCode,failure:{retryable:false}}))});
   assert.equal(unknown.kept,0);assert.equal(unknown.attention,4);
 });

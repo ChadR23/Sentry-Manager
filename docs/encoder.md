@@ -187,8 +187,25 @@ The status screen shows progress, space saved and the next check.
 
 Clips with a proven source defect appear in **kept as recorded**: two frames
 sharing a timestamp, a NAL extending beyond its recorded sample boundary, or
-an unfinished sample table. Clips too short to shrink appear there too. Expand
-the list for relative paths and a plain reason; **Show more clips** reads more
+a sample table whose header or declared entries are missing bytes
+(`source-unfinished-sample-table`). That reason requires proof from the original;
+it does not describe a complete two-sample recorder shutdown stub.
+
+**Too short to shrink** (`too-short`) includes shutdown stubs with only one
+playable frame, even when the file declares two samples. Before encoding, the
+converter checks the original's metadata; only suspicious clips (two declared
+frames or at most 100 ms) get an additional bounded frame-count decode. A
+successful count of one playable frame keeps the original. A genuine short
+clip with multiple playable frames can still shrink, including a 72-frame,
+two-second clip. Failed or inconclusive counts do not prove a stub.
+
+An encode with no video samples fails as `encoded-no-video-samples`, an encoder
+output problem. It is never described as an unfinished source recording; the
+original is preserved and the owned candidate is cleaned up. Previously failed
+stubs that are still eligible are checked again by the next automatic run,
+without clearing the index or retrying them manually.
+
+Expand the list for relative paths and a plain reason; **Show more clips** reads more
 pages. These originals are left alone in replace mode (copied unchanged in
 copy mode). Other source, encode, verification and cleanup errors still count
 under **Needs attention**. The sentence and **Current run** counts use the same
