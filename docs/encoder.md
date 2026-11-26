@@ -265,7 +265,9 @@ shrinking again. The check uses the server's effective user and groups, honours
 filesystem access decisions, and creates no probe files or directory timestamp
 changes. It does not alter permissions for you.
 
-If a locked folder appears during a run, admission stops when it is detected.
+If a locked folder appears during a run, admission stops when it is detected:
+discovery checks each folder it enters, and a running job rechecks all folders
+at most every five minutes.
 Encodes already in flight in writable folders finish, then the job pauses.
 A final per-folder check and publication error handling protect against a
 permission change between the scan and the write. Permission waits survive a

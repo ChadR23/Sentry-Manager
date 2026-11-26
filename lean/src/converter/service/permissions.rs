@@ -3,6 +3,7 @@
 use super::*;
 use std::os::unix::fs::MetadataExt;
 use super::super::folder_access;
+const FOLDER_RESCAN:std::time::Duration=std::time::Duration::from_secs(300);
 impl Service {
     pub(super) fn pause_for_folders(&self,rt:&Arc<Runtime>,report:&folder_access::Report)->SResult<()> {
         if !report.blocked(){return Ok(());}
@@ -29,15 +30,20 @@ impl Service {
     }
     pub(super) fn folder_preflight(&self,rt:&Arc<Runtime>,item:&Value)->SResult<()> {
         let config=rt.lock().manifest.config().clone();
-        // Catch new uploads elsewhere too, at most once every 30 seconds per
-        // running job. The discovery walk also checks newly visited folders.
-        let mut last=rt.folder_scan_at.lock().unwrap();
-        if last.elapsed()>=std::time::Duration::from_secs(30) {
-            *last=std::time::Instant::now();
+        // Catch new uploads elsewhere too, at most once every 5 minutes per
+        // running job (a full walk lists every folder of the share). The
+        // discovery walk also checks newly visited folders. The stamp is taken
+        // before the walk so other workers never wait on it.
+        let due={
+            let mut last=rt.folder_scan_at.lock().unwrap();
+            let due=last.elapsed()>=FOLDER_RESCAN;
+            if due {*last=std::time::Instant::now();}
+            due
+        };
+        if due {
             let report=folder_access::scan(&config);
             self.pause_for_folders(rt,&report)?;
         }
-        drop(last);
         let mut targets=vec![item["sourcePath"].as_str().unwrap_or("").to_string()];
         if config["outputMode"]!="replace" {targets.push(output_path(&config,item));}
         for target in targets {

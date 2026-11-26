@@ -3658,3 +3658,6 @@ dialog {
 .encoder-kept[open] summary::before { content:'⌄'; }
 .encoder-kept li { margin:10px 0; overflow-wrap:anywhere; }
 .encoder-kept li small { display:block; font-size:12px; }
+.encoder-status.is-blocked .encoder-status-icon { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.encoder-status.is-blocked .encoder-on-pill { color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
+.encoder-status.is-blocked .encoder-on-pill::before { background: var(--warn); box-shadow: 0 0 8px var(--warn); }

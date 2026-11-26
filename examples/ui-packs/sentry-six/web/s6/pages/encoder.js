@@ -135,6 +135,11 @@ async function renderStatus(mount, ctx, initial, show) {
     mount.querySelector('[data-discovery-issues]').hidden = !discoveryText;
     update('[data-discovery-issues]', esc(discoveryText));
     update('.encoder-on-pill', blockedText ? 'Automatic shrinking is blocked' : 'Automatic shrinking is on');
+    const hero = mount.querySelector('.encoder-status');
+    if (hero.classList.contains('is-blocked') !== Boolean(blockedText)) {
+      hero.classList.toggle('is-blocked', Boolean(blockedText));
+      hero.querySelector('.encoder-status-icon').innerHTML = icon(blockedText ? 'warning' : 'check_circle');
+    }
     update('.encoder-status-copy h2', esc(blockedText ? `${vehicle.name} is waiting for folder access.` : `${vehicle.name} is set. You can forget about it.`));
     update('[data-pause-hint]', blockedText ? 'After fixing permissions, press Check again. Automatic checks also resume shrinking once all folders are writable.' : 'Pause holds until you press Resume.');
     mount.querySelector('[data-folder-block]').hidden = !blockedText;
