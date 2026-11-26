@@ -238,6 +238,7 @@ impl Converter {
         let (s3, b3) = (service.clone(), bench.clone());
         ao.is_busy = Arc::new(move || b3.active() || s3.preview_active() || has_active_job(&s3, true));
         ao.devices = Some(auto_devices(devices.clone()));
+        ao.folder_check=Some(Arc::new(super::folder_access::scan));
         let h3 = held.clone();
         ao.hold_discovered = Some(Arc::new(move |c: &Value, d: &Value| h3(c, d)));
         if let Some(n) = o.nodes.clone() {

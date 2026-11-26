@@ -878,3 +878,63 @@ fn a_running_smallest_job_refuses_lanes() {
     assert_eq!((&job["config"]["concurrency"], job["config"].get("lanes")), (&json!(2), None));
     assert_eq!(h.finish_job(&id)["state"], "completed");
 }
+
+
+#[test]
+fn readonly_folder_skips_before_encode_and_retries_after_permissions_change() {
+    use std::os::unix::fs::{PermissionsExt, MetadataExt};
+    assert_ne!(unsafe { libc::geteuid() }, 0, "run permission tests as an unprivileged user");
+    for replace in [true, false] {
+        let h = Harness::new(HarnessOptions {clips:2,hold:false,verify_ok:true,..Default::default()});
+        let folder = h.dir.path().join(if replace {"footage/RecentClips"} else {"out"});
+        let before = fs::metadata(&folder).unwrap();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+        let config = h.config(if replace {json!({"outputMode":"replace","destinationRoot":null,"replacementConfirmed":true})} else {json!({})});
+        let result = h.service().start(&config);
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err(), "one locked folder must block the whole start: {result:?}");
+        let error=result.unwrap_err(); assert!(error.is("FOLDERS_NOT_WRITABLE"),"{error:?}");
+        assert!(error.detail.as_deref().unwrap().contains("uid/gid"));
+        assert_eq!(h.spawned().len(),0);
+        assert!(h.service().list().unwrap().is_empty(),"a blocked start is not a failed job");
+        let after = fs::metadata(&folder).unwrap();
+        assert_eq!((before.mtime(), before.mtime_nsec()), (after.mtime(),after.mtime_nsec()),"no probe files or mtime changes");
+        let retry=h.service().start(&config).unwrap();
+        let retried=h.finish_job(&retry);
+        assert_eq!(h.spawned().len(),2,"{retried}");
+        assert!(retried["items"].as_array().unwrap().iter().all(|i| i["state"]=="completed"),"{retried}");
+    }
+}
+
+#[test]
+fn readonly_new_locked_folder_drains_inflight_and_pauses_then_resumes() {
+    midrun_folder_pause(true);
+    midrun_folder_pause(false);
+}
+fn midrun_folder_pause(replace:bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let h=Harness::new(HarnessOptions{clips:3,hold:true,verify_ok:true,..Default::default()});
+    let cfg=h.config(if replace {json!({"outputMode":"replace","destinationRoot":null,"replacementConfirmed":true})} else {json!({})});
+    let id=h.service().start(&cfg).unwrap();
+    assert!(until(||h.held().len()==1));
+    // The next queued clip now lives in a different folder that became locked.
+    let locked=h.dir.path().join("footage/SentryClips/new-upload");fs::create_dir_all(&locked).unwrap();
+    let rt=h.service().ensure_runtime(&id).unwrap();
+    assert!(until(||rt.manifest().items.len()==3));
+    let second=rt.manifest().items[1].value().clone();
+    let path=locked.join("2026-10-20_07-10-01-front.mp4");fs::rename(second["sourcePath"].as_str().unwrap(),&path).unwrap();
+    h.service().item_patch(&rt,second["id"].as_str().unwrap(),vec![("sourcePath",Some(json!(path))),("relativePath",Some(json!("SentryClips/new-upload/2026-10-20_07-10-01-front.mp4")))],vec![]).unwrap();
+    fs::set_permissions(&locked,fs::Permissions::from_mode(0o555)).unwrap();
+    h.finish(&h.held()[0]);
+    assert!(until(||h.service().get(&id).unwrap()["state"]=="paused"),"{:?}",h.service().get(&id));
+    let job=h.service().get(&id).unwrap();
+    assert_eq!(h.spawned().len(),1,"only the already admitted encode finishes");
+    assert_eq!(job["items"][0]["state"],"completed");
+    assert!(job["items"].as_array().unwrap().iter().all(|i|i["state"]!="failed"));
+    assert_eq!(job["permissionBlock"]["readOnlyCount"],1);
+    assert!(h.service().resume(&id).unwrap_err().is("FOLDERS_NOT_WRITABLE"));
+    fs::set_permissions(&locked,fs::Permissions::from_mode(0o755)).unwrap();
+    h.service().resume(&id).unwrap();let done=h.finish_job(&id);
+    assert!(done["items"].as_array().unwrap().iter().all(|i|i["state"]=="completed"),"{done}");
+    assert_eq!(h.spawned().len(),3,"completed clip must not run twice");
+}

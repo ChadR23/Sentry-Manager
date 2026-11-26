@@ -385,6 +385,18 @@ fn automatic_conversion_decides_as_node_decides() {
             panic!("{e}");
         }
     }
+    // The converter revision intentionally advances so old give-ups retry.
+    // Assert the current revision, then compare every other persisted field.
+    for (name,raw) in mine["files"].as_object_mut().unwrap() {
+        if !name.starts_with("index-") {continue;}
+        let mut index:Value=serde_json::from_str(raw.as_str().unwrap()).unwrap();
+        let reference:Value=serde_json::from_str(theirs["files"][name].as_str().unwrap()).unwrap();
+        for (rel,record) in index["gaveUp"].as_object_mut().unwrap() {
+            assert_eq!(record[2],super::auto_convert::CONVERTER_REVISION);
+            record[2]=reference["gaveUp"][rel][2].clone();
+        }
+        *raw=json!(index.to_string());
+    }
     assert_eq!(mine["files"], theirs["files"], "the files written");
     assert!(theirs["steps"].as_array().unwrap().iter().any(|s| s["calls"].as_array().unwrap().iter().any(|c| c[0] == "setLanes")), "the scenario reaches the lanes");
 }

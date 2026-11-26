@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-pub const CHANNELS: [&str; 30] = [
+pub const CHANNELS: [&str; 31] = [
     "converter:chooseFolder", "converter:start", "converter:getCurrent", "converter:pause", "converter:setConcurrency", "converter:resume", "converter:cancel", "converter:discard", "converter:retryFailed", "converter:dismissSummary",
     "converter:getCapabilities", "converter:subscribeProgress", "converter:unsubscribeProgress", "converter:runBenchmark", "converter:cancelBenchmark", "converter:getAuto", "converter:setAuto", "converter:checkAutoNow",
     "converter:saveVehicle", "converter:forgetVehicle", "converter:devices", "converter:setLanes",
@@ -24,7 +24,7 @@ pub const CHANNELS: [&str; 30] = [
     "converter:requestSpeedTest", "converter:applySpeedTest",
     "converter:failedClips",
     "converter:keptClips",
-    "converter:retryTemporary",
+    "converter:retryTemporary", "converter:checkFolders",
 ];
 const GROUPS: [&str; 3] = ["RecentClips", "SavedClips", "SentryClips"];
 const ACTIVE_STATES: [&str; 10] = ["discovering", "waiting", "staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing", "paused", "paused_network"];
@@ -59,7 +59,8 @@ fn code_err(code: String) -> IpcError {
 
 impl From<Fail> for IpcError {
     fn from(f: Fail) -> IpcError {
-        IpcError { code: f.code.unwrap_or_default(), retryable: f.retryable, details: None, own: false }
+        let blocked=f.is("FOLDERS_NOT_WRITABLE");
+        IpcError { code: f.code.unwrap_or_default(), retryable: f.retryable, details:if blocked {f.detail.map(|d|json!({"blocked":true,"message":d}))} else {None}, own: blocked }
     }
 }
 
@@ -156,6 +157,7 @@ impl ServiceApi for Service {
 // ---- payload checks ------------------------------------------------------------
 
 fn private_key(k: &str) -> bool {
+    if matches!(k,"processUid"|"processGid"|"source-nal-boundary"){return false;}
     let l = k.to_lowercase();
     PRIVATE_WORDS.iter().any(|w| l.contains(w))
 }
@@ -255,6 +257,7 @@ pub fn sanitize_snapshot(snapshot: &Value) -> R<Value> {
         json!({"code":code,"resultCode":result,"retryable":retryable,"encoder":encoder,"count":count})).collect::<Vec<_>>());
     let gpu_retries=items.iter().filter(|i| (i["state"]=="queued" || i["state"]=="processing") && i["resultCode"]=="gpu-memory-retry").count();
     let too_short=items.iter().filter(|i| (i["state"]=="skipped" || i["state"]=="completed") && i["resultCode"]=="too-short").count();
+    let kept_counts=items.iter().filter(|i| (i["state"]=="skipped" || i["state"]=="completed") && super::service::tools::is_kept(i["resultCode"].as_str().unwrap_or(""))).fold(BTreeMap::<String,usize>::new(),|mut m,i|{*m.entry(i["resultCode"].as_str().unwrap().into()).or_default()+=1;m});
     let mut limit = 256usize;
     loop {
         let mut selected: Vec<usize> = Vec::new();
@@ -286,6 +289,7 @@ pub fn sanitize_snapshot(snapshot: &Value) -> R<Value> {
         prepared.insert("itemFailureCounts".into(), failure_counts.clone());
         prepared.insert("itemGpuRetryCount".into(),json!(gpu_retries));
         prepared.insert("itemTooShortCount".into(),json!(too_short));
+        prepared.insert("itemKeptCounts".into(),json!(kept_counts));
         prepared.insert("cleanupPendingCount".into(), json!(cleanup_pending));
         prepared.insert("itemsTruncated".into(), json!(true));
         match bounded(&Value::Object(prepared), MAX_SNAPSHOT_BYTES, true, true) {
@@ -339,6 +343,7 @@ pub fn response_error(e: &IpcError) -> Value {
     let mut err = Map::new();
     err.insert("code".into(), json!(if ok { raw } else { "OPERATION_FAILED".into() }));
     err.insert("retryable".into(), json!(e.retryable));
+    if e.code == "FOLDERS_NOT_WRITABLE" {err.insert("message".into(),e.details.as_ref().map(|d|d["message"].clone()).unwrap_or(json!("Shrinking is blocked by read-only folders.")));err.insert("blocked".into(),json!(true));}
     if e.code == "SPEED_TEST_RUNNING" {
         err.insert("message".into(), json!("A speed test is running; resume when it finishes"));
     }
@@ -825,6 +830,11 @@ impl Bridge {
                 self.check_lane_encoders(&config)?;
                 Ok(json!({ "jobId": safe_job_id(Some(&json!(self.service.start(&config)?)))? }))
             }
+            "checkFolders" => {
+                let Some(m)=p.and_then(Value::as_object).filter(|m|m.len()==1 && m.contains_key("config")) else {return fail("INVALID_REQUEST")};
+                let config=validate_start_config(m.get("config"), &replacement)?;
+                Ok(json!(super::folder_access::scan(&config)))
+            }
             "getCurrent" => {
                 no_payload(p)?;
                 self.current_job()
@@ -834,7 +844,7 @@ impl Bridge {
                 let Some(offset) = m.get("offset").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()) else { return fail("INVALID_REQUEST") };
                 let job = self.service.get(&safe_job_id(m.get("jobId"))?)?;
                 let failed: Vec<&Value> = job["items"].as_array().into_iter().flatten().filter(|i| i["state"] == "failed" ||
-                    (name == "keptClips" && (i["state"] == "skipped" || i["state"] == "completed") && i["resultCode"] == "too-short")).collect();
+                    (name == "keptClips" && (i["state"] == "skipped" || i["state"] == "completed") && super::service::tools::is_kept(i["resultCode"].as_str().unwrap_or("")))).collect();
                 let items: Vec<Value> = failed.iter().skip(offset).take(100).map(|i| {
                     let mut row=json!({
                     "relativePath":i["relativePath"],"resultCode":i["resultCode"],"encoder":i["encoder"],
@@ -1413,6 +1423,15 @@ mod tests {
         let balanced = validate_start_config(Some(&config("balanced")), "available").unwrap();
         assert_eq!((&balanced["lanes"], &balanced["concurrency"]), (&lanes, &json!(3)));
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn readonly_large_kept_counts_preserve_all_three_source_reasons() {
+        let codes=["source-duplicate-timestamp","source-nal-boundary","source-unfinished-sample-table"];
+        let items:Vec<Value>=(0..900).map(|i|json!({"id":format!("item-{i}"),"state":"skipped","resultCode":codes[i%3]})).collect();
+        let snapshot=sanitize_snapshot(&json!({"id":"job-1","items":items})).unwrap();
+        for code in codes {assert_eq!(snapshot["itemKeptCounts"][code],300,"{code}");}
+        assert_eq!(snapshot["itemStateCounts"]["failed"],0);
     }
 
     #[test]

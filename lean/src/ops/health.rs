@@ -164,6 +164,16 @@ pub fn checks(ctx: &dyn OpsCtx, snapshots: Option<&Snapshots>) -> Vec<Value> {
         }
     }
 
+    // Full folder walk once per health request/startup, never per clip. Access
+    // queries neither create probe files nor change directory mtimes.
+    for (n,config) in ctx.converter_folders().iter().enumerate() {
+        let report=crate::converter::folder_access::scan(config);
+        let unreadable=report.roots.iter().any(|r|r.unreadable.count>0);
+        if !report.blocked() && !unreadable {continue;}
+        out.push(check(&format!("converter-folders-{n}"),"Video","Shrinking folder permissions",
+            "warn",&report.detail(),&report.hint));
+    }
+
     // ---- video tools
     let ten = Duration::from_secs(10);
     let ff = sys::first_line(&ctx.ffmpeg_path(), &["-hide_banner", "-version"], ten);
@@ -311,9 +321,14 @@ pub fn startup_check(ctx: &dyn OpsCtx, health: &Health, notes: &Notes, snapshots
     if let Some(e) = unkept {
         ctx.log("health", Level::Error, &format!("Startup check: its notifications were not kept: {e}"));
     }
+    for c in checks.iter().filter(|c|c["status"]=="warn" && c["id"].as_str().is_some_and(|id|id.starts_with("converter-folders-"))) {
+        ctx.log("health",Level::Warn,&format!("Startup check: {}: {}",s(c,"label"),s(c,"detail")));
+    }
     if !bad.is_empty() {
         let text: Vec<String> = bad.iter().map(|c| format!("{}{}", s(c, "label"), if s(c, "detail").is_empty() { String::new() } else { format!(" ({})", s(c, "detail")) })).collect();
         ctx.log("health", Level::Error, &format!("Startup check: {}", text.join("; ")));
+    } else if checks.iter().any(|c|c["status"]=="warn") {
+        ctx.log("health", Level::Info, "Startup check: no failed checks; review the warnings in Health");
     } else {
         ctx.log("health", Level::Info, &format!("Startup check: all {} checks passed or were skipped", checks.len()));
     }
@@ -397,5 +412,29 @@ mod tests {
         *ctx.ffmpeg.lock().unwrap() = "true".into();
         startup_check(&*ctx, &h, &notes, None);
         assert!(store::list(&ctx.db(), true, 200, None).unwrap().iter().all(|n| n["dedupeKey"] != "health:ffmpeg"));
+    }
+}
+
+#[cfg(test)]
+mod readonly_tests {
+    use super::*;
+    use crate::ops::{testing::FakeCtx,ctx::VehicleInfo};
+    use std::os::unix::fs::{PermissionsExt,MetadataExt};
+    #[test]
+    fn readonly_health_names_child_folders_without_writing_to_them() {
+        let ctx=FakeCtx::new(); let root=ctx.data_dir().join("footage");
+        let folder=root.join("SavedClips/generated"); std::fs::create_dir_all(&folder).unwrap();
+        let before=std::fs::metadata(&folder).unwrap();
+        std::fs::set_permissions(&folder,std::fs::Permissions::from_mode(0o555)).unwrap();
+        ctx.vehicles.lock().unwrap().push(VehicleInfo{id:"generated".into(),name:"Generated".into(),roots:vec![root.to_string_lossy().into()],..Default::default()});
+        let findings=checks(&*ctx,None);
+        std::fs::set_permissions(&folder,std::fs::Permissions::from_mode(0o755)).unwrap();
+        let finding=findings.iter().find(|c|c["id"].as_str().is_some_and(|id|id.starts_with("converter-folders-")));
+        assert!(finding.is_some(),"missing folder health finding: {findings:?}");
+        let finding=finding.unwrap(); assert_eq!(finding["status"],"warn");
+        let text=finding.to_string(); for expected in ["1 folder", "SavedClips/generated", "uid/gid", "Docker Safe New Perms", "new footage"] {assert!(text.contains(expected),"{expected}: {text}");}
+        let after=std::fs::metadata(&folder).unwrap(); assert_eq!((before.mtime(),before.mtime_nsec()),(after.mtime(),after.mtime_nsec()));
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(),0);
+        assert!(!checks(&*ctx,None).iter().any(|c|c["id"].as_str().is_some_and(|id|id.starts_with("converter-folders-"))),"healthy folder scans must preserve existing health answers");
     }
 }

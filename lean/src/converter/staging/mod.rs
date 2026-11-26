@@ -1108,7 +1108,13 @@ impl Tx {
             let tf = if a.resume.is_some() {
                 fs::OpenOptions::new().read(true).write(true).open(target)?
             } else {
-                let f = fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(target)?;
+                let f = fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(target).map_err(|e| {
+                    if super::folder_access::denied(&e) {
+                        let mut failure=txe("FOLDER_NOT_WRITABLE");
+                        failure.detail=Some(format!("{}: {e}",super::folder_access::folder_detail(Path::new(target).parent().unwrap_or(Path::new(target)))));
+                        failure
+                    } else {e.into()}
+                })?;
                 super::fs_hook::event("open-new", Path::new(target));
                 f
             };

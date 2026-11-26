@@ -144,9 +144,10 @@ pub(crate) fn initial_plan(
 impl Service {
     // ---- the save slot and the lead
 
-    pub fn begin_item(rt: &Runtime, item: &Value) {
+    pub fn begin_item(rt: &Runtime, item: &Value) -> bool {
         let id = item["id"].as_str().unwrap_or("").to_string();
         let mut s = rt.lock();
+        if s.pause_requested {return false;}
         if !s.in_flight.contains(&id) {
             s.in_flight.push(id.clone());
         }
@@ -154,6 +155,7 @@ impl Service {
             s.lead_item_id = Some(id.clone());
         }
         s.ownerships.insert(id, ownership_of(item));
+        true
     }
 
     pub fn finish_item(&self, rt: &Runtime, id: &str) {
@@ -579,7 +581,19 @@ impl Service {
         let replace = config.get("outputMode").and_then(Value::as_str) == Some("replace");
         let tidy = |d: &super::super::scanner::TidyDir| -> bool { !stopped(rt) && !rt.aborted() && self.tidy_backups(rt, d) };
         let tidy_ref: Option<super::super::scanner::Tidy> = if replace { Some(&tidy) } else { None };
-        let scan = super::super::scanner::scan_tidy(&config, Some(&signal), Some(&retry), tidy_ref, &mut |d| {
+        let issues=Mutex::new(super::super::folder_access::Issues::default());
+        let on_issue=|path:&Path,error:&std::io::Error| {
+            super::log_line(format!("[CONVERTER] Job {} discovery skipped {}: {}: {error}",m.id(),path.display(),super::super::owned::errno_code(error)));
+            issues.lock().unwrap().note(path,error);
+        };
+        let visit=|dir:&Path| {
+            if rt.lock().manifest.get("permissionBlock").is_some_and(|v|!v.is_null()) {return;}
+            if super::super::folder_access::writable(dir).is_err_and(|e|super::super::folder_access::denied(&e)) {
+                let report=super::super::folder_access::scan(&config);
+                if let Err(e)=self.pause_for_folders(rt,&report) {super::log_line(format!("[CONVERTER] Could not record folder pause: {e}"));}
+            }
+        };
+        let scan = super::super::scanner::scan_reporting(&config, Some(&signal), Some(&retry), tidy_ref, &on_issue, Some(&visit), &mut |d| {
             if stopped(rt) {
                 return false;
             }
@@ -621,6 +635,8 @@ impl Service {
             }
             true
         });
+        let issues=issues.into_inner().unwrap();
+        if issues.count>0 {self.update(rt,|_|Some(Patch::new().set("discoveryIssues",json!(issues))))?;}
         let outcome = match (scan, failure) {
             (_, Some(f)) => Err(f),
             (Err(e), None) => Err(Fail::from(e)),
@@ -943,7 +959,13 @@ impl Service {
                         ("eligibleVideo", Some(json!(false))), ("resultCode", Some(json!("auto-deferred")))], vec![])?;
                     continue;
                 }
-                Self::begin_item(rt, &item);
+                if let Err(e)=self.folder_preflight(rt,&item) {
+                    self.fail_item(rt,&next,&e)?;
+                    continue;
+                }
+                // A discovery/periodic check may have blocked admission while
+                // this worker checked its folder; park without consuming its item.
+                if !Self::begin_item(rt, &item) {rt.lock().queue.push_front(next);continue;}
                 let outcome = if item["kind"] == "asset" {
                     self.process_asset(rt, &item, ("asset-retained", "copied"))
                 } else {
@@ -1037,6 +1059,7 @@ impl Service {
             if s.running && s.run_kind != Some("recovery") {
                 return;
             }
+            if s.manifest.get("permissionBlock").is_some_and(|v|!v.is_null()){s.pause_requested=true;}
             s.running = true;
             if s.run_kind != Some("recovery") {
                 s.run_kind = Some("job");
@@ -1201,6 +1224,11 @@ impl Service {
 
     fn keep_original_when_no_savings(&self, rt: &Arc<Runtime>, item: &Value, lane: Option<&lanes::Lane>) -> SResult<()> {
         match self.process_video(rt, item, lane) {
+            Err(e) if e.code.as_deref().and_then(tools::kept_code).is_some() && Self::ownership_for(rt,item["id"].as_str().unwrap()).is_none_or(|o|o.paths.is_empty()) => {
+                let code=tools::kept_code(e.code.as_deref().unwrap()).unwrap();
+                log_line(format!("[CONVERTER] Job {} kept clip {:?} as recorded: {e}: {}",rt.manifest().id(),item["relativePath"].as_str().unwrap_or(""),e.detail.as_deref().unwrap_or("source defect")));
+                self.process_asset(rt,item,(code,code))
+            }
             Err(e) if e.is("SOURCE_TOO_SHORT") => self.process_asset(rt, item, ("too-short", "too-short")),
             Err(e) if e.is("KEEP_ORIGINAL") && Self::ownership_for(rt, item["id"].as_str().unwrap()).map_or(true, |o| o.paths.is_empty()) => {
                 let current = rt.lock().item(item["id"].as_str().unwrap()).unwrap_or_else(|| item.clone());
@@ -1740,7 +1768,7 @@ impl Service {
 
     /// failItem(runtime, itemId, error)
     pub fn fail_item(&self, rt: &Arc<Runtime>, item_id: &str, e: &Fail) -> SResult<()> {
-        let retryable = e.retryable || Self::is_retryable_network(e);
+        let retryable = e.retryable || e.is("FOLDER_NOT_WRITABLE") || Self::is_retryable_network(e);
         let code = stable_failure(e, "operation-failed");
         // Log the initiating error before cleanup or its manifest write can
         // fail too. Encode/save/cancellation errors may have no other log.
@@ -1806,7 +1834,9 @@ impl Service {
         let stopped = (stop_requested || halted_by_recovery || withdrawn) && !cancel_requested;
         let terminally = cancel_requested;
         let own = cleanup.own.clone();
-        let next = if stopped { ItemState::Queued } else if terminally { ItemState::Cancelled } else { ItemState::Failed };
+        let folder_blocked=e.is("FOLDER_NOT_WRITABLE") && cleanup.cleaned && !stopped && !terminally;
+        if folder_blocked {let report=super::super::folder_access::scan(rt.manifest().config());self.pause_for_folders(rt,&report)?;}
+        let next = if stopped { ItemState::Queued } else if terminally { ItemState::Cancelled } else if folder_blocked {ItemState::Skipped} else { ItemState::Failed };
         let changes: Changes = vec![
             ("state", Some(next.into())),
             ("failure", if stopped || terminally { None } else { Some(json!({ "code": code, "retryable": retryable })) }),
@@ -1919,7 +1949,9 @@ impl Service {
             self.emit(rt, "paused", vec![]);
             return Ok(());
         }
-        if m.state() == JobState::Failed {
+        if m.state() == JobState::Failed {return Ok(());}
+        if m.get("permissionBlock").is_some_and(|v|!v.is_null()) {
+            self.update(rt,|_|Some(Patch::new().state(JobState::Paused).set("activeItemId",Value::Null)))?;
             return Ok(());
         }
         if m.get("discoveryComplete") == Some(&json!(false)) {

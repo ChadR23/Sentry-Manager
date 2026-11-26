@@ -166,6 +166,8 @@ struct Walk<'a> {
     cancel: Option<&'a AtomicBool>,
     retry: Option<Retry<'a>>,
     tidy: Option<Tidy<'a>>,
+    issue: &'a dyn Fn(&Path, &std::io::Error),
+    visit: Option<&'a dyn Fn(&Path)>,
 }
 
 fn vanished(e: &std::io::Error) -> bool {
@@ -177,7 +179,11 @@ impl<'a> Walk<'a> {
         self.cancel.is_some_and(|c| c.load(AtOrd::SeqCst))
     }
     fn list(&self, dir: &Path) -> std::io::Result<Vec<fs::DirEntry>> {
-        let mut op = || -> std::io::Result<Vec<fs::DirEntry>> { fs::read_dir(dir)?.collect() };
+        let mut op = || -> std::io::Result<Vec<fs::DirEntry>> {
+            let mut entries=vec![];
+            for e in fs::read_dir(dir)? {match e {Ok(e)=>entries.push(e),Err(e)=>(self.issue)(dir,&e)}}
+            Ok(entries)
+        };
         match self.retry {
             Some(r) => r(dir, &mut op),
             None => op(),
@@ -196,12 +202,12 @@ impl<'a> Walk<'a> {
     fn listed(&self, dir: &Path) -> CResult<Option<Vec<(String, fs::FileType)>>> {
         let entries = match self.list(dir) {
             Ok(e) => e,
-            Err(e) if vanished(&e) && dir != self.source_root => return Ok(None),
-            Err(e) => return Err(io_err(e)),
+            Err(e) if dir != self.source_root && !self.aborted() => { (self.issue)(dir,&e); return Ok(None); },
+            Err(e) => return Err(CError::new(super::owned::errno_code(&e),format!("Unreadable source root {}: {e}",dir.display()))),
         };
         let mut named: Vec<(String, fs::FileType)> = Vec::new();
         for e in entries {
-            let t = e.file_type().map_err(io_err)?;
+            let t = match e.file_type() {Ok(t)=>t,Err(err)=>{(self.issue)(&e.path(),&err);continue;}};
             named.push((e.file_name().to_string_lossy().to_string(), t));
         }
         // (Array.prototype.sort is stable; equal group ranks keep the listing's order)
@@ -212,6 +218,7 @@ impl<'a> Walk<'a> {
         if self.aborted() {
             return Err(cancelled());
         }
+        if let Some(visit)=self.visit {visit(dir);}
         let mut named = match self.listed(dir)? {
             Some(n) => n,
             None => return Ok(true),
@@ -260,8 +267,7 @@ impl<'a> Walk<'a> {
                 }
                 let real = match fs::canonicalize(&child) {
                     Ok(r) => r,
-                    Err(e) if vanished(&e) => continue,
-                    Err(e) => return Err(io_err(e)),
+                    Err(e) => {(self.issue)(&child,&e);continue;},
                 };
                 if !same_or_descendant(&self.source_real, &real) {
                     continue;
@@ -300,8 +306,7 @@ impl<'a> Walk<'a> {
             }) {
                 Ok(Some(st)) => st,
                 Ok(None) => continue,
-                Err(e) if vanished(&e) => continue,
-                Err(e) => return Err(io_err(e)),
+                Err(e) => {(self.issue)(&child,&e);continue;},
             };
             if !st.is_file() {
                 continue;
@@ -368,6 +373,10 @@ pub fn scan(config: &Value, cancel: Option<&AtomicBool>, retry: Option<Retry>, o
 
 /// scan, with `tidy` shown each folder's BACKUP- names first (replace jobs).
 pub fn scan_tidy(config: &Value, cancel: Option<&AtomicBool>, retry: Option<Retry>, tidy: Option<Tidy>, out: &mut dyn FnMut(Discovered) -> bool) -> CResult<()> {
+    scan_reporting(config,cancel,retry,tidy,&|p,e|super::service::log_line(format!("[CONVERTER] Discovery skipped {}: {}: {e}",p.display(),super::owned::errno_code(e))),None,out)
+}
+
+pub fn scan_reporting(config:&Value,cancel:Option<&AtomicBool>,retry:Option<Retry>,tidy:Option<Tidy>,issue:&dyn Fn(&Path,&std::io::Error),visit:Option<&dyn Fn(&Path)>,out:&mut dyn FnMut(Discovered)->bool)->CResult<()> {
     let Some(root) = config.get("sourceRoot").and_then(Value::as_str).filter(|s| !s.is_empty()) else { return Err(CError::type_error("sourceRoot is required")) };
     let included: Vec<&'static str> = match config.get("includedGroups") {
         None | Some(Value::Null) => GROUPS.to_vec(),
@@ -386,7 +395,7 @@ pub fn scan_tidy(config: &Value, cancel: Option<&AtomicBool>, retry: Option<Retr
     };
     let order = group_order(config.get("groupOrder"))?;
     let source_root = resolve(Path::new(root));
-    let source_real = fs::canonicalize(&source_root).map_err(io_err)?;
+    let source_real = fs::canonicalize(&source_root).map_err(|e|CError::new(super::owned::errno_code(&e),format!("Unreadable source root {}: {e}",source_root.display())))?;
     let destination = match config.get("destinationRoot").and_then(Value::as_str).filter(|s| !s.is_empty()) {
         Some(d) => Some(resolve_destination(d)?),
         None => None,
@@ -402,7 +411,7 @@ pub fn scan_tidy(config: &Value, cancel: Option<&AtomicBool>, retry: Option<Retr
     }
     let dest_abs_inside = destination.as_ref().is_some_and(|(a, _)| same_or_descendant(&source_root, a));
     let dest_real_inside = destination.as_ref().is_some_and(|(_, r)| same_or_descendant(&source_real, r));
-    let w = Walk { included, order, source_root: source_root.clone(), source_real, destination, dest_abs_inside, dest_real_inside, cancel, retry, tidy };
+    let w = Walk { included, order, source_root: source_root.clone(), source_real, destination, dest_abs_inside, dest_real_inside, cancel, retry, tidy, issue, visit };
     w.walk(&source_root, &[], root_group, &[], out)?;
     Ok(())
 }
@@ -587,5 +596,30 @@ mod tests {
         .unwrap();
         assert_eq!(n, 3);
         fs::remove_dir_all(&base).unwrap();
+    }
+}
+
+
+#[cfg(test)]
+mod readonly_tests {
+    use super::*;
+    #[test]
+    fn readonly_discovery_skips_one_unreadable_subfolder_but_not_the_root() {
+        let d = crate::converter::testutil::tempdir().unwrap();
+        for name in ["bad", "good"] {
+            fs::create_dir_all(d.path().join("SavedClips").join(name)).unwrap();
+            fs::write(d.path().join("SavedClips").join(name).join("2026-01-01_00-00-00-front.mp4"), b"generated").unwrap();
+        }
+        let retry = |p: &Path, op: &mut dyn FnMut() -> std::io::Result<Vec<fs::DirEntry>>| {
+            if p.ends_with("bad") { Err(std::io::Error::from_raw_os_error(libc::EACCES)) } else { op() }
+        };
+        let mut found = vec![];
+        let r = scan(&json!({"sourceRoot":d.path()}), None, Some(&retry), &mut |v| {found.push(v);true});
+        assert!(r.is_ok(), "a child permission error must not kill discovery: {r:?}");
+        assert_eq!(found.len(), 1);
+        let deny = |_: &Path, _: &mut dyn FnMut() -> std::io::Result<Vec<fs::DirEntry>>| Err(std::io::Error::from_raw_os_error(libc::EACCES));
+        let err = scan(&json!({"sourceRoot":d.path()}), None, Some(&deny), &mut |_| true).unwrap_err();
+        assert_eq!(err.code, "EACCES");
+        assert!(err.message.contains("source root"), "{err}");
     }
 }

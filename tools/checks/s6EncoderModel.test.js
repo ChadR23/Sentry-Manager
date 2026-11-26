@@ -87,37 +87,18 @@ test('queued temporary retries and successful retries supersede their stale Acti
   assert.equal(model.currentFailureExplained?.(job,{...snapshot,state:'completed',items:[]}),true);
 });
 
-test('damaged clips kept as recorded are separate from actionable failures', () => {
-  const damaged = Array.from({length:5}, (_, i) => ({state:'failed', relativePath:`RecentClips/generated-${i}.mp4`,
-    resultCode:i === 4 ? 'invalid-h264' : 'frame-count-mismatch', failure:{retryable:false}}));
-  const result = model.clipFailures?.({items:damaged});
-  assert.equal(result?.damaged, 5);
-  assert.equal(result?.attention, 0);
-  assert.equal(result?.keptText, '5 damaged clips kept as recorded');
-  assert.equal(result?.items.length, 5);
-  assert.match(result?.items[0].reason || '', /every.*frame/);
-  assert.match(result?.items[4].reason || '', /cannot be read/);
-  assert.doesNotMatch(result?.explanation || '', /retry|Expert/);
-  const single = model.clipFailures?.({items:[damaged[4]]});
-  assert.equal(single?.keptText, '1 damaged clip kept as recorded');
-  const attention = model.clipFailures?.({items:[
-    {...damaged[0],failure:{retryable:true}}, {...damaged[0],failure:{}},
-    {...damaged[0],resultCode:'cleanup-pending'}, {...damaged[0],resultCode:'EIO',failure:{retryable:true}},
-  ]});
-  assert.equal(attention?.damaged, 0);
-  assert.equal(attention?.attention, 4);
-  assert.match(attention?.attentionText || '', /Open Expert.*retry/);
+test('only proven original defects are kept; old unproven failures remain actionable', () => {
+  const codes=['source-duplicate-timestamp','source-nal-boundary','source-unfinished-sample-table'];
+  const originals=codes.map((resultCode,i)=>({state:'skipped',resultCode,relativePath:`RecentClips/generated-${i}.mp4`}));
+  const result=model.clipFailures({items:originals});
+  assert.equal(result.kept,3);assert.equal(result.attention,0);assert.equal(result.items.length,3);
+  assert.match(result.items[0].reason,/timestamp/);assert.match(result.items[1].reason,/boundary/);assert.match(result.items[2].reason,/unfinished/);
+  const unknown=model.clipFailures({items:['invalid-h264','frame-count-mismatch','source-invalid','cleanup-pending'].map(resultCode=>({state:'failed',resultCode,failure:{retryable:false}}))});
+  assert.equal(unknown.kept,0);assert.equal(unknown.attention,4);
 });
-
-test('truncated failure snapshots use all recorded reasons and keep unknown failures actionable', () => {
-  const result = model.clipFailures?.({items:[],itemStateCounts:{failed:500},itemFailureCounts:[
-    {code:'frame-count-mismatch',resultCode:'frame-count-mismatch',retryable:false,count:400},
-    {code:'invalid-h264',resultCode:'invalid-h264',retryable:false,count:50},
-    {code:'EIO',resultCode:'EIO',retryable:true,count:40},
-  ]});
-  assert.equal(result?.damaged, 450);
-  assert.equal(result?.attention, 50);
-  assert.equal(result?.items.length, 0);
+test('trimmed snapshots retain source-specific kept totals separately from failed totals', () => {
+  const result=model.clipFailures({items:[],itemStateCounts:{failed:50},itemKeptCounts:{'source-nal-boundary':400,'source-duplicate-timestamp':50}});
+  assert.equal(result.damaged,450);assert.equal(result.kept,450);assert.equal(result.attention,50);assert.equal(result.items.length,0);
 });
 
 test('server-tested local lanes retain the guided level, manual and node lanes stay custom', () => {

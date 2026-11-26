@@ -27,7 +27,7 @@ const SAVED_FILE: &str = "vehicles.json";
 const MAX_FAILED_SWEEPS: i64 = 3;
 /// Raised whenever encoding or verification changes in a way that could let
 /// given-up clips convert now (see autoConvert.js).
-pub const CONVERTER_REVISION: i64 = 5;
+pub const CONVERTER_REVISION: i64 = 6;
 const INDEX_VERSION: i64 = 2;
 const TERMINAL: [&str; 3] = ["completed", "failed", "cancelled"];
 const MAX_SOURCES: usize = 64;
@@ -366,6 +366,7 @@ pub struct AutoOptions {
     pub devices: Option<Arc<dyn Fn() -> Result<Vec<Value>, String> + Send + Sync>>,
     /// which vehicles each helper server takes first ({ 'node:<id>': [sourceRoot] })
     pub node_priorities: Option<Arc<dyn Fn() -> Value + Send + Sync>>,
+    pub folder_check: Option<Arc<dyn Fn(&Value)->super::folder_access::Report + Send + Sync>>,
 }
 
 impl AutoOptions {
@@ -387,6 +388,7 @@ impl AutoOptions {
             hold_discovered: None,
             devices: None,
             node_priorities: None,
+            folder_check: None,
         }
     }
 }
@@ -617,7 +619,7 @@ impl Auto {
             let rel = item["relativePath"].as_str().unwrap_or("").to_string();
             let (state, code) = (item["state"].as_str().unwrap_or(""), item["resultCode"].as_str().unwrap_or(""));
             // Deferred eligibility is temporary, not a handled or failed clip.
-            if state == "skipped" && code == "auto-deferred" {
+            if (state == "skipped" && ["auto-deferred", "folder-not-writable"].contains(&code)) || code == "publication-artifact-changed" {
                 continue;
             }
             // (the stat outside the lock)
@@ -797,9 +799,18 @@ impl Auto {
             if self.lock().settings["enabled"] != true {
                 continue;
             }
+            let inside = inside || catching.contains(&root);
+            if job["state"]=="paused" && job.get("permissionBlock").is_some_and(|v|!v.is_null()) {
+                if !inside || entry["pausedForDevices"] == true {continue;}
+                match self.o.service.resume(&id) {
+                    Ok(_)=>Self::note_source(&mut self.lock(),&root,json!({"blocked":false,"folderAccess":null,"error":null})),
+                    Err(e) if e.is("FOLDERS_NOT_WRITABLE") || e.is("JOB_ACTIVE") || e.is("SPEED_TEST_RUNNING")=>{},
+                    Err(e)=>return Err(code_of(&e)),
+                }
+                continue;
+            }
             let paused_window = entry["pausedForWindow"] == true;
             // (a catch-up run ignores the window; a job the user paused stays paused either way)
-            let inside = inside || catching.contains(&root);
             if !inside && !paused_window && job["state"] != "paused" {
                 self.o.service.pause(job["id"].as_str().unwrap_or("")).map_err(|e| code_of(&e))?;
                 self.set_entry(&root, "pausedForWindow", true);
@@ -986,6 +997,14 @@ impl Auto {
                 }
                 c.unwrap()
             };
+            if let Some(check)=&self.o.folder_check {
+                let report=check(&config);
+                Self::note_source(&mut self.lock(),&root,json!({"folderAccess":report,"blocked":report.blocked(),"error":null}));
+                if report.blocked() {
+                    let mut s=self.lock();s.status["pending"].as_object_mut().unwrap().shift_remove(&root);
+                    self.defer_catch_up(&mut s,&root);continue;
+                }
+            }
             self.lock().status["activeSource"] = json!(root);
             self.changed();
             let (new_files, error) = match self.sweep(&config) {
@@ -1034,6 +1053,11 @@ impl Auto {
                 }
                 self.changed();
                 true
+            }
+            Err(e) if e.is("FOLDERS_NOT_WRITABLE") => {
+                let report=super::folder_access::cached(config);
+                let mut s=self.lock();Self::note_source(&mut s,root,json!({"blocked":true,"folderAccess":report,"error":null}));
+                s.status["pending"].as_object_mut().unwrap().shift_remove(root);self.defer_catch_up(&mut s,root);false
             }
             Err(e) if e.is("JOB_ACTIVE") => false,
             Err(e) => {

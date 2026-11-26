@@ -29,7 +29,7 @@
     "uiMethodUnknown": 52,
     "liveChannels": 2,
     "liveEventTypes": 5,
-    "converterIpcChannels": 22,
+    "converterIpcChannels": 23,
     "uiCallsWithoutRoute": 0,
     "routesNoUiCalls": 14,
     "routesNoUiCallsExternal": 12,
@@ -3676,6 +3676,10 @@
     }
   ],
   "converterIpcChannels": [
+    {
+      "name": "checkFolders",
+      "call": "POST /api/converter/invoke/checkFolders"
+    },
     {
       "name": "chooseFolder",
       "call": "POST /api/converter/invoke/chooseFolder"

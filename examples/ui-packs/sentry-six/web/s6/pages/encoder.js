@@ -1,7 +1,7 @@
 import { esc, invoke as previewInvoke, api as previewApi, clientId, scope } from '../core.js';
 import { icon } from '../icons.js';
 import { size } from '../format.js';
-import { KEEP_CHIPS, LEVELS, fromSaved, toVehicleConfig, toAutoSettings, planSentence, scheduleText, nextCheckLabel, expertSummary, dayStates, levelOf, levelDevice, previewPercent, previewMeasured, previewSource, previewMegabytes, previewProgress, previewFailure, dayHeat, footageEstimate, nextAgingDay, catchUpProgress, speedStatus, speedEstimate, statusNoun, clipFailures, currentFailureExplained } from '../encoderModel.js';
+import { KEEP_CHIPS, LEVELS, fromSaved, toVehicleConfig, toAutoSettings, planSentence, scheduleText, nextCheckLabel, expertSummary, dayStates, levelOf, levelDevice, previewPercent, previewMeasured, previewSource, previewMegabytes, previewProgress, previewFailure, dayHeat, footageEstimate, nextAgingDay, catchUpProgress, speedStatus, speedEstimate, statusNoun, clipFailures, currentFailureExplained, currentRunSummary, folderBlockText, discoveryIssueText } from '../encoderModel.js';
 import { onPreview, streamReady, follow, counts, ACTIVE, PAUSED, describe, applySnapshot, hardwareLabel } from '../convert.js';
 import { describeJob } from '../jobs.js';
 
@@ -56,11 +56,14 @@ async function renderStatus(mount, ctx, initial, show) {
       <div class="encoder-status-copy"><div class="encoder-on-pill">Automatic shrinking is on</div><h2 tabindex="-1">${esc(vehicle.name)} is set. You can forget about it.</h2><p data-plan></p></div>
       <div class="encoder-status-actions"><button type="button" data-change>Change setup</button><button type="button" class="ghost" data-off>Turn off</button></div>
     </div><div data-custom-status hidden></div><p data-separate-output hidden>Copies go to a separate folder, so this doesn't free space on the drive.</p><div class="encoder-summary" data-status-numbers></div>
+      <p class="encoder-estimate-note" data-current-run></p>
+      <p class="encoder-estimate-note" data-discovery-issues hidden></p>
       <p class="encoder-estimate-note" data-savings-note hidden>Recorded savings for this vehicle since its savings counter was last reset.</p>
       <details class="encoder-kept encoder-estimate-note" data-kept hidden><summary data-kept-summary></summary><p data-kept-explanation></p><ul data-kept-list></ul><p data-kept-note></p><button type="button" data-kept-more hidden>Show more clips</button></details>
       <p class="encoder-estimate-note" data-gpu-retrying hidden role="status"></p>
     </section>
-    <section class="card encoder-catchup" data-catchup hidden aria-labelledby="encoder-catchup-heading"><div class="encoder-catchup-header"><h3 id="encoder-catchup-heading">Catching up on older footage</h3><button type="button" data-job-command hidden>Pause</button></div><div data-catchup-progress></div><small>Pause holds until you press Resume.</small></section>
+    <section class="card" data-folder-block hidden><h3>Shrinking is blocked</h3><p data-folder-reason></p><button type="button" data-folder-check>Check again</button></section>
+    <section class="card encoder-catchup" data-catchup hidden aria-labelledby="encoder-catchup-heading"><div class="encoder-catchup-header"><h3 id="encoder-catchup-heading">Catching up on older footage</h3><button type="button" data-job-command hidden>Pause</button></div><div data-catchup-progress></div><small data-pause-hint>Pause holds until you press Resume.</small></section>
     <section class="card encoder-speed" aria-labelledby="encoder-speed-heading"><div class="encoder-catchup-header"><h3 id="encoder-speed-heading">Speed test</h3><button type="button" data-speed-test>Test again</button></div><p data-speed-summary role="status"></p><p data-speed-current hidden></p><button type="button" data-speed-apply hidden>Use these settings</button><small>Runs now if shrinking is paused, otherwise when the current shrinking run is paused or finished.</small></section>
     <section class="card"><h3>Coming up</h3><div class="encoder-review" data-coming-up></div><p class="encoder-estimate-note" data-next-work></p><small>Check times shown in ${esc(zone)}. Footage dates use ${esc(vehicle.timezone)}.</small></section>
     <section class="card encoder-problems" data-problems hidden aria-labelledby="encoder-problems-heading"><h3 id="encoder-problems-heading">Needs attention</h3><div data-problem-list role="status"></div><div class="form-actions"><button type="button" data-retry-temporary hidden>Retry clips that failed for temporary reasons</button><button type="button" data-refresh>Check again</button><a class="btn" href="#/activity">Activity</a><button type="button" data-problem-expert>Open Expert</button></div></section>
@@ -109,10 +112,11 @@ async function renderStatus(mount, ctx, initial, show) {
     mount.querySelector('[data-off]').disabled = busy;
     const aging = nextAgingDay(days, choice.keep, vehicle.timezone);
     const dateLabel = (day) => new Date(day + 'T00:00:00Z').toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric', timeZone:'UTC'});
+    const current = snapshot?.config?.sourceRoot === root ? snapshot : null;
     const last = jobs.filter((j) => j.vehicleId === vehicle.id && ['conversion', 'convert'].includes(j.type) && ['done', 'failed', 'interrupted', 'cancelled'].includes(j.status))
       .sort((a, b) => (b.finishedAt || b.updatedAt || b.createdAt || 0) - (a.finishedAt || a.updatedAt || a.createdAt || 0))[0];
     update('[data-coming-up]', (aging ? `<div class="encoder-review-row"><span class="encoder-review-icon">${icon('calendar_month')}</span><div><b>${esc(dateLabel(aging.day))} footage ages past ${choice.keep} ${statusNoun(choice.keep, 'day')} on ${esc(dateLabel(aging.agesOn))}</b><small>Included clips get shrunk on the first check after that.</small></div></div>` : '') +
-      (last ? `<div class="encoder-review-row"><span class="encoder-review-icon">${icon('task')}</span><div><b>Last run: ${esc(describeJob(last).title)}</b><small>${esc(describeJob(last).outcome || describeJob(last).statusText)}</small></div><a class="btn ghost" href="#/activity">Activity</a></div>` : ''));
+      (!current && last ? `<div class="encoder-review-row"><span class="encoder-review-icon">${icon('task')}</span><div><b>Last run: ${esc(describeJob(last).title)}</b><small>${esc(describeJob(last).outcome || describeJob(last).statusText)}</small></div><a class="btn ghost" href="#/activity">Activity</a></div>` : ''));
     update('[data-next-work]', esc(waiting > 0
       ? `${c ? `${waiting.toLocaleString()} ${statusNoun(waiting, 'clip')} waiting or in progress.` : `About ${waiting.toLocaleString()} ${statusNoun(waiting, 'file')} waiting at the last check; eligible clips are counted when the job starts.`} Later checks look for included clips ${choice.keep == null ? 'that have not been shrunk yet' : `that are older than the ${choice.keep}-day keep window`}.`
       : `The next check looks for included clips ${choice.keep == null ? 'that have not been shrunk yet' : `that have aged past the ${choice.keep}-day keep window`}. The amount will be known when it checks.`));
@@ -122,16 +126,27 @@ async function renderStatus(mount, ctx, initial, show) {
     const sourceError = status.sources?.[root]?.error;
     if (share?.healthy === false || share?.readable === false || active?.state === 'paused_network' || ['PATH_UNAVAILABLE', 'SOURCE_UNAVAILABLE'].includes(sourceError))
       problems.push(`The footage share is offline or cannot be reached. ${share?.lastError || 'Check its connection; your originals stay where they are.'}`);
-    if (sourceError && !['PATH_UNAVAILABLE', 'SOURCE_UNAVAILABLE'].includes(sourceError)) problems.push(describe({ code: sourceError }));
-    const current = snapshot?.config?.sourceRoot === root ? snapshot : null;
+    if (sourceError && !['PATH_UNAVAILABLE', 'SOURCE_UNAVAILABLE', 'FOLDERS_NOT_WRITABLE'].includes(sourceError)) problems.push(describe({ code: sourceError }));
     const issues = clipFailures(current);
+    const folderReport = current?.permissionBlock || status.sources?.[root]?.folderAccess;
+    const blockedText = folderBlockText(folderReport);
+    update('[data-current-run]', esc(currentRunSummary(current)));
+    const discoveryText = discoveryIssueText(current?.discoveryIssues);
+    mount.querySelector('[data-discovery-issues]').hidden = !discoveryText;
+    update('[data-discovery-issues]', esc(discoveryText));
+    update('.encoder-on-pill', blockedText ? 'Automatic shrinking is blocked' : 'Automatic shrinking is on');
+    update('.encoder-status-copy h2', esc(blockedText ? `${vehicle.name} is waiting for folder access.` : `${vehicle.name} is set. You can forget about it.`));
+    update('[data-pause-hint]', blockedText ? 'After fixing permissions, press Check again. Automatic checks also resume shrinking once all folders are writable.' : 'Pause holds until you press Resume.');
+    mount.querySelector('[data-folder-block]').hidden = !blockedText;
+    update('[data-folder-reason]', esc(blockedText));
+    mount.querySelector('[data-folder-check]').disabled = busy;
     mount.querySelector('[data-gpu-retrying]').hidden = !issues.retrying;
     update('[data-gpu-retrying]', esc(issues.retryingText));
     const retry = mount.querySelector('[data-retry-temporary]');
     retry.hidden = !(issues.temporary || issues.legacyGpu);
     retry.disabled = busy || (current && !['paused','completed','failed'].includes(current.state)) || Object.values(status.speedTests || {}).some((s) => s.phase === 'running');
     retry.title = current && !['paused','completed','failed'].includes(current.state) ? 'Pause shrinking before retrying these clips.' : '';
-    const nextKeptKey = `${current?.id || ''}:${issues.tooShort}:${JSON.stringify(current?.itemFailureCounts || current?.items?.filter((i) => i.state === 'failed' || i.resultCode === 'too-short'))}`;
+    const nextKeptKey = `${current?.id || ''}:${issues.kept}:${JSON.stringify(current?.itemKeptCounts || current?.items)}`;
     if (nextKeptKey !== keptKey) { keptKey = nextKeptKey; keptRows = []; keptNext = 0; keptError = ''; }
     const byPath = new Map([...keptRows, ...(current?.items || [])].map((i) => [i.relativePath, i]));
     const shown = clipFailures({...current, items:[...byPath.values()]}).items;
@@ -144,7 +159,7 @@ async function renderStatus(mount, ctx, initial, show) {
     more.hidden = shown.length >= issues.kept || keptNext == null;
     more.disabled = keptLoading; more.textContent = keptLoading ? 'Loading clips…' : keptError ? 'Try listing clips again' : 'Show more clips';
     if (issues.attention) problems.push(issues.attentionText);
-    for (const job of jobs.filter((j) => j.vehicleId === vehicle.id && ['conversion', 'convert'].includes(j.type) && j.status === 'failed')) {
+    for (const job of jobs.filter((j) => j.vehicleId === vehicle.id && ['conversion', 'convert'].includes(j.type) && j.status === 'failed' && j.externalId === `converter:${current?.id}`)) {
       // The current snapshot explains this row's clip failures, including a
       // finished run containing only damaged originals safely kept as recorded.
       if (currentFailureExplained(job, current)) continue;
@@ -159,7 +174,7 @@ async function renderStatus(mount, ctx, initial, show) {
     if (loaded && !readError) numbers.push([problemCount.toLocaleString(), statusNoun(problemCount, 'problem')]);
     update('[data-status-numbers]', numbers.map(([value, label], i) => `<div class="encoder-stat${i === 0 && Number.isFinite(saved?.bytes) ? ' encoder-stat-saved' : ''}"><b>${esc(value)}</b><span>${label}</span></div>`).join(''));
     mount.querySelector('[data-problems]').hidden = !problems.length;
-    update('[data-problem-list]', [...new Set(problems)].map((message) => `<p>${esc(message)}</p>`).join(''));
+    update('[data-problem-list]', [...new Set(problems)].map((message) => `<p>${esc(message)}</p>`).join('') + (current ? `<p>${esc(currentRunSummary(current))}</p>` : ''));
   }
   async function loadKept() {
     const job = snapshot?.config?.sourceRoot === root ? snapshot : null;
@@ -226,7 +241,15 @@ async function renderStatus(mount, ctx, initial, show) {
       finally { busy = false; draw(); }
     };
   }
-  mount.querySelector('[data-refresh]').onclick = load;
+  async function checkAgain() {
+    if (busy) return;
+    busy = true; commandError = ''; draw();
+    try { auto = await invoke('checkAutoNow'); if (snapshot?.permissionBlock && !snapshot.config?.autoConvert) { snapshot = await invoke('resume', {jobId:snapshot.id}); applySnapshot(snapshot); } }
+    catch (error) { if (error?.code !== 'FOLDERS_NOT_WRITABLE') commandError = errorText(error); }
+    finally { busy = false; await load(); }
+  }
+  mount.querySelector('[data-refresh]').onclick = checkAgain;
+  mount.querySelector('[data-folder-check]').onclick = checkAgain;
   mount.querySelector('[data-kept-more]').onclick = loadKept;
   mount.querySelector('[data-retry-temporary]').onclick = async () => {
     if (!snapshot || busy) return;
@@ -381,6 +404,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
       <label class="encoder-switch encoder-ack"><input class="toggle-switch" type="checkbox" role="switch" data-ack required><span><b>Replace the originals with the smaller copies</b><small>Needed to free space. Each copy is checked against the original before the original is replaced.</small></span></label>
       <p class="encoder-callout encoder-info">${icon('info')}<span>Footage settings are saved for ${esc(vehicle.name)} only. Other vehicles keep their own; the schedule is shared. You can change anything later, or flip Expert for every detail.</span></p>
       <div class="encoder-callout" data-replacement hidden></div>
+      <div data-setup-folders hidden><p data-setup-folder-reason></p><button type="button" data-setup-folder-check>Check again</button></div>
       <p class="encoder-problem" data-save-error role="alert" hidden></p>
     </section>
     <footer class="encoder-foot"><button type="button" data-back disabled>Back</button><button type="button" class="primary" data-continue>Continue</button><button type="button" class="primary" data-save hidden>Turn on automatic shrinking</button><button type="button" data-review-expert hidden>Open Expert</button></footer>
@@ -415,6 +439,15 @@ async function renderWizard(mount, ctx, auto, editing, show) {
     return choice.keep == null ? 'No footage is waiting to be shrunk yet.'
       : `Nothing older than the last ${choice.keep} ${choice.keep === 1 ? 'day' : 'days'} is waiting to be shrunk yet.`;
   }
+  let folderReport = null, checkingFolders = false, foldersChecked = false;
+  async function checkFolders() {
+    if (checkingFolders || !ctx.alive()) return;
+    checkingFolders = true; drawReview();
+    try { folderReport = await invoke('checkFolders', {config:toVehicleConfig(choice, vehicle, saved)}); foldersChecked = true; saveError = ''; }
+    catch (error) { foldersChecked = false; saveError = errorText(error); }
+    finally { checkingFolders = false; if (ctx.alive()) drawReview(); }
+  }
+  mount.querySelector('[data-setup-folder-check]').onclick = checkFolders;
   function drawReview() {
     const expertOnly = choice.level === 'custom' && saved?.outputMode !== 'replace';
     mount.querySelector('[data-plan]').textContent = planSentence(choice);
@@ -451,7 +484,11 @@ async function renderWizard(mount, ctx, auto, editing, show) {
     ack.checked = acknowledged; ack.disabled = saving || replacementUnavailable || expertOnly;
     const button = mount.querySelector('[data-save]');
     button.hidden = step !== 4 || replacementUnavailable || expertOnly;
-    button.disabled = !acknowledged || !capabilitiesReady || saving;
+    button.disabled = !acknowledged || !capabilitiesReady || saving || !foldersChecked || checkingFolders || !!folderReport?.readOnlyCount;
+    const blocked = folderBlockText(folderReport);
+    mount.querySelector('[data-setup-folders]').hidden = !blocked && foldersChecked;
+    mount.querySelector('[data-setup-folder-reason]').textContent = checkingFolders ? 'Checking folder permissions…' : blocked || 'Check folder permissions before starting.';
+    mount.querySelector('[data-setup-folder-check]').disabled = checkingFolders;
     button.textContent = saving ? 'Saving…' : 'Turn on automatic shrinking';
     mount.querySelector('[data-review-expert]').hidden = step !== 4 || (!replacementUnavailable && !expertOnly);
     const error = mount.querySelector('[data-save-error]'); error.hidden = !saveError; error.textContent = saveError;
@@ -703,6 +740,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
     if (step === 1) drawFootage();
     if (step === 2) { drawLevels(); startPreview(); }
     if (step === 3) drawSchedule();
+    if (step === 4) checkFolders();
     drawReview();
     mount.querySelector(`[data-encoder-step="${step}"] h2`).focus();
   }
@@ -770,7 +808,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
   mount.querySelector('[data-ack]').onchange = (event) => { acknowledged = event.target.checked; drawReview(); };
   mount.querySelector('[data-review-expert]').onclick = openExpert;
   mount.querySelector('[data-save]').onclick = async () => {
-    if (saving || !acknowledged || replacementUnavailable || !capabilitiesReady) return;
+    if (saving || !acknowledged || replacementUnavailable || !capabilitiesReady || !foldersChecked || folderReport?.readOnlyCount) return;
     saving = true; saveError = ''; drawReview(); mount.querySelector('[data-back]').disabled = true;
     try {
       const current = await invoke('getAuto');

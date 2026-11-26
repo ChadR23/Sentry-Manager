@@ -114,6 +114,17 @@ impl OpsCtx for CoreOps {
         let Some(srv) = self.srv() else { return Vec::new() };
         srv.app().vehicles.list().iter().filter_map(|v| vehicle_info(&srv, &v.id)).collect()
     }
+    fn converter_folders(&self)->Vec<Value> {
+        let mut configs:Vec<Value>=self.vehicles().iter().flat_map(|v|v.roots.iter().map(|r|json!({"sourceRoot":r}))).collect();
+        if let Some(conv)=self.srv().and_then(|s|s.converter().cloned()) {
+            let auto=conv.runtime.auto.get_state();
+            for c in auto["settings"]["configs"].as_array().into_iter().flatten().chain(auto["saved"].as_array().into_iter().flatten()) {
+                configs.retain(|v|v["sourceRoot"]!=c["sourceRoot"] || v["destinationRoot"]!=Value::Null);
+                if !configs.iter().any(|v|v["sourceRoot"]==c["sourceRoot"] && v["destinationRoot"]==c["destinationRoot"]) {configs.push(c.clone());}
+            }
+        }
+        configs
+    }
     fn converter(&self) -> ConverterInfo {
         let Some(conv) = self.srv().and_then(|s| s.converter().cloned()) else {
             return ConverterInfo { ready: false, error: Some("CONVERTER_STARTING".into()), ..Default::default() };

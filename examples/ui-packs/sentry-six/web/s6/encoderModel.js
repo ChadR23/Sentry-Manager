@@ -8,33 +8,49 @@ export const KEEP_CHIPS = [3, 7, 14, 30, 60];
 
 export const statusNoun = (count, one, many = one + 's') => count === 1 ? one : many;
 
+export const KEPT_REASONS = {
+  'too-short': 'Kept as recorded (too short to shrink).',
+  'source-duplicate-timestamp': 'Two recorded frames share one timestamp. Kept as recorded.',
+  'source-nal-boundary': 'Recorded video data extends beyond its frame boundary. Kept as recorded.',
+  'source-unfinished-sample-table': 'The recording has an unfinished sample table. Kept as recorded.',
+};
 export function clipFailures(snapshot) {
-  const rows = (snapshot?.items || []).filter((i) => i.state === 'failed');
   const codeOf = (i) => i.resultCode || i.failure?.code || i.code;
+  const rows = (snapshot?.items || []).filter((i) => i.state === 'failed');
   const legacyGpu = (i) => codeOf(i) === 'frame-count-mismatch' && /_(nvenc|vaapi|qsv|amf)$/.test(i.encoder || '');
   const temporary = (i) => codeOf(i) === 'gpu-memory-exhausted' && (i.failure?.retryable ?? i.retryable) === true;
-  const damaged = (i) => (i.failure?.retryable ?? i.retryable) === false &&
-    !legacyGpu(i) && ['frame-count-mismatch', 'invalid-h264'].includes(codeOf(i));
   const groups = snapshot?.itemFailureCounts || rows.map((i) => ({...i, count:1}));
   const sum = (accept) => groups.filter(accept).reduce((n, g) => n + (Number(g.count) || 0), 0);
-  const kept = sum(damaged), gpu = sum(temporary), legacy = sum(legacyGpu);
-  const shortRows = (snapshot?.items || []).filter((i) => ['skipped','completed'].includes(i.state) && codeOf(i) === 'too-short');
-  const tooShort = snapshot?.itemTooShortCount ?? shortRows.length;
+  const gpu = sum(temporary), legacy = sum(legacyGpu);
+  const keptRows = (snapshot?.items || []).filter((i) => ['skipped','completed'].includes(i.state) && KEPT_REASONS[codeOf(i)]);
+  const keptCounts = snapshot?.itemKeptCounts;
+  const tooShort = keptCounts?.['too-short'] ?? snapshot?.itemTooShortCount ?? keptRows.filter((i) => codeOf(i) === 'too-short').length;
+  const kept = keptCounts ? Object.values(keptCounts).reduce((n,c) => n + Number(c || 0),0) : tooShort + keptRows.filter((i) => codeOf(i) !== 'too-short').length;
   const retrying = snapshot?.itemGpuRetryCount ?? (snapshot?.items || []).filter((i) => ['queued','processing'].includes(i.state) && i.resultCode === 'gpu-memory-retry').length;
-  const total = snapshot?.itemStateCounts?.failed ?? snapshot?.itemCounts?.failed ?? rows.length;
-  const attention = Math.max(0, total - kept);
-  const n = kept.toLocaleString();
+  const attention = snapshot?.itemStateCounts?.failed ?? snapshot?.itemCounts?.failed ?? rows.length;
   return {
-    damaged:kept, tooShort, kept:kept + tooShort, attention, temporary:gpu, legacyGpu:legacy, retrying,
+    damaged:kept - tooShort, tooShort, kept, attention, temporary:gpu, legacyGpu:legacy, retrying,
     retryingText:`${retrying.toLocaleString()} ${statusNoun(retrying, 'clip')} will be retried (the GPU ran out of memory)${['paused','paused_network'].includes(snapshot?.state) ? ' when you resume shrinking' : ''}.`,
-    keptText:tooShort ? `${(kept + tooShort).toLocaleString()} ${statusNoun(kept + tooShort, 'clip')} kept as recorded` : `${n} damaged ${statusNoun(kept, 'clip')} kept as recorded`,
-    explanation:[kept ? `${n} ${statusNoun(kept, 'clip')} ${kept === 1 ? 'has' : 'have'} damaged video. Shrinking would lose frames or produce unreadable video. ${kept === 1 ? 'The original was' : 'The originals were'} kept as recorded; nothing to do.` : '',
-      tooShort ? `${tooShort.toLocaleString()} ${statusNoun(tooShort, 'clip')} ${tooShort === 1 ? 'is' : 'are'} too short to shrink. Kept as recorded; nothing to do.` : ''].filter(Boolean).join(' '),
-    attentionText:[gpu ? `${gpu.toLocaleString()} ${statusNoun(gpu, 'clip')} could not finish because the GPU ran out of memory. ${gpu === 1 ? 'The original was' : 'The originals were'} kept. Retry with less pressure on the GPU.` : '', legacy ? `${legacy.toLocaleString()} ${statusNoun(legacy, 'clip')} lost frames during GPU encoding. The GPU may have been too busy; ${legacy === 1 ? 'the original was' : 'the originals were'} kept. Retry with less pressure to check.` : '',
-      attention > gpu + legacy ? `${(attention-gpu-legacy).toLocaleString()} ${statusNoun(attention-gpu-legacy, 'clip')} could not be shrunk. ${attention-gpu-legacy === 1 ? 'The original was' : 'The originals were'} kept. Open Expert to review or retry ${attention-gpu-legacy === 1 ? 'it' : 'them'}.` : ''].filter(Boolean).join(' '),
-    items:[...rows.filter(damaged), ...shortRows].map((i) => ({relativePath:i.relativePath || 'Unknown clip', code:codeOf(i),
-      reason:codeOf(i) === 'too-short' ? 'Kept as recorded (too short to shrink).' : codeOf(i) === 'frame-count-mismatch' ? 'A smaller copy could not preserve every video frame.' : 'Some of the recorded video cannot be read.'})),
+    keptText:`${kept.toLocaleString()} ${statusNoun(kept, 'clip')} kept as recorded`,
+    explanation:'These originals are too short to shrink or have a proven recording defect. They stay as recorded; nothing to do.',
+    attentionText:[gpu ? `${gpu.toLocaleString()} ${statusNoun(gpu, 'clip')} could not finish because the GPU ran out of memory. The originals were kept. Retry with less pressure on the GPU.` : '', legacy ? `${legacy.toLocaleString()} ${statusNoun(legacy, 'clip')} lost frames during GPU encoding. The originals were kept. Retry with less pressure to check.` : '',
+      attention > gpu + legacy ? `${(attention-gpu-legacy).toLocaleString()} ${statusNoun(attention-gpu-legacy, 'clip')} could not be shrunk. The originals were kept. Open Expert to review or retry them.` : ''].filter(Boolean).join(' '),
+    items:keptRows.map((i) => ({relativePath:i.relativePath || 'Unknown clip', code:codeOf(i), reason:KEPT_REASONS[codeOf(i)]})),
   };
+}
+export function currentRunSummary(snapshot) {
+  if (!snapshot) return '';
+  const counts = snapshot.itemStateCounts || snapshot.itemCounts || (snapshot.items || []).reduce((m,i) => {m[i.state]=(m[i.state]||0)+1;return m;},{});
+  return `Current run: ${(counts.completed ?? counts.converted ?? 0).toLocaleString()} converted, ${(counts.skipped || 0).toLocaleString()} skipped, ${clipFailures(snapshot).attention.toLocaleString()} failed`;
+}
+export function discoveryIssueText(issues) {
+  if (!issues?.count) return '';
+  return `${issues.count.toLocaleString()} paths could not be read during discovery: ${(issues.examples || []).join('; ')}. The next run tries them again.`;
+}
+export function folderBlockText(report) {
+  if (!report?.readOnlyCount) return '';
+  const examples=(report.roots || []).flatMap((r) => (r.examples || []).map((e) => `${e.folder} (owner uid/gid ${e.ownerUid}/${e.ownerGid}, mode ${e.mode})`));
+  return `${report.readOnlyCount.toLocaleString()} folders are read-only \u2014 shrinking is blocked until this is fixed. ${examples.join('; ')}. ${report.hint || ''}`;
 }
 
 export function currentFailureExplained(job, snapshot) {

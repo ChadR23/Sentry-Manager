@@ -11,6 +11,7 @@
 //! servers are not ported yet).
 
 mod encode;
+mod permissions;
 pub mod lanes;
 mod recover;
 pub mod tools;
@@ -127,6 +128,7 @@ pub fn detailed_failure(code: &str) -> Option<&'static str> {
     match code {
         UNSAFE_OWNED_PATH_RESULT => Some("UNSAFE_OWNED_PATH"),
         SOURCE_CHANGED_RESULT => Some("SOURCE_CHANGED"),
+        "folder-not-writable" => Some("FOLDER_NOT_WRITABLE"),
         _ => None,
     }
 }
@@ -152,7 +154,7 @@ pub(crate) static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 pub fn note_clip_refusal(job: &str, item: &str, relative_path: &str, e: &Fail) -> String {
     let detail = e.detail.clone().filter(|d| !d.is_empty()).unwrap_or_else(|| DETAIL_NOT_RECORDED.to_string());
     let label = detailed_failure(&stable_failure(e, "operation-failed")).unwrap_or("UNSAFE_OWNED_PATH");
-    log_line(format!("[CONVERTER] {label} clip {relative_path:?} ({job} {item}) failed: {detail}"));
+    log_line(format!("[CONVERTER] {label} clip {relative_path:?} ({job} {item}) {}: {detail}",if label=="FOLDER_NOT_WRITABLE" {"blocked"} else {"failed"}));
     set_failure_detail(job, item, Some(&detail));
     detail
 }
@@ -608,6 +610,8 @@ pub struct Runtime {
     pub cv: Condvar,
     pub persist: Mutex<()>,
     pub abort: Mutex<Arc<AtomicBool>>,
+    pub folder_checks: Mutex<HashMap<PathBuf,(i64,i64,Option<String>)>>,
+    pub folder_scan_at: Mutex<std::time::Instant>,
 }
 
 impl Runtime {
@@ -660,6 +664,8 @@ impl Runtime {
             cv: Condvar::new(),
             persist: Mutex::new(()),
             abort: Mutex::new(Arc::new(AtomicBool::new(false))),
+            folder_checks:Mutex::new(HashMap::new()),
+            folder_scan_at:Mutex::new(std::time::Instant::now()),
         })
     }
     pub fn lock(&self) -> MutexGuard<'_, RtState> {
@@ -1148,6 +1154,7 @@ impl Service {
             if !active.is_empty() && !Self::may_run_alongside(config, &active.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>()) {
                 return Err(service_error("JOB_ACTIVE"));
             }
+            super::folder_access::require(config)?;
             let now = (self.0.o.now)();
             let mut initial = Map::new();
             initial.insert("config".into(), config.clone());
@@ -1287,6 +1294,8 @@ impl Service {
         if state != JobState::Paused && !pause_requested {
             return Err(service_error("JOB_NOT_PAUSED"));
         }
+        super::folder_access::require(rt.manifest().config())?;
+        self.clear_folder_block(&rt)?;
         if from == Some(JobState::Replacing) && !running {
             self.resolve_replacement_before_cancel(&rt, id, true)?;
             self.emit(&rt, "resumed", vec![]);

@@ -769,3 +769,16 @@ fn a_link_count_read_again_never_hides_a_real_second_link() {
     assert_eq!(super::exact_lstat(&s(&f)).unwrap().nlink(), 1);
     assert!(super::lstat_or_none(&s(&env.footage.join("missing"))).unwrap().is_none());
 }
+
+
+#[test]
+fn readonly_publication_create_reports_permission_without_artifact_change() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = setup("readonly");
+    fs::set_permissions(&env.footage,fs::Permissions::from_mode(0o555)).unwrap();
+    let target=env.footage.join("candidate");
+    let error=env.tx.copy_exclusive(&env.artifact.path,&s(&target),CopyArgs {expected:Some((env.artifact.size,env.artifact.sha256.clone(),None)),cancel:None,collision:"REPLACEMENT_COLLISION",failure:"PUBLICATION_ARTIFACT_CHANGED",resume:None,hooks:Hooks::default()},&mut |_,_,_,_|Ok(())).err().unwrap();
+    assert_eq!(error.code,"FOLDER_NOT_WRITABLE","{error:?}");
+    assert!(!target.exists());
+    assert_eq!(fs::read(&env.source).unwrap(),env.original);
+}

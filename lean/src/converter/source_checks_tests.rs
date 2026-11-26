@@ -244,11 +244,86 @@ fn source_checks_packet_frame_deficit_is_not_permission_to_ignore_broken_nals() 
         "includedGroups":["RecentClips"],"networkMode":"direct","concurrency":1})).unwrap();
     converter.service.when_idle(&id).unwrap();
     let job = converter.service.get(&id).unwrap();
-    assert_eq!(job["items"][0]["state"], "failed", "{job}");
-    assert_eq!(job["items"][0]["failure"], json!({"code":"invalid-h264","retryable":false}));
+    assert_eq!(job["items"][0]["state"], "skipped", "{job}");
+    assert_eq!(job["items"][0]["resultCode"], "source-nal-boundary");
+    assert!(job["items"][0]["failure"].is_null());
     assert_eq!(job["items"][0]["attempts"], 0);
     assert_eq!(fs::read(&clip).unwrap(), bytes);
     assert!(crate::converter::service::LOGGED.lock().unwrap().iter().any(|line|
-        line.contains(&id) && line.contains("INVALID_H264") && line.contains("samples[7]: NAL length exceeds sample boundary")));
+        line.contains(&id) && line.contains("SOURCE_NAL_BOUNDARY") && line.contains("samples[7]: NAL length exceeds sample boundary")));
     converter.shutdown();
+}
+
+#[test]
+fn readonly_proven_source_defects_are_kept_without_encoding() {
+    use crate::converter::runtime::{Converter, RuntimeOptions};
+    for kind in ["duplicate-timestamp", "nal-boundary", "unfinished-sample-table"] {
+        let dir=tempdir().unwrap(); let root=dir.path().join("footage");
+        fs::create_dir_all(root.join("RecentClips")).unwrap(); fs::create_dir_all(dir.path().join("temp")).unwrap();
+        let source=root.join("RecentClips/2026-01-01_00-00-00-front.mp4");
+        generate(&source,&vec![400;48]);
+        let mut bytes=fs::read(&source).unwrap();
+        match kind {
+            "duplicate-timestamp" => { let mut ticks=vec![400;48]; ticks[12]=0; bytes=lead_in::retime_to_source(&bytes,10000,&ticks).unwrap(); }
+            "nal-boundary" => {let tree=mp4w::parse(&bytes).unwrap(); let (track,_)=mp4w::select_video_track(&tree).unwrap(); let samples=mp4w::build_sample_index(&tree,track).unwrap(); let at=samples[7].offset as usize; bytes[at..at+4].copy_from_slice(&u32::MAX.to_be_bytes());}
+            _ => {let tree=mp4w::parse(&bytes).unwrap(); let n=tree.node(tree.find(mp4w::ROOT,b"stsz")[0]); let start=n.start as usize; let end=(n.content+4) as usize; let oldend=(n.start+n.size) as usize; bytes[start..start+4].copy_from_slice(&((end-start) as u32).to_be_bytes()); bytes[end+4..end+8].copy_from_slice(b"free"); bytes[end..end+4].copy_from_slice(&((oldend-end) as u32).to_be_bytes());}
+        }
+        fs::write(&source,&bytes).unwrap();
+        let spawned=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)); let counter=spawned.clone();
+        let mut opts=RuntimeOptions::new(dir.path().join("data"),dir.path().join("temp"),"ffmpeg","ffprobe"); opts.auto_timer=false;
+        opts.tune=Some(Box::new(move |o|o.on_spawn=Some(std::sync::Arc::new(move |_|{counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst);} ))));
+        let conv=Converter::open(opts).unwrap();
+        let id=conv.service.start(&json!({"sourceRoot":root,"destinationRoot":null,"outputMode":"replace","replacementConfirmed":true,"codec":"h265","profileId":"balanced","verifyMode":"quick","includedGroups":["RecentClips"],"networkMode":"direct","concurrency":1})).unwrap();
+        conv.service.when_idle(&id).unwrap(); let job=conv.service.get(&id).unwrap();
+        assert_eq!(job["items"][0]["state"],"skipped","{kind}: {job}");
+        assert_eq!(job["items"][0]["resultCode"],format!("source-{kind}"));
+        assert!(job["items"][0]["failure"].is_null());
+        assert_eq!(spawned.load(std::sync::atomic::Ordering::SeqCst),0);
+        assert_eq!(fs::read(&source).unwrap(),bytes); conv.shutdown();
+    }
+}
+#[test]
+fn readonly_restart_reloads_skipped_clip_and_index_then_converts_exactly_once() { restart_folder_wait(false); }
+#[test]
+fn readonly_restart_paused_job_resumes_exactly_once() { restart_folder_wait(true); }
+fn restart_folder_wait(paused:bool) {
+    use crate::converter::{runtime::{Converter,RuntimeOptions}};
+    use std::os::unix::fs::PermissionsExt;
+    let dir=tempdir().unwrap();let root=dir.path().join("footage");let folder=root.join("RecentClips");
+    fs::create_dir_all(&folder).unwrap();fs::create_dir_all(dir.path().join("temp")).unwrap();
+    let source=folder.join("2020-01-01_00-00-00-front.mp4");generate(&source,&vec![400;48]);
+    let spawned=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let open=|| {
+        let counter=spawned.clone();let mut o=RuntimeOptions::new(dir.path().join("data"),dir.path().join("temp"),"ffmpeg","ffprobe");
+        o.auto_timer=false;o.tune=Some(Box::new(move |o|o.on_spawn=Some(std::sync::Arc::new(move |_|{counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst);} ))));Converter::open(o).unwrap()
+    };
+    let c=json!({"sourceRoot":root,"destinationRoot":null,"outputMode":"replace","replacementConfirmed":true,"codec":"h265","profileId":"balanced","verifyMode":"quick","includedGroups":["RecentClips"],"networkMode":"direct","concurrency":1,"autoConvert":true});
+    let conv=open();
+    // A durable race outcome from the preceding process, as produced by fail_item.
+    let metadata=fs::metadata(&source).unwrap();let item=json!({"id":"item-000001","state":"skipped","eventId":null,"kind":"video","relativePath":"RecentClips/2020-01-01_00-00-00-front.mp4","sourcePath":source,"sourceBytes":metadata.len(),"mtimeMs":crate::converter::jobstore::mtime_ms(&metadata),"group":"RecentClips","timestampKey":"2020-01-01_00-00-00","camera":"front","resultCode":"folder-not-writable","failure":{"code":"folder-not-writable","retryable":true},"attempts":0});
+    fs::set_permissions(&folder,fs::Permissions::from_mode(0o555)).unwrap();
+    let old=conv.store.create(json!({"config":c,"state":if paused {"paused"} else {"completed"},"items":[item],"counters":contracts::create_empty_counters(),"summary":if paused {Value::Null} else {contracts::serialize_summary(&contracts::create_empty_counters())},"discoveryComplete":true,
+        "permissionBlock":if paused {Some(crate::converter::folder_access::scan(&c))}else{None}}).as_object().unwrap()).unwrap();
+    conv.start().unwrap();conv.auto.configure(&json!({"enabled":true,"config":c,"catchUp":true})).unwrap();conv.auto.check_now();
+    assert_eq!(spawned.load(std::sync::atomic::Ordering::SeqCst),0);
+    conv.shutdown();drop(conv);
+    let restarted=open();restarted.start().unwrap();
+    assert_eq!(restarted.service.get(old.id()).unwrap()["items"][0]["resultCode"],"folder-not-writable");
+    fs::set_permissions(&folder,fs::Permissions::from_mode(0o755)).unwrap();
+    restarted.auto.check_now();let state=restarted.auto.get_state();let id=state["status"]["active"][root.to_str().unwrap()]["jobId"].as_str().unwrap().to_string();
+    restarted.service.when_idle(&id).unwrap();restarted.auto.check_now();
+    assert_eq!(restarted.service.get(&id).unwrap()["items"][0]["state"],"completed");
+    assert_eq!(spawned.load(std::sync::atomic::Ordering::SeqCst),1);
+    restarted.shutdown();drop(restarted);
+    let again=open();again.start().unwrap();again.auto.check_now();
+    assert_eq!(spawned.load(std::sync::atomic::Ordering::SeqCst),1,"reloaded converted index must never encode this clip twice");
+    assert_eq!(again.service.list().unwrap().len(),if paused {1}else{2},"no empty extra jobs for converted clips");again.shutdown();
+}
+#[test]
+fn readonly_valid_fixed_size_table_is_not_reported_as_unfinished() {
+    use crate::converter::service::tools::{Tools,RealTools};
+    let dir=tempdir().unwrap();let source=dir.path().join("single.mp4");generate(&source,&[400]);
+    let tools=RealTools::new("ffmpeg","ffprobe",std::sync::Arc::new(Registry::new(dir.path().to_path_buf())));
+    let result=tools.read_timeline(source.to_str().unwrap(),&std::sync::atomic::AtomicBool::new(false));
+    assert!(!result.is_err_and(|e|e.code=="SOURCE_UNFINISHED_SAMPLE_TABLE"),"a valid fixed-size stsz is not proof of truncation");
 }

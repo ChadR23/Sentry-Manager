@@ -137,6 +137,10 @@ pub trait OpsCtx: Send + Sync + 'static {
     fn announce(&self, topic: &str);
     fn vehicles(&self) -> Vec<VehicleInfo>;
     fn converter(&self) -> ConverterInfo;
+    /// Configured sources/destinations for the non-mutating folder health scan.
+    fn converter_folders(&self)->Vec<Value> {
+        self.vehicles().iter().flat_map(|v|v.roots.iter().map(|r|serde_json::json!({"sourceRoot":r}))).collect()
+    }
     /// the encoder test of the health check; None: no encoder passed (or no runtime)
     fn select_encoder(&self) -> Option<Encoder>;
     /// `detectGpus()`: { gpus, nvidia, hints } (converter area)

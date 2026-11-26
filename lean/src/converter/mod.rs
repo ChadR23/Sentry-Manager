@@ -19,6 +19,7 @@ pub mod converted_index;
 pub mod ctx;
 pub mod devices;
 pub mod error;
+pub mod folder_access;
 pub mod frame_num;
 pub mod fs_hook;
 pub mod h265;

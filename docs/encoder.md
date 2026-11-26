@@ -185,12 +185,14 @@ Review the choices and confirm replacement before turning on automatic
 shrinking. Each smaller copy is checked before it replaces the original.
 The status screen shows progress, space saved and the next check.
 
-Clips with damaged video (`invalid-h264`, or non-GPU `frame-count-mismatch`, recorded as
-nonretryable) appear separately as **damaged clips kept as recorded**, without
-adding an actionable problem. Expand that line to see relative paths and plain
-reasons; **Show more clips** reads additional pages for large jobs. Originals
-stay as recorded. Temporary, unknown, and cleanup failures still appear under
-**Needs attention**, with the existing review and retry actions.
+Clips with a proven source defect appear in **kept as recorded**: two frames
+sharing a timestamp, a NAL extending beyond its recorded sample boundary, or
+an unfinished sample table. Clips too short to shrink appear there too. Expand
+the list for relative paths and a plain reason; **Show more clips** reads more
+pages. These originals are left alone in replace mode (copied unchanged in
+copy mode). Other source, encode, verification and cleanup errors still count
+under **Needs attention**. The sentence and **Current run** counts use the same
+job; older job summaries do not replace the current run's numbers.
 
 GPU memory exhaustion is temporary. An explicit memory-allocation error from
 NVENC/CUDA, VA-API or QSV rejects that encode even if ffmpeg reports success;
@@ -244,6 +246,48 @@ view; it never saves settings or starts work. Saving in Expert keeps the
 keep window and calendar schedule. Changing the interval or time window
 there replaces the calendar schedule with that timing. Settings outside
 the three levels appear as **Customized in Expert** in guided setup.
+
+## Footage folder permissions
+
+Shrinking is **blocked** if any folder under the source or copy destination
+cannot be written by the server process. This applies to Expert starts,
+guided setup and every automatic check. No job starts until all folders are
+writable. Step 4 **Start**, the Encoder status screen and **Health** show the
+count, example folders, owner uid/gid, mode, the app's uid/gid and a fix hint.
+A blocked folder is not a failed clip.
+
+Give the folders to the user the app runs as, with write and search permission.
+On Unraid, use **Tools > Docker Safe New Perms**, or correct ownership and
+permissions with `chown`/`chmod`. Check ACL masks and read-only mounts too: an
+ACL entry granting write can still be restricted by its mask. Correct the
+uploader as well; new folders uploaded with the wrong permissions will block
+shrinking again. The check uses the server's effective user and groups, honours
+filesystem access decisions, and creates no probe files or directory timestamp
+changes. It does not alter permissions for you.
+
+If a locked folder appears during a run, admission stops when it is detected.
+Encodes already in flight in writable folders finish, then the job pauses.
+A final per-folder check and publication error handling protect against a
+permission change between the scan and the write. Permission waits survive a
+restart; they do not count as failures or mark a clip converted.
+
+After fixing permissions, press **Encoder > Check again**. Automatic checks
+also recheck and resume a permission pause once the folders are writable,
+respecting electricity hours outside catch-up. In manual setup, **Check again**
+enables Start after a successful check; in Expert, try Start or Resume again.
+A normal pause you requested still waits for Resume.
+
+The next automatic check retries queued items from an interrupted run, clips
+waiting for folder permissions, and older `publication-artifact-changed`
+failures, including those recorded as nonretryable. Previously converted clips
+remain in the conversion index and are not encoded again. There is no need to
+clear the index or delete job history. For an older failed catch-up run, fix the
+folders and press **Check again** with automatic shrinking enabled.
+
+A discovery error on a child folder or file is recorded with a count and a few
+paths, and discovery continues elsewhere. Health lists inaccessible paths too.
+The next run tries them again. An unreadable source root stops discovery with
+the root path and the actual error.
 
 ## GPU
 

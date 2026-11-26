@@ -22,9 +22,9 @@ pub const MAX_SAFE: i64 = 9_007_199_254_740_991;
 // (JOB_STATES, ITEM_STATES, REPLACEMENT_PHASES and the owned files' states: states.rs)
 pub const DEFAULT_GROUP_ORDER: [&str; 3] = ["SavedClips", "SentryClips", "RecentClips"];
 
-pub const TOP_FIELDS: [&str; 22] = [
+pub const TOP_FIELDS: [&str; 24] = [
     "schemaVersion", "id", "state", "revision", "config", "items", "counters", "summary", "summaryDismissed", "discoveryComplete", "createdAt", "updatedAt", "activeItemId", "ownedPaths", "ownedArtifacts",
-    "publicationArtifact", "replacementPhase", "recovery", "failure", "timings", "pausedMs", "moreAfter",
+    "publicationArtifact", "replacementPhase", "recovery", "failure", "timings", "pausedMs", "moreAfter", "permissionBlock", "discoveryIssues",
 ];
 const CONFIG_FIELDS: [&str; 20] = [
     "sourceRoot", "destinationRoot", "codec", "profileId", "networkMode", "outputMode", "includedGroups", "groupOrder", "replacementConfirmed", "concurrency", "bitrateKbps", "qualityLevel", "autoConvert", "verifyMode", "lanes",
@@ -814,7 +814,9 @@ pub fn normalize_item(v: &Value) -> R<Value> {
     if state == ItemState::Failed && !out.contains_key("failure") {
         return invalid("failure: required for failed item");
     }
-    if state != ItemState::Failed && out.contains_key("failure") {
+    let folder_wait=state==ItemState::Skipped && out.get("resultCode")==Some(&Value::from("folder-not-writable"))
+        && out.get("failure").is_some_and(|f|f["code"]=="folder-not-writable" && f["retryable"]==true);
+    if state != ItemState::Failed && out.contains_key("failure") && !folder_wait {
         return invalid("failure: only valid for failed item");
     }
     if state == ItemState::Completed && (!out.contains_key("outputBytes") || !has("outputPath")) {
@@ -1023,6 +1025,16 @@ pub fn normalize_top(top: &Map<String, Value>, items: impl FnOnce() -> R<Vec<std
         if sd == &Value::Bool(true) {
             out.insert("summaryDismissed".into(), Value::Bool(true));
         }
+    }
+    if let Some(v)=top.get("permissionBlock").filter(|v|!v.is_null()) {
+        let report:crate::converter::folder_access::Report=serde_json::from_value(v.clone()).map_err(|_|refused("permissionBlock","invalid folder report"))?;
+        if report.roots.len()>2 || report.roots.iter().any(|r|r.examples.len()>5 || r.unreadable.examples.len()>5) {return Err(refused("permissionBlock","too many examples"));}
+        out.insert("permissionBlock".into(),v.clone());
+    }
+    if let Some(v)=top.get("discoveryIssues").filter(|v|!v.is_null()) {
+        let issues:crate::converter::folder_access::Issues=serde_json::from_value(v.clone()).map_err(|_|refused("discoveryIssues","invalid discovery report"))?;
+        if issues.examples.len()>5 {return Err(refused("discoveryIssues","too many examples"));}
+        out.insert("discoveryIssues".into(),v.clone());
     }
     if let Some(dc) = top.get("discoveryComplete") {
         if !dc.is_boolean() {

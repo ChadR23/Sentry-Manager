@@ -322,6 +322,7 @@ fn check_moves(current: &Manifest, next: &Manifest) -> R<()> {
         };
         let to = item.state();
         let refusal = match before {
+            Some(b) if b.state()==ItemState::Skipped && b.str("resultCode")==Some("folder-not-writable") && to==ItemState::Queued => None,
             Some(b) => b.state().to(to).err(),
             None if to.is_initial() => None,
             None => Some(CError::new(states::INVALID_STATE_TRANSITION, format!("A clip cannot be added as {to}."))),

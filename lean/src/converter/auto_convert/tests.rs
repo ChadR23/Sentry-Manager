@@ -1688,3 +1688,49 @@ fn after_a_restart_a_user_paused_catch_up_job_stays_paused() {
     assert!(in_catch_up(&t, "/cars/a"));
     t.auto.stop();
 }
+
+
+#[test]
+fn readonly_automatic_checks_retry_permissions_and_legacy_publication_failures() {
+    let d=tempdir().unwrap(); let c=give_up_config(d.path());
+    let (auto,_)=give_up_setup(d.path(),json!({"id":"old","state":"encoding","config":c,"items":[]}));
+    for (state,code) in [("skipped","folder-not-writable"),("failed","publication-artifact-changed"),("queued","")] {
+        let rel=format!("RecentClips/{code}.mp4");
+        for _ in 0..4 {
+            auto.record_finished_job(&json!({"config":c,"items":[{"state":state,"resultCode":code,"failure":{"retryable":false},"relativePath":rel,"sourceBytes":100,"mtimeMs":5}]}));
+            assert!(!auto.is_known(&c,&clip(&rel,100)),"must retry {state} {code}");
+        }
+    }
+}
+
+#[test]
+fn readonly_auto_blocks_then_starts_after_folder_repair() {
+    use std::os::unix::fs::PermissionsExt;
+    let d=tempdir().unwrap(); let source=d.path().join("src"); let locked=source.join("SavedClips/locked");
+    std::fs::create_dir_all(&locked).unwrap();std::fs::set_permissions(&locked,std::fs::Permissions::from_mode(0o555)).unwrap();
+    let service=Arc::new(FakeService::default());
+    let scanner:Arc<Scanner>=Arc::new(|_,_,out|{out(clip("SavedClips/generated.mp4",100));Ok(())});
+    let mut o=opts(service.clone(),scanner,d.path());o.folder_check=Some(Arc::new(super::super::folder_access::scan));
+    let a=Auto::new(o);a.start();let c=give_up_config(d.path());
+    a.configure(&json!({"enabled":true,"config":c,"catchUp":true})).unwrap();a.check_now();
+    assert!(service.started().is_empty());
+    assert_eq!(a.get_state()["status"]["sources"][source.to_str().unwrap()]["blocked"],true);
+    assert!(a.get_state()["status"]["error"].is_null());
+    std::fs::set_permissions(&locked,std::fs::Permissions::from_mode(0o755)).unwrap();
+    a.check_now();assert_eq!(service.started().len(),1);a.stop();
+}
+#[test]
+fn readonly_permission_resume_respects_electricity_window() {
+    let (t, cheap) = sched_off_peak(utc_ms(2026, 11, 21, 10), true);
+    t.auto.configure(&shared(json!({"enabled":true,"window":{"follow":"off-peak"},"config":car("/cars/a","h265"),"catchUp":false}))).unwrap();
+    t.auto.check_now();
+    assert_eq!(t.s.started().len(), 1);
+    t.s.set("job-1", |j| {j["state"]=json!("paused"); j["permissionBlock"]=json!({"readOnlyCount":1});});
+    cheap.store(false, Ordering::SeqCst);
+    t.auto.tick();
+    assert!(t.s.resumed.lock().unwrap().is_empty(), "a repaired folder must not override the electricity window");
+    cheap.store(true, Ordering::SeqCst);
+    t.auto.tick();
+    assert_eq!(*t.s.resumed.lock().unwrap(), vec!["job-1"]);
+    t.auto.stop();
+}

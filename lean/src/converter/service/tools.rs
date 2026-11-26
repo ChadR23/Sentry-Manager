@@ -236,7 +236,15 @@ impl Tools for RealTools {
         let run = |timeout: u64| self.runner.run(&self.ffprobe, &probe_args(source), &RunOptions { timeout_ms: Some(timeout), cancel: Some(cancel.clone()), cwd: None }).map_err(|_| CError::code("VIDEO_INSPECTION_FAILED"));
         let first = run(30_000)?;
         if !first.timed_out || cancel.load(std::sync::atomic::Ordering::SeqCst) {
-            return parse_video_probe(&first);
+            return parse_video_probe(&first).or_else(|e| {
+                // A failed probe alone proves nothing. Inspect the original bytes
+                // before identifying an unfinished source sample table.
+                if e.code=="CANCELLED" || e.code=="SOURCE_TOO_SHORT" {return Err(e);}
+                if let Ok(bytes)=std::fs::read(source) { if let Err(defect)=timeline::extract(&bytes) {
+                    let classified=source_defect(defect,&bytes); if kept_code(&classified.code).is_some(){return Err(classified);}
+                }}
+                Err(e)
+            });
         }
         parse_video_probe(&run(120_000)?)
     }
@@ -248,7 +256,11 @@ impl Tools for RealTools {
         if cancel.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(CError::code("CANCELLED"));
         }
-        timeline::extract(&bytes)
+        let timeline=timeline::extract(&bytes).map_err(|e|source_defect(e,&bytes))?;
+        if timeline.samples.iter().any(|s|s.duration_us==0 && s.sample_index+1<timeline.samples.len()) {
+            return Err(CError::new("SOURCE_DUPLICATE_TIMESTAMP","Two recorded frames share one timestamp."));
+        }
+        Ok(timeline)
     }
     fn write_telemetry(&self, codec: &str, candidate: &str, timeline: &Timeline, cancel: &AtomicBool) -> CResult<()> {
         adapters::write_telemetry(Path::new(candidate), timeline, codec_of(codec)?, cancel)
@@ -309,3 +321,29 @@ impl Tools for RealTools {
 pub fn bitrate_floor(codec: &str) -> i64 {
     planner::bitrate_floor(codec)
 }
+
+/// Only precise defects read from the original qualify. Never classify encoder
+/// output or a generic probe/verifier failure as damage to the source.
+fn source_defect(e:CError,bytes:&[u8])->CError {
+    let code=if e.code=="INVALID_H264" && e.message=="NAL length exceeds sample boundary" && e.path.as_deref().is_some_and(|p|p.starts_with("samples[")) {Some("SOURCE_NAL_BOUNDARY")}
+        else if e.code=="INVALID_MP4" && ["Truncated stsz full box","Truncated stsz table"].contains(&e.message.as_str()) && truncated_sample_table(bytes) {Some("SOURCE_UNFINISHED_SAMPLE_TABLE")} else {None};
+    match code {Some(code)=>CError{code:code.into(),..e},None=>e}
+}
+fn truncated_sample_table(bytes:&[u8])->bool {
+    use super::super::mp4w;
+    let Ok(tree)=mp4w::parse(bytes) else {return false;};
+    tree.find(mp4w::ROOT,b"stsz").iter().any(|&id| {
+        let Ok(p)=tree.payload(id) else {return false;};
+        // A constant-size table needs only the 12-byte header. The existing
+        // sample-index reader also requires an entry; that is not truncation.
+        if p.len()<12 {return true;}
+        let size=u32::from_be_bytes(p[4..8].try_into().unwrap());
+        let count=u32::from_be_bytes(p[8..12].try_into().unwrap());
+        size==0 && (p.len() as u64)<12+u64::from(count)*4
+    })
+}
+pub fn kept_code(code:&str)->Option<&'static str>{match code {
+    "SOURCE_DUPLICATE_TIMESTAMP"=>Some("source-duplicate-timestamp"),
+    "SOURCE_NAL_BOUNDARY"=>Some("source-nal-boundary"),
+    "SOURCE_UNFINISHED_SAMPLE_TABLE"=>Some("source-unfinished-sample-table"),_=>None}}
+pub fn is_kept(code:&str)->bool{["too-short","source-duplicate-timestamp","source-nal-boundary","source-unfinished-sample-table"].contains(&code)}
