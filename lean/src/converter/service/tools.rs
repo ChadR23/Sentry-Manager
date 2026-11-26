@@ -43,6 +43,9 @@ pub struct VerifyRequest<'a> {
 
 pub trait Tools: Send + Sync {
     fn inspect_video(&self, source: &str, cancel: &Arc<AtomicBool>) -> CResult<Inspected>;
+    /// Only after empty encoder output: prove the original has packets but no
+    /// playable frames. Unavailable or incomplete proof leaves an output failure.
+    fn source_has_no_playable_frames(&self, _source: &str, _cancel: &Arc<AtomicBool>) -> CResult<bool> { Ok(false) }
     fn read_timeline(&self, source: &str, cancel: &AtomicBool) -> CResult<Timeline>;
     fn write_telemetry(&self, codec: &str, candidate: &str, timeline: &Timeline, cancel: &AtomicBool) -> CResult<()>;
     fn verify(&self, r: &VerifyRequest) -> Verdict;
@@ -224,6 +227,18 @@ fn codec_of(c: &str) -> CResult<Codec> {
 }
 
 impl Tools for RealTools {
+    fn source_has_no_playable_frames(&self, source: &str, cancel: &Arc<AtomicBool>) -> CResult<bool> {
+        // show_frames forces a full decode and emits an explicit [] for zero
+        // frames. A missing nb_read_frames field alone is not a zero count.
+        // No interval, packet or frame limit: reaching a bound is inconclusive.
+        let args = ["-v", "error", "-select_streams", "v:0", "-count_packets", "-show_frames", "-show_entries",
+            "frame=media_type:stream=nb_read_packets", "-of", "json", source].map(str::to_string);
+        let result = self.runner.run(&self.ffprobe, &args, &RunOptions { timeout_ms: Some(30_000), cancel: Some(cancel.clone()), cwd: None });
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) || result.as_ref().is_ok_and(|r| r.aborted) {
+            return Err(CError::code("CANCELLED"));
+        }
+        Ok(result.as_ref().is_ok_and(no_playable_frames))
+    }
     fn video_dimensions(&self, source:&str, cancel:&Arc<AtomicBool>)->Option<(u64,u64)> {
         let args=["-v","error","-select_streams","v:0","-show_entries","stream=width,height","-of","json",source].map(str::to_string);
         let r=self.runner.run(&self.ffprobe,&args,&RunOptions{timeout_ms:Some(5000),cancel:Some(cancel.clone()),..Default::default()}).ok()?;
@@ -352,6 +367,12 @@ fn probe_frame_count(r: &ProcResult, field: &str) -> Option<u64> {
     count.as_u64().or_else(|| count.as_str()?.parse().ok())
 }
 
+fn no_playable_frames(r: &ProcResult) -> bool {
+    if r.signal.is_some() || !r.stderr.trim().is_empty() || !probe_frame_count(r, "nb_read_packets").is_some_and(|n| n > 0) { return false; }
+    let Ok(parsed) = serde_json::from_str::<Value>(&r.stdout) else { return false; };
+    parsed.get("frames").and_then(Value::as_array).is_some_and(Vec::is_empty)
+}
+
 #[cfg(test)]
 #[test]
 fn shutdown_stub_partial_probe_counts_are_never_proof() {
@@ -364,6 +385,33 @@ fn shutdown_stub_partial_probe_counts_are_never_proof() {
         ProcResult { error: Some("PROCESS_START_FAILED".into()), ..good.clone() },
         ProcResult { status: None, ..good.clone() },
     ] { assert_eq!(probe_frame_count(&incomplete, "nb_read_frames"), None); }
+}
+
+#[cfg(test)]
+#[test]
+fn no_playable_stub_requires_a_clean_complete_decode_and_packets() {
+    let good = ProcResult { status: Some(0), stdout: r#"{"frames":[],"streams":[{"nb_read_packets":"7"}]}"#.into(), ..Default::default() };
+    assert!(no_playable_frames(&good));
+    for incomplete in [
+        ProcResult { status: Some(1), ..good.clone() },
+        ProcResult { status: None, ..good.clone() },
+        ProcResult { timed_out: true, ..good.clone() },
+        ProcResult { aborted: true, ..good.clone() },
+        ProcResult { output_limit_exceeded: true, ..good.clone() },
+        ProcResult { error: Some("PROCESS_START_FAILED".into()), ..good.clone() },
+        ProcResult { signal: Some("SIGTERM".into()), ..good.clone() },
+        ProcResult { stderr: "decoder error".into(), ..good.clone() },
+    ] { assert!(!no_playable_frames(&incomplete), "{incomplete:?}"); }
+    for body in [
+        r#"{"streams":[{"nb_read_packets":"7"}]}"#, // absent count is not zero
+        r#"{"frames":[],"streams":[{"nb_read_packets":"0"}]}"#,
+        r#"{"frames":[],"streams":[{}]}"#,
+        r#"{"frames":[],"streams":[{"nb_read_packets":"N/A"}]}"#,
+        r#"{"frames":[],"streams":[{"nb_read_packets":"7"},{"nb_read_packets":"7"}]}"#,
+        r#"{"frames":[{"media_type":"video"}],"streams":[{"nb_read_packets":"7"}]}"#,
+        r#"{"frames":null,"streams":[{"nb_read_packets":"7"}]}"#,
+        "not json",
+    ] { assert!(!no_playable_frames(&ProcResult { stdout: body.into(), ..good.clone() }), "{body}"); }
 }
 
 /// Only precise defects read from the original qualify. Never classify encoder
@@ -386,7 +434,8 @@ fn truncated_sample_table(bytes:&[u8])->bool {
     })
 }
 pub fn kept_code(code:&str)->Option<&'static str>{match code {
+    "SOURCE_NO_PLAYABLE_FRAMES"=>Some("source-no-playable-frames"),
     "SOURCE_DUPLICATE_TIMESTAMP"=>Some("source-duplicate-timestamp"),
     "SOURCE_NAL_BOUNDARY"=>Some("source-nal-boundary"),
     "SOURCE_UNFINISHED_SAMPLE_TABLE"=>Some("source-unfinished-sample-table"),_=>None}}
-pub fn is_kept(code:&str)->bool{["too-short","source-duplicate-timestamp","source-nal-boundary","source-unfinished-sample-table"].contains(&code)}
+pub fn is_kept(code:&str)->bool{["too-short","source-no-playable-frames","source-duplicate-timestamp","source-nal-boundary","source-unfinished-sample-table"].contains(&code)}

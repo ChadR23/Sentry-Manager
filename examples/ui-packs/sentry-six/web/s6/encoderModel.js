@@ -10,6 +10,7 @@ export const statusNoun = (count, one, many = one + 's') => count === 1 ? one : 
 
 export const KEPT_REASONS = {
   'too-short': 'Kept as recorded (too short to shrink).',
+  'source-no-playable-frames': 'The recording has no complete frame to play. Kept as recorded.',
   'source-duplicate-timestamp': 'Two recorded frames share one timestamp. Kept as recorded.',
   'source-nal-boundary': 'Recorded video data extends beyond its frame boundary. Kept as recorded.',
   'source-unfinished-sample-table': 'The recorded sample table is missing bytes. Kept as recorded.',

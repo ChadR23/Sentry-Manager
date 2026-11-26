@@ -101,6 +101,16 @@ test('trimmed snapshots retain source-specific kept totals separately from faile
   assert.equal(result.damaged,450);assert.equal(result.kept,450);assert.equal(result.attention,50);assert.equal(result.items.length,0);
 });
 
+test('no playable frames are kept with a precise reason; empty encoder output still needs attention', () => {
+  const items=['skipped','completed'].map(state=>({state,resultCode:'source-no-playable-frames',relativePath:'RecentClips/generated.mp4'}));
+  items.push({state:'failed',resultCode:'encoded-no-video-samples'});
+  const result=model.clipFailures({items});
+  assert.equal(result.kept,2); assert.equal(result.attention,1); assert.equal(result.items.length,2);
+  for (const item of result.items) assert.equal(item.reason,'The recording has no complete frame to play. Kept as recorded.');
+  const trimmed=model.clipFailures({items:[],itemStateCounts:{failed:1},itemKeptCounts:{'source-no-playable-frames':25}});
+  assert.equal(trimmed.kept,25); assert.equal(trimmed.attention,1);
+});
+
 test('server-tested local lanes retain the guided level, manual and node lanes stay custom', () => {
   const c = {...simple, deviceSettingsSource:'test', lanes:[{device:'gpu-a',concurrency:4},{device:'gpu-b',concurrency:2}]};
   assert.equal(model.levelOf(c), 'med');

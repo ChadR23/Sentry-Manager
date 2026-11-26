@@ -1314,6 +1314,14 @@ impl Service {
                     Self::compose_into(rt, &id, o);
                 }
             }
+            // Empty output is not source evidence. Only after it is cleaned up,
+            // decode the original once to distinguish a shutdown stub from an
+            // encoder problem. No second encode or weaker publication checks.
+            if e.is("ENCODED_NO_VIDEO_SAMPLES") && cleanup.cleaned
+                && self.reconcile_item_ownership(rt, &id, Self::ownership_for(rt, &id), false)?
+                && self.0.o.tools.source_has_no_playable_frames(&item.s("sourcePath"), &signal).map_err(Fail::from)? {
+                return Err(Fail::from(CError::new("SOURCE_NO_PLAYABLE_FRAMES", "The recording has no complete frame to play. Kept as recorded.")));
+            }
             return Err(e);
         }
         Ok(())

@@ -487,6 +487,15 @@ fn shutdown_stub_empty_encoder_output_preserves_original_and_cleans_candidate() 
 
 #[test]
 fn shutdown_stub_failed_items_become_kept_on_the_next_automatic_run() {
+    failed_stubs_become_kept(false);
+}
+
+#[test]
+fn no_playable_stub_failed_items_become_kept_on_the_next_automatic_run() {
+    failed_stubs_become_kept(true);
+}
+
+fn failed_stubs_become_kept(no_frames: bool) {
     use crate::converter::{runtime::{Converter,RuntimeOptions},auto_convert::setup_key};
     use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
     let dir=tempdir().unwrap(); let root=dir.path().join("footage");
@@ -497,10 +506,13 @@ fn shutdown_stub_failed_items_become_kept_on_the_next_automatic_run() {
         "SavedClips/generated/2020-01-01_00-00-00-right_repeater.mp4"];
     let mut items=vec![]; let mut originals=vec![]; let mut failures=serde_json::Map::new();
     for (n,relative) in paths.iter().enumerate() {
-        let source=root.join(relative); shutdown_source(&source,36); originals.push(fs::read(&source).unwrap()); let metadata=fs::metadata(&source).unwrap();
+        let source=root.join(relative);
+        if no_frames { no_playable_source(&source); } else { shutdown_source(&source,36); }
+        originals.push(fs::read(&source).unwrap()); let metadata=fs::metadata(&source).unwrap();
+        let old_code=if no_frames { ["unsupported-container","encoded-no-video-samples","unsupported-container"][n] } else {"invalid-mp4"};
         items.push(json!({"id":format!("item-{:06}",n+1),"state":"failed","eventId":null,"kind":"video","relativePath":relative,"sourcePath":source,
             "sourceBytes":metadata.len(),"mtimeMs":crate::converter::jobstore::mtime_ms(&metadata),"group":relative.split('/').next().unwrap(),
-            "timestampKey":"2020-01-01_00-00-00","camera":"front","resultCode":"invalid-mp4","failure":{"code":"invalid-mp4","retryable":false},"attempts":1}));
+            "timestampKey":"2020-01-01_00-00-00","camera":"front","resultCode":old_code,"failure":{"code":old_code,"retryable":false},"attempts":1}));
         failures.insert(relative.to_string(),json!(1));
     }
     let spawned=Arc::new(AtomicUsize::new(0));
@@ -523,15 +535,15 @@ fn shutdown_stub_failed_items_become_kept_on_the_next_automatic_run() {
     let state=restarted.auto.get_state(); let id=state["status"]["active"][root.to_str().unwrap()]["jobId"].as_str().expect("next automatic run").to_string();
     restarted.service.when_idle(&id).unwrap(); restarted.auto.tick();
     let job=restarted.service.get(&id).unwrap(); assert_eq!(job["items"].as_array().unwrap().len(),3,"{job}");
-    for item in job["items"].as_array().unwrap() {assert_eq!(item["resultCode"],"too-short","{job}");assert_eq!(item["state"],"skipped");assert!(item["failure"].is_null());}
-    assert_eq!(spawned.load(Ordering::SeqCst),0);
+    for item in job["items"].as_array().unwrap() {assert_eq!(item["resultCode"],if no_frames {"source-no-playable-frames"} else {"too-short"},"{job}");assert_eq!(item["state"],"skipped");assert!(item["failure"].is_null());}
+    assert_eq!(spawned.load(Ordering::SeqCst),if no_frames {3} else {0});
     assert_eq!(restarted.service.get(old.id()).unwrap()["items"],Value::Array(items),"failure history remains intact");
     let saved:Value=serde_json::from_slice(&fs::read(&index).unwrap()).unwrap();
     assert!(saved["failures"].as_object().unwrap().is_empty()); assert_eq!(saved["files"].as_object().unwrap().len(),3);
     for (n,relative) in paths.iter().enumerate() {assert_eq!(fs::read(root.join(relative)).unwrap(),originals[n]);}
     restarted.shutdown(); drop(restarted);
     let again=open(); again.start().unwrap(); again.auto.tick();
-    assert_eq!(again.service.list().unwrap().len(),2,"kept clips are not submitted again"); assert_eq!(spawned.load(Ordering::SeqCst),0); again.shutdown();
+    assert_eq!(again.service.list().unwrap().len(),2,"kept clips are not submitted again"); assert_eq!(spawned.load(Ordering::SeqCst),if no_frames {3} else {0}); again.shutdown();
 }
 
 #[test]
@@ -572,4 +584,130 @@ fn shutdown_stub_inconclusive_counts_do_not_prove_one_playable_frame() {
         let tools=RealTools::new("ffmpeg",probe.to_str().unwrap(),Arc::new(Registry::new(dir.path().to_path_buf())));
         assert!(!tools.inspect_video(source.to_str().unwrap(),&cancel).is_err_and(|e|e.code=="SOURCE_TOO_SHORT"),"{body} {status} {stderr}");
     }
+}
+
+// Cut the IDR sample out of a generated GOP, leaving eight complete P samples
+// and no stss box, like a recording that stopped before its next keyframe.
+fn no_playable_source(path: &Path) {
+    generate(path, &[400; 9]);
+    let bytes = fs::read(path).unwrap();
+    let tree = mp4w::parse(&bytes).unwrap();
+    let (track, _) = mp4w::select_video_track(&tree).unwrap();
+    let samples = mp4w::build_sample_index(&tree, track).unwrap();
+    let start = samples[1].offset as u32;
+    fn rebuild(tree: &Tree, id: usize, start: u32) -> Vec<u8> {
+        let n = tree.node(id);
+        if n.typ == *b"stss" { return vec![]; }
+        let mut p = if n.children.is_empty() { tree.payload(id).unwrap().to_vec() }
+            else { n.children.iter().flat_map(|&c| rebuild(tree, c, start)).collect() };
+        match &n.typ {
+            b"stsz" => { assert_eq!(mp4w::be32(&p, 8), 9); p[8..12].copy_from_slice(&8u32.to_be_bytes()); p.drain(12..16); }
+            b"stsc" => { assert_eq!(mp4w::be32(&p, 4), 1); p[12..16].copy_from_slice(&8u32.to_be_bytes()); }
+            b"stco" => { assert_eq!(mp4w::be32(&p, 4), 1); p[8..12].copy_from_slice(&start.to_be_bytes()); }
+            b"stts" => { assert_eq!(mp4w::be32(&p, 4), 1); p[8..12].copy_from_slice(&8u32.to_be_bytes()); }
+            b"mdhd" => p[16..20].copy_from_slice(&3200u32.to_be_bytes()),
+            b"mvhd" => p[16..20].copy_from_slice(&320u32.to_be_bytes()),
+            b"tkhd" => p[20..24].copy_from_slice(&320u32.to_be_bytes()),
+            _ => {}
+        }
+        mp4w::make_box(&n.typ, &p).unwrap()
+    }
+    // mdat precedes moov, so shrinking the sample tables cannot move the media.
+    assert!(tree.node(tree.find(mp4w::ROOT, b"mdat")[0]).start < tree.node(tree.find(mp4w::ROOT, b"moov")[0]).start);
+    let cut: Vec<u8> = tree.top().iter().flat_map(|&id| rebuild(&tree, id, start)).collect();
+    fs::write(path, cut).unwrap();
+}
+
+#[test]
+fn no_playable_stub_reproduces_empty_encode_with_complete_packets() {
+    let dir = tempdir().unwrap(); let source = dir.path().join("source.mp4"); let target = dir.path().join("candidate.mp4");
+    no_playable_source(&source);
+    let probe = Command::new("ffprobe").args(["-v", "error", "-select_streams", "v:0", "-count_packets", "-count_frames", "-show_frames", "-show_entries",
+        "frame=media_type:stream=nb_frames,nb_read_packets,nb_read_frames:format=duration", "-of", "json"]).arg(&source).output().unwrap();
+    assert!(probe.status.success()); assert!(probe.stderr.is_empty(), "{}", String::from_utf8_lossy(&probe.stderr));
+    let counted: Value = serde_json::from_slice(&probe.stdout).unwrap();
+    eprintln!("no-playable source: {counted}");
+    assert_eq!(counted["streams"][0]["nb_frames"], "8");
+    assert_eq!(counted["streams"][0]["nb_read_packets"], "8");
+    assert!(counted["streams"][0]["nb_read_frames"].is_null());
+    assert_eq!(counted["frames"], json!([]));
+    let timeline = encode_without_telemetry(&source, &target, "balanced");
+    let bytes = fs::read(&target).unwrap(); let tree = mp4w::parse(&bytes).unwrap();
+    assert!(tree.find(mp4w::ROOT, b"trak").is_empty(), "real encode omits the empty video track");
+    let error = adapters::telemetry_bytes(&bytes, &timeline, Codec::H265).unwrap_err();
+    eprintln!("no-playable candidate: {}: {}", error.code, error.message);
+    assert_eq!(error.code, "ENCODED_NO_VIDEO_SAMPLES");
+}
+
+#[test]
+fn no_playable_stub_is_kept_after_one_encode_in_both_modes_and_read_modes() {
+    no_playable_service_case(true);
+}
+
+#[test]
+fn no_playable_stub_proof_is_not_run_for_successful_encodes() {
+    no_playable_service_case(false);
+}
+
+fn no_playable_service_case(no_frames: bool) {
+    use crate::converter::runtime::{Converter, RuntimeOptions};
+    use std::{os::unix::fs::PermissionsExt, sync::{Arc, Mutex}};
+    for mode in ["replace", "separate"] { for network in ["direct", "staging"] {
+        let dir = tempdir().unwrap(); let root = dir.path().join("footage");
+        for p in [root.join("RecentClips"), dir.path().join("temp"), dir.path().join("out")] { fs::create_dir_all(p).unwrap(); }
+        let relative = "RecentClips/2020-01-01_00-00-00-front.mp4"; let source = root.join(relative);
+        if no_frames { no_playable_source(&source); } else { generate(&source, &[400; 48]); }
+        let before = fs::read(&source).unwrap();
+        let probe = dir.path().join("probe"); let log = dir.path().join("proofs");
+        fs::write(&probe, format!("#!/bin/sh\nproof=0\nfor arg do\n [ \"$arg\" != -show_frames ] || proof=1\n last=$arg\ndone\nif [ $proof = 1 ]; then printf '%s\\n' \"$last\" >> '{}'; fi\nexec ffprobe \"$@\"\n", log.display())).unwrap();
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap();
+        let candidates = Arc::new(Mutex::new(Vec::<String>::new())); let seen = candidates.clone();
+        let mut opts = RuntimeOptions::new(dir.path().join("data"), dir.path().join("temp"), "ffmpeg", probe.to_str().unwrap()); opts.auto_timer = false;
+        opts.tune = Some(Box::new(move |o| o.on_spawn = Some(Arc::new(move |args| seen.lock().unwrap().push(args.last().unwrap().clone())))));
+        let conv = Converter::open(opts).unwrap();
+        let id = conv.service.start(&json!({"sourceRoot":root,"destinationRoot":if mode=="separate" {Some(dir.path().join("out"))} else {None},
+            "outputMode":mode,"replacementConfirmed":mode=="replace","codec":"h265","profileId":"balanced","verifyMode":"quick",
+            "includedGroups":["RecentClips"],"networkMode":network,"concurrency":1})).unwrap();
+        conv.service.when_idle(&id).unwrap(); let job = conv.service.get(&id).unwrap(); let item = &job["items"][0];
+        assert_eq!(item["resultCode"], if no_frames {"source-no-playable-frames"} else {"converted"}, "{mode} {network}: {job}");
+        assert_eq!(item["state"], if no_frames && mode=="replace" {"skipped"} else {"completed"});
+        assert!(item["failure"].is_null()); assert_eq!(item["attempts"], 1);
+        assert_eq!(fs::read_to_string(&log).unwrap_or_default(), if no_frames {format!("{}\n", source.display())} else {String::new()}, "proof reads the original, only after empty output");
+        if no_frames {
+            let trimmed = crate::converter::ipc::sanitize_snapshot(&json!({"items":vec![item.clone(); 257]})).unwrap();
+            assert_eq!(trimmed["itemKeptCounts"]["source-no-playable-frames"], 257);
+        }
+        if no_frames || mode=="separate" { assert_eq!(fs::read(&source).unwrap(), before); }
+        assert_eq!(fs::read_dir(source.parent().unwrap()).unwrap().count(), 1, "no replacement or backup leftovers");
+        if no_frames && mode=="separate" { assert_eq!(fs::read(dir.path().join("out").join(relative)).unwrap(), before); }
+        let candidates = candidates.lock().unwrap(); assert_eq!(candidates.len(), 1, "never encode twice");
+        for p in candidates.iter() { assert!(!Path::new(p).exists(), "candidate not cleaned: {p}"); }
+        assert!(item["ownedPaths"].as_object().is_none_or(|o| o.is_empty()));
+        assert_eq!(fs::read_dir(dir.path().join("temp/sentry-six-converter")).unwrap().count(), 0, "staged input is cleaned too");
+        conv.shutdown();
+    }}
+}
+
+#[test]
+fn no_playable_stub_proof_does_not_accept_failed_or_limited_processes() {
+    use crate::converter::service::tools::{RealTools, Tools};
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    let dir = tempdir().unwrap(); let source = dir.path().join("source.mp4");
+    no_playable_source(&source);
+    let mut tools = RealTools::new("ffmpeg", "ffprobe", Arc::new(Registry::new(dir.path().to_path_buf())));
+    let cancel = Arc::new(AtomicBool::new(false));
+    assert!(tools.source_has_no_playable_frames(source.to_str().unwrap(), &cancel).unwrap());
+    tools.runner.max_output_bytes = 1;
+    assert!(!tools.source_has_no_playable_frames(source.to_str().unwrap(), &cancel).unwrap());
+    tools.runner.max_output_bytes = 1024 * 1024;
+    tools.ffprobe = dir.path().join("missing-probe").to_str().unwrap().into();
+    assert!(!tools.source_has_no_playable_frames(source.to_str().unwrap(), &cancel).unwrap());
+    tools.ffprobe = "ffprobe".into();
+    cancel.store(true, Ordering::SeqCst);
+    assert_eq!(tools.source_has_no_playable_frames(source.to_str().unwrap(), &cancel).unwrap_err().code, "CANCELLED");
+    cancel.store(false, Ordering::SeqCst);
+    generate(&source, &[400; 48]);
+    assert!(!tools.source_has_no_playable_frames(source.to_str().unwrap(), &cancel).unwrap());
+    fs::write(&source, b"not a video").unwrap();
+    assert!(!tools.source_has_no_playable_frames(source.to_str().unwrap(), &cancel).unwrap());
 }

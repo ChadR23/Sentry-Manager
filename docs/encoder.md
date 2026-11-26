@@ -199,11 +199,22 @@ successful count of one playable frame keeps the original. A genuine short
 clip with multiple playable frames can still shrink, including a 72-frame,
 two-second clip. Failed or inconclusive counts do not prove a stub.
 
-An encode with no video samples fails as `encoded-no-video-samples`, an encoder
-output problem. It is never described as an unfinished source recording; the
-original is preserved and the owned candidate is cleaned up. Previously failed
-stubs that are still eligible are checked again by the next automatic run,
-without clearing the index or retrying them manually.
+When an encode produces no video track or zero video samples, the converter
+cleans up the candidate and checks the original with a complete decode. If it
+finishes cleanly with packets but no playable frames, the clip is kept as
+`source-no-playable-frames`: **The recording has no complete frame to play.
+Kept as recorded.** This can happen when a recording starts between keyframes
+and stops before the next one. The proof runs only after empty encoder output,
+not for every clip, and never causes a second encode.
+
+The proof is bounded to 30 seconds with cancellation and output limits. A
+timeout, abort, decoder error, failed process or missing/ambiguous result does
+not prove zero playable frames. If the original decodes frames or the proof
+is inconclusive, the item stays failed as `encoded-no-video-samples`, an encoder
+output problem. Cancellation stays cancellation. The original is preserved;
+no empty candidate is published. Previously failed stubs that are still
+eligible are checked again by the next automatic run, without clearing the
+index or retrying them manually.
 
 Expand the list for relative paths and a plain reason; **Show more clips** reads more
 pages. These originals are left alone in replace mode (copied unchanged in
