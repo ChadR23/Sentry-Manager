@@ -737,13 +737,16 @@ pub fn calculate_retry_bitrate(current: f64, actual: f64, target: f64, codec: &s
     Ok(bitrate_floor(codec).max(calc))
 }
 
+pub(super) fn size_retry_limit(encoder: &str) -> i64 {
+    if encoder == "libaom-av1" { 2 } else { 1 }
+}
+
 /// decideSizeRetry: (retry, bitrate)
 pub fn decide_size_retry(retry_count: i64, failure_reason: Option<&str>, codec: &str, encoder: &str, current: f64, actual: f64, target: f64) -> Result<(bool, Option<i64>), String> {
     if retry_count < 0 {
         return Err("retryCount must be a non-negative integer".into());
     }
-    let limit = if encoder == "libaom-av1" { 2 } else { 1 };
-    if failure_reason != Some("profile-size") || retry_count >= limit {
+    if failure_reason != Some("profile-size") || retry_count >= size_retry_limit(encoder) {
         return Ok((false, None));
     }
     Ok((true, Some(calculate_retry_bitrate(current, actual, target, codec)?)))

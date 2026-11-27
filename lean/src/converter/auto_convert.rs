@@ -27,7 +27,7 @@ const SAVED_FILE: &str = "vehicles.json";
 const MAX_FAILED_SWEEPS: i64 = 3;
 /// Raised whenever encoding or verification changes in a way that could let
 /// given-up clips convert now (see autoConvert.js).
-pub const CONVERTER_REVISION: i64 = 6;
+pub const CONVERTER_REVISION: i64 = 7;
 const INDEX_VERSION: i64 = 2;
 const TERMINAL: [&str; 3] = ["completed", "failed", "cancelled"];
 const MAX_SOURCES: usize = 64;

@@ -117,7 +117,7 @@ with *Load these*, which fills the form only when you click it.
   (checked when the clip is verified). GPUs and nodes are not used for it
   (with several GPUs the Encoder shows one number for it instead of the
   rows), and `CPU_ENCODER_PRESET` does not change it.
-- **Every clip ends up in one codec.** With *Constant quality*, *Smallest
+- **Profiles without a size target.** With *Constant quality*, *Smallest
   (CPU only)* or a custom bitrate, a clip that does not come out smaller
   (busy repeater footage, night, rain) is encoded again at 85% of its
   original bitrate, then 60%, instead of staying H.264. Only if even that is
@@ -126,13 +126,23 @@ with *Load these*, which fills the form only when you click it.
   little bigger, as long as it passed every other check. Turning it on also
   tries again the clips automatic conversion had left as they were for this
   reason.
-- **Size profiles** (5%, 20%, 50% smaller) retry a clip that comes out too
-  big at a lower bitrate; *Keep clips that can't reach the size target*
-  (off by default) then keeps it anyway, if it is smaller than the original
-  and passed every other check, and marks it "kept: 14% smaller (target 20%)".
+- **Size profiles** aim for 5%, 20% or 50% smaller. If a verified copy saves
+  space but misses the target, the converter retries it at a lower bitrate.
+  *Keep clips that can't reach the size target* lets it use a smaller copy
+  that still misses after the retry and shows the savings, for example
+  “kept: 14% smaller (target 20%)”. With that option off (the Expert
+  default), a smaller copy that still misses the target fails verification.
+  If a verified copy is the same size as the original or larger, the
+  converter discards it and records `no-savings`. Replace mode leaves the
+  original in place. Separate-folder mode copies it unchanged. The 85% and
+  60% retries and *Always convert, even if larger* apply only to profiles
+  without a size target.
 - **Gave up is not forever.** The automatic window stops retrying a clip
   after it fails three times, or when converting it would not save space.
   When an update changes the converter, those clips are tried again once.
+  The next eligible automatic run rechecks clips that previously failed
+  with `not-smaller`, including ones that reached the three-failure limit.
+  The earlier job keeps its original results.
 - **After a restart** the Encoder page shows the job that is running now,
   even if the page was left open while the server restarted.
 
@@ -184,6 +194,9 @@ scheduled check arrives.
 Review the choices and confirm replacement before turning on automatic
 shrinking. Each smaller copy is checked before it replaces the original.
 The status screen shows progress, space saved and the next check.
+
+A verified copy that saves no space appears under **kept as recorded** with
+the reason **Shrinking did not save space.** There is no action to take.
 
 Clips with a proven source defect appear in **kept as recorded**: two frames
 sharing a timestamp, a NAL extending beyond its recorded sample boundary, or

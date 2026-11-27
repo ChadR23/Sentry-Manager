@@ -34,6 +34,29 @@ test('single-frame clips are listed as kept, without damage or a problem', () =>
   }
 });
 
+test('no savings is listed as kept, while a verification failure still needs attention', () => {
+  const items = ['skipped', 'completed'].map((state, n) => ({state, resultCode:'no-savings', relativePath:`RecentClips/clip-${n}.mp4`}));
+  const failed = {state:'failed', resultCode:'frame-count-mismatch'};
+  for (const snapshot of [
+    {items:[...items, failed]},
+    {items:[items[0], failed], itemKeptCounts:{'no-savings':2}, itemStateCounts:{failed:1}},
+  ]) {
+    const result = model.clipFailures(snapshot);
+    assert.equal(result.kept, 2);
+    assert.equal(result.damaged, 0);
+    assert.equal(result.attention, 1);
+    assert.equal(result.items.length, snapshot.items.length - 1);
+    assert.match(result.items[0].reason, /no smaller|did not save space/i);
+  }
+});
+
+test('copying an original unchanged adds no conversion to the current run', () => {
+  const item = {state:'completed', resultCode:'no-savings', eligibleVideo:false};
+  for (const snapshot of [{items:[item]}, {items:[], itemStateCounts:{completed:1}}]) {
+    assert.match(model.currentRunSummary({...snapshot, counters:{files:0}}), /0 converted/);
+  }
+});
+
 test('GPU memory retries and older GPU shortfalls are not described as damaged video', () => {
   const legacy = {state:'failed',encoder:'hevc_nvenc',resultCode:'frame-count-mismatch',failure:{code:'frame-count-mismatch',retryable:false}};
   const temporary = {state:'failed',encoder:'hevc_nvenc',resultCode:'gpu-memory-exhausted',failure:{code:'gpu-memory-exhausted',retryable:true}};

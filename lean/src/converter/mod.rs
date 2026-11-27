@@ -54,4 +54,6 @@ mod tests;
 #[cfg(test)]
 mod parity_tests;
 #[cfg(test)]
+mod size_target_tests;
+#[cfg(test)]
 pub mod testutil;

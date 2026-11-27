@@ -453,4 +453,4 @@ pub fn kept_code(code:&str)->Option<&'static str>{match code {
     "SOURCE_DUPLICATE_TIMESTAMP"=>Some("source-duplicate-timestamp"),
     "SOURCE_NAL_BOUNDARY"=>Some("source-nal-boundary"),
     "SOURCE_UNFINISHED_SAMPLE_TABLE"=>Some("source-unfinished-sample-table"),_=>None}}
-pub fn is_kept(code:&str)->bool{["too-short","source-no-playable-frames","source-duplicate-timestamp","source-nal-boundary","source-unfinished-sample-table"].contains(&code)}
+pub fn is_kept(code:&str)->bool{["no-savings","too-short","source-no-playable-frames","source-duplicate-timestamp","source-nal-boundary","source-unfinished-sample-table"].contains(&code)}

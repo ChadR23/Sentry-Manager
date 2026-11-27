@@ -1309,9 +1309,9 @@ impl Service {
         let r = self.convert(rt, &item, &source, staged_own.as_ref(), expected.as_ref(), &inspected, &mut timing, lane);
         if let Err(e) = r {
             let check_original = e.is("ENCODER_CRASHED") || e.is("ENCODED_NO_VIDEO_SAMPLES");
-            if check_original || e.is("SOURCE_NO_PLAYABLE_FRAMES") {
-                // A failed child may already have released its live candidate.
-                // Reconcile the recorded reservation and staged input together.
+            if check_original || e.is("SOURCE_NO_PLAYABLE_FRAMES") || e.is("KEEP_ORIGINAL") {
+                // The child or verifier may already have released the candidate.
+                // Reconcile its recorded reservation and staged input before keeping the original.
                 let recorded = rt.lock().item(&id).map(|i| ownership_of(&i));
                 if !self.reconcile_item_ownership(rt, &id, recorded, false)? {
                     return Err(service_error("OWNED_CLEANUP_FAILED"));
@@ -1548,7 +1548,8 @@ impl Service {
                 timeline: &timeline,
                 source_duration_us: duration_us.map(|d| d as f64),
                 verify_mode,
-                keep_off_target: config.get("keepOffTarget") == Some(&json!(true)),
+                // An off-target attempt awaiting a retry must discard its snapshot.
+                keep_off_target: config.get("keepOffTarget") == Some(&json!(true)) && size_retry >= planner::size_retry_limit(&selected.codec),
                 allow_larger: no_target && config.get("keepLarger") == Some(&json!(true)) && under_source >= UNDER_SOURCE_SHARES.len(),
                 cancel: signal.clone(),
                 decode_accel: verify_accel.unwrap_or_default(),
@@ -1561,17 +1562,6 @@ impl Service {
                 eprintln!("[CONVERTER] Kept although larger (option on): {} {} bytes larger than the original", item.s("relativePath"), details["largerBytes"]);
             }
             if verdict.ok && details.get("offTarget") == Some(&json!(true)) {
-                let retry = planner::decide_size_retry(size_retry, Some("profile-size"), &codec, &selected.codec, bitrate.unwrap_or(0.0), verdict.output_bytes.unwrap_or(0) as f64, target_bytes.unwrap_or(0.0)).unwrap_or((false, None));
-                if retry.0 {
-                    let cleanup = self.cleanup_ownership(rt, &id, Some(&adopted_own), None, false);
-                    if !cleanup.cleaned {
-                        Self::compose_into(rt, &id, &adopted_own);
-                        return Err(Fail { code: Some("profile-size".into()), retryable: true, ..Default::default() });
-                    }
-                    size_retry += 1;
-                    bitrate = retry.1.map(|b| b as f64);
-                    continue;
-                }
                 eprintln!("[CONVERTER] Kept off its size target (option on): {} {}% smaller, target {}%", item.s("relativePath"), details["offTargetSavedPercent"], details["offTargetTargetPercent"]);
             }
             if !verdict.ok {
@@ -1587,8 +1577,8 @@ impl Service {
                     bitrate = retry.1.map(|b| b as f64);
                     continue;
                 }
-                if no_target && verdict.reason == Some("not-smaller") {
-                    if under_source < UNDER_SOURCE_SHARES.len() {
+                if verdict.reason == Some(super::super::verifier::reasons::NOT_SMALLER) {
+                    if no_target && under_source < UNDER_SOURCE_SHARES.len() {
                         let share = UNDER_SOURCE_SHARES[under_source];
                         under_source += 1;
                         quality = None;
