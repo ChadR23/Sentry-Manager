@@ -2,7 +2,7 @@
 //! conversion (processVideoOnceChecked with the split save, the server's
 //! staging area always splits), assets, failures and the job's end.
 
-use super::encode::EncodeRequest;
+use super::encode::{ChildError, EncodeRequest};
 use super::*;
 use super::super::jobstore::states::ArtifactState;
 use super::super::jobstore::Item;
@@ -1308,19 +1308,23 @@ impl Service {
         timing.mark("source");
         let r = self.convert(rt, &item, &source, staged_own.as_ref(), expected.as_ref(), &inspected, &mut timing, lane);
         if let Err(e) = r {
-            let cleanup = self.cleanup_ownership(rt, &id, staged_own.as_ref(), None, false);
-            if !cleanup.cleaned {
-                if let Some(o) = &staged_own {
-                    Self::compose_into(rt, &id, o);
+            let check_original = e.is("ENCODER_CRASHED") || e.is("ENCODED_NO_VIDEO_SAMPLES");
+            if check_original || e.is("SOURCE_NO_PLAYABLE_FRAMES") {
+                // A failed child may already have released its live candidate.
+                // Reconcile the recorded reservation and staged input together.
+                let recorded = rt.lock().item(&id).map(|i| ownership_of(&i));
+                if !self.reconcile_item_ownership(rt, &id, recorded, false)? {
+                    return Err(service_error("OWNED_CLEANUP_FAILED"));
                 }
-            }
-            // Empty output is not source evidence. Only after it is cleaned up,
-            // decode the original once to distinguish a shutdown stub from an
-            // encoder problem. No second encode or weaker publication checks.
-            if e.is("ENCODED_NO_VIDEO_SAMPLES") && cleanup.cleaned
-                && self.reconcile_item_ownership(rt, &id, Self::ownership_for(rt, &id), false)?
-                && self.0.o.tools.source_has_no_playable_frames(&item.s("sourcePath"), &signal).map_err(Fail::from)? {
-                return Err(Fail::from(CError::new("SOURCE_NO_PLAYABLE_FRAMES", "The recording has no complete frame to play. Kept as recorded.")));
+                if signal.load(Ordering::SeqCst) { return Err(service_error("CANCELLED")); }
+                if check_original && self.0.o.tools.source_has_no_playable_frames(&item.s("sourcePath"), &signal).map_err(Fail::from)? {
+                    // Keep the initiating encoder diagnostic in the kept clip's log.
+                    return Err(Fail { detail: e.detail, ..Fail::from(tools::no_playable_frames_error()) });
+                }
+            } else if let Some(own) = &staged_own {
+                if !self.cleanup_ownership(rt, &id, Some(own), None, false).cleaned {
+                    Self::compose_into(rt, &id, own);
+                }
             }
             return Err(e);
         }
@@ -1360,6 +1364,7 @@ impl Service {
         let initial = |target: f64| planner::calculate_initial_bitrate(&codec, target, inspected.duration_seconds, 0.0, 0.0).map(|b| b as f64).map_err(|_| service_error("INVALID_BITRATE"));
         let mut failed_tiers: Vec<String> = vec![];
         let mut tier_retry = false;
+        let mut checked_empty_failure = false;
         let mut size_retry = 0i64;
         let mut under_source = 0usize;
         let mut attempts = rt.lock().item(&id).and_then(|i| i["attempts"].as_i64()).unwrap_or(0);
@@ -1388,39 +1393,54 @@ impl Service {
             let encoded = self.run_child(rt, &id, &EncodeRequest { source, target: &reserved.path, codec: &codec, encoder: &selected, bitrate, quality: quality.as_deref(), duration_us, window: None, hold_frames, smallest, keep_order, decode: used_tier.as_ref().map(|t| t.1.as_slice()), lane_id: lane.map(|l| l.id.as_str()) });
             drop(fallback);
             timing.mark("encode");
-            if let Err(code) = encoded {
-                let settle = if code == "cancelled" { timeout_flag(15_000) } else { rt.signal() };
+            let missing = std::fs::symlink_metadata(&reserved.path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+            if let Err(error) = encoded {
+                let settle = if error == ChildError::Cancelled { timeout_flag(15_000) } else { rt.signal() };
                 let mut failed_own = reserved_own.clone();
                 let mut op = self.op(rt, &id, &settle, &persist);
                 op.owned_paths = reserved.owned_paths.clone();
                 op.owned_artifacts = reserved.owned_artifacts.clone();
-                if let Ok(a) = self.0.o.staging.adopt_encode_output(&op) {
-                    failed_own = Own::from_typed(&a.owned_paths, &a.owned_artifacts);
-                    latest = Some(failed_own.clone());
-                    Self::compose_into(rt, &id, &failed_own);
+                let mut no_output = missing;
+                if !missing {
+                    if let Ok(a) = self.0.o.staging.adopt_encode_output(&op) {
+                        no_output = a.output_bytes == 0;
+                        failed_own = Own::from_typed(&a.owned_paths, &a.owned_artifacts);
+                        latest = Some(failed_own.clone());
+                        Self::compose_into(rt, &id, &failed_own);
+                    }
                 }
                 let cleanup = self.cleanup_ownership(rt, &id, Some(&failed_own), Some(settle.clone()), false);
                 if !cleanup.cleaned {
                     Self::compose_into(rt, &id, &failed_own);
                     return Err(service_error("OWNED_CLEANUP_FAILED"));
                 }
-                if code == "cancelled" {
-                    return Err(service_error("CANCELLED"));
-                }
-                // taken back from a node's queue: queued here again (see failItem)
-                if code == "withdrawn" {
-                    return Err(service_error("NODE_WITHDRAWN"));
-                }
-                if code == "gpu-memory-paused" {return Err(service_error("GPU_MEMORY_PAUSED"));}
-                if code == "gpu-memory-exhausted" {
-                    // Do not disable a working decode tier or fall back to CPU
-                    // because another application temporarily filled the GPU.
-                    if attempts < MAX_RECORDED_ATTEMPTS {
-                        self.item_patch(rt,&id,vec![("resultCode",Some(json!("gpu-memory-retry")))],vec![])?;
-                        if rt.lock().pause_requested {return Err(service_error("GPU_MEMORY_PAUSED"));}
-                        continue;
+                // Before a decode-tier, CPU or memory retry, check an actual
+                // encoder failure that wrote nothing. Keep staged reads and
+                // ordinary fallbacks available if the original is playable.
+                if no_output && !checked_empty_failure && matches!(error, ChildError::Failed | ChildError::GpuMemoryExhausted) {
+                    if self.0.o.tools.source_has_no_playable_frames(&item.s("sourcePath"), &signal).map_err(Fail::from)? {
+                        return Err(Fail::from(tools::no_playable_frames_error()));
                     }
-                    return Err(Fail{code:Some(code.into()),retryable:true,..Default::default()});
+                    checked_empty_failure = true;
+                }
+                match error {
+                    ChildError::Crashed(status) => return Err(Fail {
+                        detail: Some(format!("{} exited with {status}", selected.codec)),
+                        retryable: selected.hardware,
+                        ..service_error("ENCODER_CRASHED")
+                    }),
+                    ChildError::Cancelled => return Err(service_error("CANCELLED")),
+                    ChildError::Withdrawn => return Err(service_error("NODE_WITHDRAWN")),
+                    ChildError::GpuMemoryPaused => return Err(service_error("GPU_MEMORY_PAUSED")),
+                    ChildError::GpuMemoryExhausted | ChildError::GpuMemoryWaitTimeout => {
+                        if attempts < MAX_RECORDED_ATTEMPTS {
+                            self.item_patch(rt,&id,vec![("resultCode",Some(json!("gpu-memory-retry")))],vec![])?;
+                            if rt.lock().pause_requested {return Err(service_error("GPU_MEMORY_PAUSED"));}
+                            continue;
+                        }
+                        return Err(Fail { retryable: true, ..service_error("gpu-memory-exhausted") });
+                    }
+                    ChildError::Failed | ChildError::StartFailed | ChildError::Stalled => {}
                 }
                 // the same GPU encoder with a slower decode before giving up on it
                 if let Some(t) = used_tier {
@@ -1446,6 +1466,9 @@ impl Service {
                     continue;
                 }
                 return Err(service_error("ENCODER_FAILED"));
+            }
+            if missing {
+                return Err(Fail::from(CError::new("ENCODED_NO_VIDEO_SAMPLES", "Encoder exited successfully without an output file.")));
             }
             self.mark_broken_tiers(&selected, &mut failed_tiers);
             let mut op = self.op(rt, &id, &signal, &persist);

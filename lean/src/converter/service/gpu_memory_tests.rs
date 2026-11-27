@@ -57,13 +57,14 @@ fn gpu_memory_admission_makes_lane_concurrency_an_upper_bound() {
 
 #[test]
 fn gpu_memory_legacy_retry_keeps_pause_and_excludes_invalid_h264() {
-    let h=Harness::new(gpu_options(2));
+    let h=Harness::new(gpu_options(4));
     let id=h.service().start(&gpu_config(&h,1)).unwrap();
     let finished=h.finish_job(&id);
     let items:Vec<Value>=finished["items"].as_array().unwrap().iter().enumerate().map(|(n,i)| {
-            let code=if n==0 {"frame-count-mismatch"} else {"invalid-h264"};
+            let code=["frame-count-mismatch","invalid-h264","encoder-crashed","encoder-crashed"][n];
             merge(i,&vec![("state",Some(json!("failed"))),("resultCode",Some(json!(code))),
-                ("failure",Some(json!({"code":code,"retryable":false})))])
+                ("encoder",Some(json!(if n==3 {"libx265"} else {"hevc_nvenc"}))),
+                ("failure",Some(json!({"code":code,"retryable":n==2})))])
         }).collect();
     let manifest=h.service().store().create(json!({"state":"paused","config":finished["config"],"discoveryComplete":true,"items":items}).as_object().unwrap()).unwrap();
     let id=manifest.id().to_string();
@@ -77,9 +78,11 @@ fn gpu_memory_legacy_retry_keeps_pause_and_excludes_invalid_h264() {
     assert_eq!(queued["items"][0]["state"],"queued");
     assert_eq!(queued["items"][0]["resultCode"],"gpu-memory-retry");
     assert_eq!(queued["items"][1],original["items"][1]);
+    assert_eq!(queued["items"][2]["resultCode"],"gpu-memory-retry","retry a hardware crash with one encode on the device");
+    assert_eq!(queued["items"][3],original["items"][3],"a CPU crash stays failed");
     assert!(!restarted.runtime_of(&id).unwrap().lock().running);
     assert_eq!(public_snapshot(&restarted.store().load(&id).unwrap().unwrap()),queued);
-    assert_eq!(h.spawned().len(),2,"the retry action never resumes the owner pause");
+    assert_eq!(h.spawned().len(),4,"the retry action never resumes the owner pause");
 }
 
 #[test]

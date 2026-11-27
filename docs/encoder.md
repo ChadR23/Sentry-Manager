@@ -191,30 +191,38 @@ a sample table whose header or declared entries are missing bytes
 (`source-unfinished-sample-table`). That reason requires proof from the original;
 it does not describe a complete two-sample recorder shutdown stub.
 
-**Too short to shrink** (`too-short`) includes shutdown stubs with only one
-playable frame, even when the file declares two samples. Before encoding, the
-converter checks the original's metadata; only suspicious clips (two declared
-frames or at most 100 ms) get an additional bounded frame-count decode. A
-successful count of one playable frame keeps the original. A genuine short
-clip with multiple playable frames can still shrink, including a 72-frame,
-two-second clip. Failed or inconclusive counts do not prove a stub.
+An H.264 recording can start between keyframes and stop before the next one.
+Before encoding, the converter checks originals shorter than one second, plus
+clips declaring exactly two frames. Using the duration and frame count already
+read by ffprobe catches subsecond shutdown clips before they reach the GPU.
+Normal recordings incur no extra decode at admission.
 
-When an encode produces no video track or zero video samples, the converter
-cleans up the candidate and checks the original with a complete decode. If it
-finishes cleanly with packets but no playable frames, the clip is kept as
-`source-no-playable-frames`: **The recording has no complete frame to play.
-Kept as recorded.** This can happen when a recording starts between keyframes
-and stops before the next one. The proof runs only after empty encoder output,
-not for every clip, and never causes a second encode.
+The same decode checks both shutdown cases. For clips declaring two frames or
+lasting at most 100 ms, one playable frame qualifies as **Too short to shrink**
+(`too-short`). A clean, complete decode with packets and an explicitly empty
+list of frames qualifies as `source-no-playable-frames`. **The recording has no
+complete frame to play. Kept as recorded.** Genuine short clips with multiple
+playable frames continue through normal shrinking and verification.
 
-The proof is bounded to 30 seconds with cancellation and output limits. A
-timeout, abort, decoder error, failed process or missing/ambiguous result does
-not prove zero playable frames. If the original decodes frames or the proof
-is inconclusive, the item stays failed as `encoded-no-video-samples`, an encoder
-output problem. Cancellation stays cancellation. The original is preserved;
-no empty candidate is published. Previously failed stubs that are still
-eligible are checked again by the next automatic run, without clearing the
-index or retrying them manually.
+If the encoder crashes, fails without writing output, or produces an MP4 with
+no video samples, the converter also checks the original. It removes the
+partial candidate and uses the same proof before it can keep the recording.
+A failed encode needs no second encode to identify a stub. The proof has a
+30-second timeout, cancellation and an output limit. A decoder error, missing
+result or interrupted decode leaves the source unclassified.
+
+For a playable original or an inconclusive proof, an unexpected signal gives
+`encoder-crashed`. The container log and current job detail identify the signal.
+The original stays in place. A GPU crash can be transient, so **Retry clips that
+failed for temporary reasons** can queue it for a later, single-encode GPU
+retry. A CPU crash remains failed. Ordinary encoder failures retain their
+normal fallback behavior, and an MP4 with no video samples remains
+`encoded-no-video-samples`.
+
+The next eligible automatic run checks previously failed stubs, including
+older items marked failed with `cancelled`. It keeps proven originals without
+a manual retry or an index reset. An owner-cancelled job stays cancelled and a
+user pause continues to wait for **Resume**.
 
 Expand the list for relative paths and a plain reason; **Show more clips** reads more
 pages. These originals are left alone in replace mode (copied unchanged in

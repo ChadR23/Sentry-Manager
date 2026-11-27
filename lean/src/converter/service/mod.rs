@@ -129,6 +129,7 @@ pub fn detailed_failure(code: &str) -> Option<&'static str> {
         UNSAFE_OWNED_PATH_RESULT => Some("UNSAFE_OWNED_PATH"),
         SOURCE_CHANGED_RESULT => Some("SOURCE_CHANGED"),
         "folder-not-writable" => Some("FOLDER_NOT_WRITABLE"),
+        "encoder-crashed" => Some("ENCODER_CRASHED"),
         _ => None,
     }
 }
@@ -1438,7 +1439,7 @@ impl Service {
             }
             self.update(&rt,|s| {
                 let items=s.manifest.items.iter().map(|i|if selected_ids.contains(i.id()) {
-                    let gpu=i.str("resultCode")==Some("gpu-memory-exhausted") || i.str("resultCode")==Some("frame-count-mismatch");
+                    let gpu=matches!(i.str("resultCode"), Some("gpu-memory-exhausted" | "frame-count-mismatch" | "encoder-crashed"));
                     ItemIn::Raw(merge(i.value(),&vec![("state",Some(ItemState::Queued.into())),("attempts",Some(json!(0))),
                         ("failure",None),("resultCode",Some(json!(if gpu {"gpu-memory-retry"} else {"temporary-retry"})))]))
                 } else {ItemIn::Trusted(i.clone())}).collect();

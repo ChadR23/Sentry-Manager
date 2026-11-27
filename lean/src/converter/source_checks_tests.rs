@@ -507,13 +507,15 @@ fn failed_stubs_become_kept(no_frames: bool) {
     let mut items=vec![]; let mut originals=vec![]; let mut failures=serde_json::Map::new();
     for (n,relative) in paths.iter().enumerate() {
         let source=root.join(relative);
-        if no_frames { no_playable_source(&source); } else { shutdown_source(&source,36); }
+        if no_frames && n == 2 { subsecond_no_playable_source(&source); }
+        else if no_frames { no_playable_source(&source); } else { shutdown_source(&source,36); }
         originals.push(fs::read(&source).unwrap()); let metadata=fs::metadata(&source).unwrap();
-        let old_code=if no_frames { ["unsupported-container","encoded-no-video-samples","unsupported-container"][n] } else {"invalid-mp4"};
+        let old_code=if no_frames { ["unsupported-container","encoded-no-video-samples","cancelled"][n] } else {"invalid-mp4"};
         items.push(json!({"id":format!("item-{:06}",n+1),"state":"failed","eventId":null,"kind":"video","relativePath":relative,"sourcePath":source,
             "sourceBytes":metadata.len(),"mtimeMs":crate::converter::jobstore::mtime_ms(&metadata),"group":relative.split('/').next().unwrap(),
             "timestampKey":"2020-01-01_00-00-00","camera":"front","resultCode":old_code,"failure":{"code":old_code,"retryable":false},"attempts":1}));
         failures.insert(relative.to_string(),json!(1));
+        if old_code == "cancelled" { items[n]["encoder"] = json!("hevc_vaapi"); }
     }
     let spawned=Arc::new(AtomicUsize::new(0));
     let open=|| {
@@ -536,14 +538,14 @@ fn failed_stubs_become_kept(no_frames: bool) {
     restarted.service.when_idle(&id).unwrap(); restarted.auto.tick();
     let job=restarted.service.get(&id).unwrap(); assert_eq!(job["items"].as_array().unwrap().len(),3,"{job}");
     for item in job["items"].as_array().unwrap() {assert_eq!(item["resultCode"],if no_frames {"source-no-playable-frames"} else {"too-short"},"{job}");assert_eq!(item["state"],"skipped");assert!(item["failure"].is_null());}
-    assert_eq!(spawned.load(Ordering::SeqCst),if no_frames {3} else {0});
+    assert_eq!(spawned.load(Ordering::SeqCst),0,"subsecond stubs are kept before encoding");
     assert_eq!(restarted.service.get(old.id()).unwrap()["items"],Value::Array(items),"failure history remains intact");
     let saved:Value=serde_json::from_slice(&fs::read(&index).unwrap()).unwrap();
     assert!(saved["failures"].as_object().unwrap().is_empty()); assert_eq!(saved["files"].as_object().unwrap().len(),3);
     for (n,relative) in paths.iter().enumerate() {assert_eq!(fs::read(root.join(relative)).unwrap(),originals[n]);}
     restarted.shutdown(); drop(restarted);
     let again=open(); again.start().unwrap(); again.auto.tick();
-    assert_eq!(again.service.list().unwrap().len(),2,"kept clips are not submitted again"); assert_eq!(spawned.load(Ordering::SeqCst),if no_frames {3} else {0}); again.shutdown();
+    assert_eq!(again.service.list().unwrap().len(),2,"kept clips are not submitted again"); assert_eq!(spawned.load(Ordering::SeqCst),0); again.shutdown();
 }
 
 #[test]
@@ -618,6 +620,174 @@ fn no_playable_source(path: &Path) {
     fs::write(path, cut).unwrap();
 }
 
+fn longer_no_playable_source(path: &Path) {
+    no_playable_source(path);
+    retime_generated(path, &[1600; 8]); // 1.28 s, outside the pre-encode check
+}
+
+fn subsecond_no_playable_source(path: &Path) {
+    no_playable_source(path);
+    retime_generated(path, &[903, 903, 903, 903, 904, 904, 904, 904]); // 0.7228 s
+}
+
+fn playable_source(path: &Path) {
+    generate(path, &[400; 48]);
+}
+
+#[derive(Clone, Copy)]
+enum EncoderFault { Crash, MissingOutput, EmptyOutput, OutOfMemory, SuccessWithoutFile, Terminate, Cancel, Stall }
+
+// Only the encoder and its capability advertisement are simulated. ffprobe,
+// source/candidate ownership, job persistence and publication are real.
+fn failed_encode(
+    fixture: fn(&Path), encoder: &str, fault: EncoderFault, output_mode: &str,
+) -> (Value, usize, usize) {
+    use crate::converter::{runtime::{Converter, RuntimeOptions}, service::lanes_tests::until};
+    use std::{os::unix::fs::PermissionsExt, sync::{Arc, Mutex}};
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("footage");
+    let output = dir.path().join("out");
+    let temp = dir.path().join("temp");
+    for folder in [&root.join("RecentClips"), &output, &temp] { fs::create_dir_all(folder).unwrap(); }
+    let relative = "RecentClips/2020-01-01_00-00-00-front.mp4";
+    let source = root.join(relative);
+    fixture(&source);
+    let original = fs::read(&source).unwrap();
+    let ffmpeg = dir.path().join("encoder");
+    let action = match fault {
+        EncoderFault::Crash => "head -c 44 /dev/zero > \"$last\"\nulimit -c 0\nkill -SEGV $$",
+        EncoderFault::MissingOutput => "exit 1",
+        EncoderFault::EmptyOutput => ": > \"$last\"\nexit 1",
+        EncoderFault::OutOfMemory => "echo 'VA-API resource allocation failed' >&2\nexit 1",
+        EncoderFault::SuccessWithoutFile => "exit 0",
+        EncoderFault::Terminate | EncoderFault::Cancel | EncoderFault::Stall => "printf partial > \"$last\"\nexec sleep 30",
+    };
+    fs::write(&ffmpeg, format!("#!/bin/sh\nfor last do :; done\ncase \"$last\" in\n-encoders) printf '%s\\n' ' V..... {encoder}' ' V..... libx265';;\n/dev/null) exit 0;;\n*) {action};;\nesac\n")).unwrap();
+    let probe = dir.path().join("probe");
+    let log = dir.path().join("proofs");
+    fs::write(&probe, format!("#!/bin/sh\nfor last do :; done\nfor arg do\n [ \"$arg\" != -show_frames ] || printf '%s\\n' \"$last\" >> '{}'\ndone\nexec ffprobe \"$@\"\n", log.display())).unwrap();
+    for program in [&ffmpeg, &probe] { fs::set_permissions(program, fs::Permissions::from_mode(0o755)).unwrap(); }
+    let candidates = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = candidates.clone();
+    let mut options = RuntimeOptions::new(dir.path().join("data"), temp.clone(), ffmpeg.to_str().unwrap(), probe.to_str().unwrap());
+    options.auto_timer = false;
+    options.tune = Some(Box::new(move |o| {
+        if matches!(fault, EncoderFault::Stall) { o.encode_stall_ms = 150; }
+        o.on_spawn = Some(Arc::new(move |args| seen.lock().unwrap().push(args.last().unwrap().clone())));
+    }));
+    let converter = Converter::open(options).unwrap();
+    let id = converter.service.start(&json!({
+        "sourceRoot": root, "destinationRoot": (output_mode == "separate").then_some(&output),
+        "outputMode": output_mode, "replacementConfirmed": output_mode == "replace",
+        "codec": "h265", "profileId": "balanced", "verifyMode": "quick",
+        "includedGroups": ["RecentClips"], "networkMode": "staging", "concurrency": 1
+    })).unwrap();
+    if matches!(fault, EncoderFault::Cancel | EncoderFault::Terminate) {
+        assert!(until(|| candidates.lock().unwrap().iter().any(|p| Path::new(p).exists())));
+        if matches!(fault, EncoderFault::Cancel) {
+            assert_eq!(converter.service.cancel(&id).unwrap()["state"], "cancelled");
+        } else {
+            let rt = converter.service.ensure_runtime(&id).unwrap();
+            converter.service.terminate_children(&rt);
+        }
+    }
+    converter.service.when_idle(&id).unwrap();
+    let item = converter.service.get(&id).unwrap()["items"][0].clone();
+    let stored = converter.store.load(&id).unwrap().unwrap();
+    let durable = stored.items[0].value();
+    for field in ["ownedPaths", "ownedArtifacts"] {
+        assert!(durable[field].as_object().is_none_or(|o| o.is_empty()), "item {field}: {}", durable[field]);
+        assert!(stored.get(field).and_then(Value::as_object).is_none_or(|o| o.is_empty()), "job {field}: {:?}", stored.get(field));
+    }
+    assert_eq!(fs::read(&source).unwrap(), original);
+    assert_eq!(fs::read_dir(source.parent().unwrap()).unwrap().count(), 1, "no backup or replacement");
+    if item["state"] == "completed" {
+        assert_eq!(fs::read(output.join(relative)).unwrap(), original);
+    } else {
+        assert!(!output.join(relative).exists());
+    }
+    assert_eq!(fs::read_dir(temp.join("sentry-six-converter")).unwrap().count(), 0, "no staged input or partial candidate");
+    let candidates = candidates.lock().unwrap();
+    assert!(candidates.iter().all(|p| !Path::new(p).exists()));
+    let proofs = fs::read_to_string(&log).unwrap_or_default();
+    assert!(proofs.lines().all(|p| Path::new(p) == source), "proof must read the original");
+    converter.shutdown();
+    (item, candidates.len(), proofs.lines().count())
+}
+
+#[test]
+fn encoder_crash_subsecond_stub_is_kept_before_the_encoder_sees_it() {
+    let (item, encodes, proofs) = failed_encode(subsecond_no_playable_source, "hevc_vaapi", EncoderFault::Crash, "replace");
+    assert_eq!(item["resultCode"], "source-no-playable-frames", "{item}");
+    assert_eq!(item["state"], "skipped");
+    assert!(item["failure"].is_null());
+    assert_eq!(item["attempts"], 0);
+    assert_eq!((encodes, proofs), (0, 1));
+}
+
+#[test]
+fn encoder_crash_on_playable_source_preserves_signal_and_hardware_retry_policy() {
+    for (encoder, retryable) in [("hevc_vaapi", true), ("libx265", false)] {
+        let (item, encodes, proofs) = failed_encode(playable_source, encoder, EncoderFault::Crash, "separate");
+        assert_eq!(item["state"], "failed");
+        assert_eq!(item["resultCode"], "encoder-crashed", "{item}");
+        assert_eq!(item["failure"]["code"], "encoder-crashed");
+        assert_eq!(item["failure"]["retryable"], retryable);
+        let detail = item["failure"]["detail"].as_str().unwrap();
+        assert!(detail.contains("SIGSEGV") && detail.contains("11"), "{detail}");
+        assert_eq!(item["encoder"], encoder);
+        assert_eq!(item["attempts"], 1);
+        assert_eq!((encodes, proofs), (1, 1), "no in-job crash retry");
+    }
+}
+
+#[test]
+fn encoder_crash_after_admission_keeps_a_proven_stub_and_discards_the_partial() {
+    let (item, encodes, proofs) = failed_encode(longer_no_playable_source, "hevc_vaapi", EncoderFault::Crash, "separate");
+    assert_eq!(item["resultCode"], "source-no-playable-frames", "{item}");
+    assert_eq!(item["state"], "completed");
+    assert!(item["failure"].is_null());
+    assert_eq!(item["attempts"], 1);
+    assert_eq!((encodes, proofs), (1, 1));
+}
+
+#[test]
+fn encoder_crash_checks_an_ordinary_failure_with_no_output_before_fallback() {
+    for fault in [EncoderFault::MissingOutput, EncoderFault::EmptyOutput, EncoderFault::OutOfMemory] {
+        let (item, encodes, proofs) = failed_encode(longer_no_playable_source, "hevc_vaapi", fault, "replace");
+        assert_eq!(item["resultCode"], "source-no-playable-frames", "{item}");
+        assert_eq!(item["state"], "skipped");
+        assert_eq!((encodes, proofs), (1, 1));
+    }
+    let (item, encodes, proofs) = failed_encode(playable_source, "libx265", EncoderFault::MissingOutput, "replace");
+    assert_eq!(item["resultCode"], "encoder-failed");
+    assert_eq!((encodes, proofs), (1, 1));
+    let (item, encodes, proofs) = failed_encode(playable_source, "hevc_vaapi", EncoderFault::MissingOutput, "replace");
+    assert_eq!(item["resultCode"], "encoder-failed");
+    assert_eq!(item["encoder"], "libx265", "playable sources still get the ordinary CPU fallback");
+    assert!(encodes >= 2);
+    assert_eq!(proofs, 1, "repeated empty failures share the source check");
+}
+
+#[test]
+fn encoder_crash_check_excludes_controlled_cancel_and_stall_watchdog() {
+    for (fault, state, code) in [(EncoderFault::Cancel, "cancelled", "cancelled"), (EncoderFault::Terminate, "failed", "cancelled"), (EncoderFault::Stall, "failed", "encoder-failed")] {
+        let (item, encodes, proofs) = failed_encode(longer_no_playable_source, "libx265", fault, "replace");
+        assert_eq!(item["state"], state, "{item}");
+        assert_eq!(item["resultCode"], code);
+        assert_eq!((encodes, proofs), (1, 0), "a controlled termination must not trigger source proof");
+    }
+}
+
+#[test]
+fn encoder_crash_missing_candidate_after_success_also_checks_the_original() {
+    for (source, expected) in [(longer_no_playable_source as fn(&Path), "source-no-playable-frames"), (playable_source, "encoded-no-video-samples")] {
+        let (item, encodes, proofs) = failed_encode(source, "libx265", EncoderFault::SuccessWithoutFile, "replace");
+        assert_eq!(item["resultCode"], expected, "{item}");
+        assert_eq!((encodes, proofs), (1, 1));
+    }
+}
+
 #[test]
 fn no_playable_stub_reproduces_empty_encode_with_complete_packets() {
     let dir = tempdir().unwrap(); let source = dir.path().join("source.mp4"); let target = dir.path().join("candidate.mp4");
@@ -656,7 +826,7 @@ fn no_playable_service_case(no_frames: bool) {
         let dir = tempdir().unwrap(); let root = dir.path().join("footage");
         for p in [root.join("RecentClips"), dir.path().join("temp"), dir.path().join("out")] { fs::create_dir_all(p).unwrap(); }
         let relative = "RecentClips/2020-01-01_00-00-00-front.mp4"; let source = root.join(relative);
-        if no_frames { no_playable_source(&source); } else { generate(&source, &[400; 48]); }
+        if no_frames { longer_no_playable_source(&source); } else { generate(&source, &[400; 48]); }
         let before = fs::read(&source).unwrap();
         let probe = dir.path().join("probe"); let log = dir.path().join("proofs");
         fs::write(&probe, format!("#!/bin/sh\nproof=0\nfor arg do\n [ \"$arg\" != -show_frames ] || proof=1\n last=$arg\ndone\nif [ $proof = 1 ]; then printf '%s\\n' \"$last\" >> '{}'; fi\nexec ffprobe \"$@\"\n", log.display())).unwrap();

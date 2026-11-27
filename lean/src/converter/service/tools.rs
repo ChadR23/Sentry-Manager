@@ -43,8 +43,8 @@ pub struct VerifyRequest<'a> {
 
 pub trait Tools: Send + Sync {
     fn inspect_video(&self, source: &str, cancel: &Arc<AtomicBool>) -> CResult<Inspected>;
-    /// Only after empty encoder output: prove the original has packets but no
-    /// playable frames. Unavailable or incomplete proof leaves an output failure.
+    /// Prove the original has packets but no playable frames. An unavailable
+    /// or incomplete decode cannot authorize keeping a failed encode's source.
     fn source_has_no_playable_frames(&self, _source: &str, _cancel: &Arc<AtomicBool>) -> CResult<bool> { Ok(false) }
     fn read_timeline(&self, source: &str, cancel: &AtomicBool) -> CResult<Timeline>;
     fn write_telemetry(&self, codec: &str, candidate: &str, timeline: &Timeline, cancel: &AtomicBool) -> CResult<()>;
@@ -216,6 +216,19 @@ impl RealTools {
     pub fn with_planner(ffmpeg: &str, ffprobe: &str, registry: Arc<Registry>, planner: Arc<Planner<BoundedRunner>>) -> RealTools {
         RealTools { ffmpeg: ffmpeg.into(), ffprobe: ffprobe.into(), registry, planner, runner: BoundedRunner::host() }
     }
+
+    fn decode_source_frames(&self, source: &str, cancel: &Arc<AtomicBool>) -> CResult<Option<u64>> {
+        // show_frames forces a full decode and emits an explicit [] for zero
+        // frames. A missing nb_read_frames field alone is not a zero count.
+        // No interval, packet or frame limit: reaching a bound is inconclusive.
+        let args = ["-v", "error", "-select_streams", "v:0", "-count_packets", "-count_frames", "-show_frames", "-show_entries",
+            "frame=media_type:stream=nb_read_packets,nb_read_frames", "-of", "json", source].map(str::to_string);
+        let result = self.runner.run(&self.ffprobe, &args, &RunOptions { timeout_ms: Some(30_000), cancel: Some(cancel.clone()), cwd: None });
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) || result.as_ref().is_ok_and(|r| r.aborted) {
+            return Err(CError::code("CANCELLED"));
+        }
+        Ok(result.as_ref().ok().and_then(decoded_frame_count))
+    }
 }
 
 fn codec_of(c: &str) -> CResult<Codec> {
@@ -226,18 +239,13 @@ fn codec_of(c: &str) -> CResult<Codec> {
     }
 }
 
+pub(super) fn no_playable_frames_error() -> CError {
+    CError::new("SOURCE_NO_PLAYABLE_FRAMES", "The recording has no complete frame to play. Kept as recorded.")
+}
+
 impl Tools for RealTools {
     fn source_has_no_playable_frames(&self, source: &str, cancel: &Arc<AtomicBool>) -> CResult<bool> {
-        // show_frames forces a full decode and emits an explicit [] for zero
-        // frames. A missing nb_read_frames field alone is not a zero count.
-        // No interval, packet or frame limit: reaching a bound is inconclusive.
-        let args = ["-v", "error", "-select_streams", "v:0", "-count_packets", "-show_frames", "-show_entries",
-            "frame=media_type:stream=nb_read_packets", "-of", "json", source].map(str::to_string);
-        let result = self.runner.run(&self.ffprobe, &args, &RunOptions { timeout_ms: Some(30_000), cancel: Some(cancel.clone()), cwd: None });
-        if cancel.load(std::sync::atomic::Ordering::SeqCst) || result.as_ref().is_ok_and(|r| r.aborted) {
-            return Err(CError::code("CANCELLED"));
-        }
-        Ok(result.as_ref().is_ok_and(no_playable_frames))
+        Ok(self.decode_source_frames(source, cancel)? == Some(0))
     }
     fn video_dimensions(&self, source:&str, cancel:&Arc<AtomicBool>)->Option<(u64,u64)> {
         let args=["-v","error","-select_streams","v:0","-show_entries","stream=width,height","-of","json",source].map(str::to_string);
@@ -266,20 +274,14 @@ impl Tools for RealTools {
             }}
             Err(e)
         })?;
-        // A shutdown edit can discard the second of two fully recorded samples.
-        // Only suspicious originals pay for a decode: two declared frames, or
-        // at most 100 ms (a few frames at the recorder's 24/36 fps).
-        if inspected.codec == "h264" && (inspected.duration_seconds <= 0.1 || probe_frame_count(&probe, "nb_frames") == Some(2)) {
-            let args = ["-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=nb_read_frames", "-of", "json", source].map(str::to_string);
-            let counted = self.runner.run(&self.ffprobe, &args, &RunOptions { timeout_ms: Some(30_000), cancel: Some(cancel.clone()), cwd: None })
-                .map_err(|_| CError::code("VIDEO_INSPECTION_FAILED"))?;
-            if cancel.load(std::sync::atomic::Ordering::SeqCst) || counted.aborted {
-                return Err(CError::code("CANCELLED"));
-            }
-            // Partial/failed counts, decoder errors and zero/unknown counts
-            // cannot justify keeping a source. Normal checks still apply.
-            if counted.stderr.trim().is_empty() && probe_frame_count(&counted, "nb_read_frames") == Some(1) {
-                return Err(CError::code("SOURCE_TOO_SHORT"));
+        // Subsecond recordings can end before their first keyframe. Share one
+        // bounded decode with the existing two-sample/100 ms shutdown check.
+        let check_one_frame = inspected.duration_seconds <= 0.1 || probe_frame_count(&probe, "nb_frames") == Some(2);
+        if inspected.codec == "h264" && (inspected.duration_seconds < 1.0 || check_one_frame) {
+            match self.decode_source_frames(source, cancel)? {
+                Some(0) => return Err(no_playable_frames_error()),
+                Some(1) if check_one_frame => return Err(CError::code("SOURCE_TOO_SHORT")),
+                _ => {}
             }
         }
         Ok(inspected)
@@ -358,19 +360,31 @@ pub fn bitrate_floor(codec: &str) -> i64 {
     planner::bitrate_floor(codec)
 }
 
-fn probe_frame_count(r: &ProcResult, field: &str) -> Option<u64> {
-    if r.status != Some(0) || r.error.is_some() || r.timed_out || r.aborted || r.output_limit_exceeded { return None; }
-    let parsed: Value = serde_json::from_str(&r.stdout).ok()?;
+fn complete_probe(r: &ProcResult) -> Option<Value> {
+    if r.status != Some(0) || r.signal.is_some() || r.error.is_some() || r.timed_out || r.aborted || r.output_limit_exceeded { return None; }
+    serde_json::from_str(&r.stdout).ok()
+}
+
+fn stream_count(parsed: &Value, field: &str) -> Option<u64> {
     let streams = parsed.get("streams")?.as_array()?;
     if streams.len() != 1 { return None; }
     let count = streams[0].get(field)?;
     count.as_u64().or_else(|| count.as_str()?.parse().ok())
 }
 
-fn no_playable_frames(r: &ProcResult) -> bool {
-    if r.signal.is_some() || !r.stderr.trim().is_empty() || !probe_frame_count(r, "nb_read_packets").is_some_and(|n| n > 0) { return false; }
-    let Ok(parsed) = serde_json::from_str::<Value>(&r.stdout) else { return false; };
-    parsed.get("frames").and_then(Value::as_array).is_some_and(Vec::is_empty)
+fn probe_frame_count(r: &ProcResult, field: &str) -> Option<u64> {
+    stream_count(&complete_probe(r)?, field)
+}
+
+fn decoded_frame_count(r: &ProcResult) -> Option<u64> {
+    if !r.stderr.trim().is_empty() { return None; }
+    let parsed = complete_probe(r)?;
+    let frames = parsed.get("frames")?.as_array()?;
+    if stream_count(&parsed, "nb_read_packets")? == 0 || frames.iter().any(|f| f["media_type"] != "video") { return None; }
+    // ffprobe omits nb_read_frames for zero. A supplied counter must agree
+    // with the explicit frame list, including for the one-frame shutdown case.
+    if frames.is_empty() && parsed["streams"][0].get("nb_read_frames").is_none() { return Some(0); }
+    stream_count(&parsed, "nb_read_frames").filter(|n| *n == frames.len() as u64)
 }
 
 #[cfg(test)]
@@ -391,7 +405,7 @@ fn shutdown_stub_partial_probe_counts_are_never_proof() {
 #[test]
 fn no_playable_stub_requires_a_clean_complete_decode_and_packets() {
     let good = ProcResult { status: Some(0), stdout: r#"{"frames":[],"streams":[{"nb_read_packets":"7"}]}"#.into(), ..Default::default() };
-    assert!(no_playable_frames(&good));
+    assert_eq!(decoded_frame_count(&good), Some(0));
     for incomplete in [
         ProcResult { status: Some(1), ..good.clone() },
         ProcResult { status: None, ..good.clone() },
@@ -401,17 +415,18 @@ fn no_playable_stub_requires_a_clean_complete_decode_and_packets() {
         ProcResult { error: Some("PROCESS_START_FAILED".into()), ..good.clone() },
         ProcResult { signal: Some("SIGTERM".into()), ..good.clone() },
         ProcResult { stderr: "decoder error".into(), ..good.clone() },
-    ] { assert!(!no_playable_frames(&incomplete), "{incomplete:?}"); }
+    ] { assert_eq!(decoded_frame_count(&incomplete), None, "{incomplete:?}"); }
     for body in [
         r#"{"streams":[{"nb_read_packets":"7"}]}"#, // absent count is not zero
         r#"{"frames":[],"streams":[{"nb_read_packets":"0"}]}"#,
         r#"{"frames":[],"streams":[{}]}"#,
         r#"{"frames":[],"streams":[{"nb_read_packets":"N/A"}]}"#,
+        r#"{"frames":[],"streams":[{"nb_read_packets":"7","nb_read_frames":"1"}]}"#,
         r#"{"frames":[],"streams":[{"nb_read_packets":"7"},{"nb_read_packets":"7"}]}"#,
         r#"{"frames":[{"media_type":"video"}],"streams":[{"nb_read_packets":"7"}]}"#,
         r#"{"frames":null,"streams":[{"nb_read_packets":"7"}]}"#,
         "not json",
-    ] { assert!(!no_playable_frames(&ProcResult { stdout: body.into(), ..good.clone() }), "{body}"); }
+    ] { assert_eq!(decoded_frame_count(&ProcResult { stdout: body.into(), ..good.clone() }), None, "{body}"); }
 }
 
 /// Only precise defects read from the original qualify. Never classify encoder

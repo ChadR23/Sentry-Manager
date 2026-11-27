@@ -167,6 +167,19 @@ pub struct EncodeRequest<'a> {
     pub lane_id: Option<&'a str>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ChildError {
+    StartFailed,
+    Failed,
+    Crashed(String),
+    Stalled,
+    Cancelled,
+    Withdrawn,
+    GpuMemoryPaused,
+    GpuMemoryWaitTimeout,
+    GpuMemoryExhausted,
+}
+
 impl EncodeRequest<'_> {
     /// Shared by production and previews; a window never inherits lead-in holds.
     pub(crate) fn local_args(&self) -> Result<Vec<String>, &'static str> {
@@ -233,17 +246,16 @@ impl Service {
         self.emit(rt, "progress", vec![("progress", progress)]);
     }
 
-    /// runChild: Ok(()) or the failure code ('encoder-start-failed',
-    /// 'encoder-failed', 'encoder-stalled', 'cancelled').
-    pub fn run_child(&self, rt: &Arc<Runtime>, item_id: &str, r: &EncodeRequest) -> Result<(), &'static str> {
+    /// Run one encoder, preserving an unsolicited signal for the clip failure.
+    pub(crate) fn run_child(&self, rt: &Arc<Runtime>, item_id: &str, r: &EncodeRequest) -> Result<(), ChildError> {
         if r.window.is_some_and(|(start, end)| start < 0 || end <= start || r.encoder.remote) {
             // The node protocol does not carry a window: never silently send a whole clip.
-            return Err("encoder-start-failed");
+            return Err(ChildError::StartFailed);
         }
         if r.encoder.remote {
             return self.run_remote(rt, item_id, r);
         }
-        let args = r.local_args()?;
+        let args = r.local_args().map_err(|_| ChildError::StartFailed)?;
         let gpu = r.encoder.hardware.then(|| r.encoder.device.clone().or_else(|| {
             let id=self.0.o.default_device.as_ref()?.as_ref()(r.codec)?;
             self.0.o.resolve_device.as_ref()?.as_ref()(&id).map(|v|super::super::devices::device_of(&v))
@@ -254,23 +266,23 @@ impl Service {
             let waiting=serial.then(||self.0.o.gpu_memory.wait_serial(device));
             let mut started=Instant::now();
             Some(loop {
-                if rt.lock().stopped() {return Err("cancelled");}
+                if rt.lock().stopped() {return Err(ChildError::Cancelled);}
                 let lease=match &waiting {
                     Some(w)=>w.try_reserve(budget),
                     None=>self.0.o.gpu_memory.try_reserve(device,budget,false),
                 };
                 if let Some(lease)=lease {break lease;}
-                if rt.lock().pause_requested {return Err("gpu-memory-paused");}
+                if rt.lock().pause_requested {return Err(ChildError::GpuMemoryPaused);}
                 // Draining other encodes is not evidence of an out-of-memory
                 // failure. Start the memory timeout only once this turn is free.
                 if waiting.as_ref().map_or_else(||self.0.o.gpu_memory.draining(device),|w|w.waiting_on_encodes()) {started=Instant::now();}
-                if started.elapsed()>=Duration::from_secs(30) {return Err("gpu-memory-exhausted");}
+                if started.elapsed()>=Duration::from_secs(30) {return Err(ChildError::GpuMemoryWaitTimeout);}
                 std::thread::sleep(Duration::from_millis(200));
             })
         } else {None};
         let ffmpeg = self.0.o.tools.ffmpeg_path().to_string();
         if super::super::process::validate_request(&ffmpeg, &args).is_err() {
-            return Err("encoder-start-failed");
+            return Err(ChildError::StartFailed);
         }
         if let Some(f) = &self.0.o.on_spawn {
             f(&args);
@@ -280,7 +292,7 @@ impl Service {
         if super::super::process::cuda_by_index(&args) {
             cmd.env("CUDA_DEVICE_ORDER", "PCI_BUS_ID");
         }
-        let mut child = cmd.spawn().map_err(|_| "encoder-start-failed")?;
+        let mut child = cmd.spawn().map_err(|_| ChildError::StartFailed)?;
         let pid = child.id() as i32;
         let live = {
             let mut s = rt.lock();
@@ -414,19 +426,21 @@ impl Service {
                     let _ = stderr_reader.join();
                     use std::os::unix::process::ExitStatusExt;
                     let s = rt.lock();
-                    let stopped = s.cancel_requested || s.stop_requested || s.recovery_required || status.signal().is_some();
+                    let stopped = s.stopped() || s.recovery_required || s.children.get(item_id).is_some_and(|c| c.termination_requested);
                     break if stopped {
-                        Err("cancelled")
+                        Err(ChildError::Cancelled)
+                    } else if status.signal().is_some() {
+                        Err(ChildError::Crashed(status.to_string()))
                     } else if gpu.is_some() && memory_error.load(Ordering::SeqCst) {
-                        Err("gpu-memory-exhausted")
+                        Err(ChildError::GpuMemoryExhausted)
                     } else if status.code() == Some(0) {
                         Ok(())
                     } else {
-                        Err("encoder-failed")
+                        Err(ChildError::Failed)
                     };
                 }
                 Ok(None) => {}
-                Err(_) => break Err("encoder-start-failed"),
+                Err(_) => break Err(ChildError::StartFailed),
             }
             if last_activity.lock().unwrap().elapsed() >= stall {
                 if let Some(c) = rt.lock().children.get_mut(item_id) {
@@ -438,7 +452,7 @@ impl Service {
                     let _ = child.wait();
                     let _ = reader.join();
                 });
-                break Err("encoder-stalled");
+                break Err(ChildError::Stalled);
             }
             std::thread::sleep(Duration::from_millis(50));
         };
@@ -449,7 +463,7 @@ impl Service {
             s.encode_fps.remove(item_id);
         }
         self.note_waiting(rt);
-        if result==Err("gpu-memory-exhausted") {
+        if result==Err(ChildError::GpuMemoryExhausted) {
             if let Some(device)=&gpu {self.0.o.gpu_memory.pressure(device);}
         }
         result
@@ -461,8 +475,8 @@ impl Service {
     /// and the encoded file comes back to `target`; the progress, stall and
     /// cancel handling is ffmpeg's; reading, telemetry, verification and
     /// saving stay here.
-    fn run_remote(&self, rt: &Arc<Runtime>, item_id: &str, r: &EncodeRequest) -> Result<(), &'static str> {
-        let Some(nodes) = self.0.o.remote_nodes.clone() else { return Err("encoder-start-failed") };
+    fn run_remote(&self, rt: &Arc<Runtime>, item_id: &str, r: &EncodeRequest) -> Result<(), ChildError> {
+        let Some(nodes) = self.0.o.remote_nodes.clone() else { return Err(ChildError::StartFailed) };
         let device = r.encoder.device.as_ref().map(|d| d.id.clone()).unwrap_or_default();
         let child = nodes
             .encode(crate::nodes::main_side::EncodeRequest {
@@ -476,7 +490,7 @@ impl Service {
                 duration_us: r.duration_us.map(|d| d as f64),
                 benchmark: false,
             })
-            .map_err(|_| "encoder-start-failed")?;
+            .map_err(|_| ChildError::StartFailed)?;
         let kill = child.kill.clone();
         let name = r.encoder.device.as_ref().and_then(|d| d.name.clone()).unwrap_or(device);
         {
@@ -518,13 +532,15 @@ impl Service {
                     let controlled = s.cancel_requested || s.stop_requested || s.recovery_required;
                     let withdrawn = s.children.get(item_id).is_some_and(|c| c.withdrawn);
                     break if withdrawn && !controlled {
-                        Err("withdrawn")
-                    } else if controlled || signal.is_some() {
-                        Err("cancelled")
+                        Err(ChildError::Withdrawn)
+                    } else if controlled || s.children.get(item_id).is_some_and(|c| c.termination_requested) {
+                        Err(ChildError::Cancelled)
+                    } else if let Some(signal) = signal {
+                        Err(ChildError::Crashed(signal))
                     } else if code == Some(0) {
                         Ok(())
                     } else {
-                        Err("encoder-failed")
+                        Err(ChildError::Failed)
                     };
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -533,14 +549,14 @@ impl Service {
                             c.termination_requested = true;
                         }
                         kill("SIGKILL");
-                        break Err("encoder-stalled");
+                        break Err(ChildError::Stalled);
                     }
                 }
                 // (gone without a close: as a kill)
                 Err(_) => {
                     let s = rt.lock();
                     let controlled = s.cancel_requested || s.stop_requested || s.recovery_required;
-                    break if s.children.get(item_id).is_some_and(|c| c.withdrawn) && !controlled { Err("withdrawn") } else { Err("cancelled") };
+                    break if s.children.get(item_id).is_some_and(|c| c.withdrawn) && !controlled { Err(ChildError::Withdrawn) } else { Err(ChildError::Cancelled) };
                 }
             }
         };
@@ -733,7 +749,7 @@ mod tests {
                 bitrate: Some(200_000.0), quality: None, duration_us: None, window: Some(window),
                 hold_frames: 0, smallest: None, keep_order: false, decode: None, lane_id: None,
             });
-            assert_eq!(result, Err("encoder-start-failed"), "invalid window {window:?}");
+            assert_eq!(result, Err(ChildError::StartFailed), "invalid window {window:?}");
             assert!(!target.exists());
         }
         assert_eq!(calls.lock().unwrap().len(), calls_before, "invalid windows must not spawn ffmpeg");

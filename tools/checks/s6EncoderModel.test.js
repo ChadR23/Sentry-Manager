@@ -43,11 +43,27 @@ test('GPU memory retries and older GPU shortfalls are not described as damaged v
   assert.equal(result.legacyGpu,1);
   assert.equal(result.temporary,1);
   assert.equal(result.retrying,1);
-  assert.match(result.retryingText,/1 clip will be retried.*GPU ran out of memory/);
+  assert.match(result.retryingText,/1 clip will be retried.*one at a time.*GPU/);
   assert.match(result.retryingText,/resume/i);
   const trimmed = model.clipFailures({itemStateCounts:{failed:4},itemGpuRetryCount:8,
     itemFailureCounts:[{encoder:'hevc_nvenc',code:'frame-count-mismatch',resultCode:'frame-count-mismatch',retryable:false,count:4}]});
   assert.equal(trimmed.legacyGpu,4); assert.equal(trimmed.damaged,0); assert.equal(trimmed.retrying,8);
+});
+
+test('a hardware encoder crash offers a temporary retry without attributing it to memory pressure', () => {
+  const crash = {state:'failed', resultCode:'encoder-crashed', encoder:'hevc_vaapi', failure:{code:'encoder-crashed',retryable:true}};
+  const cpu = {...crash, encoder:'libx265', failure:{...crash.failure,retryable:false}};
+  for (const snapshot of [
+    {items:[crash, cpu]},
+    {itemStateCounts:{failed:2}, itemFailureCounts:[crash,cpu].map(i => ({code:i.resultCode,encoder:i.encoder,retryable:i.failure.retryable,count:1}))},
+  ]) {
+    const result = model.clipFailures(snapshot);
+    assert.equal(result.attention, 2);
+    assert.equal(result.kept, 0);
+    assert.equal(result.temporary, 1);
+    assert.match(result.attentionText, /GPU encoder crashed/);
+    assert.doesNotMatch(result.attentionText, /ran out of memory/);
+  }
 });
 
 test('speed result explains GPU memory only when it capped a tested level', () => {

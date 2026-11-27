@@ -19,10 +19,11 @@ export function clipFailures(snapshot) {
   const codeOf = (i) => i.resultCode || i.failure?.code || i.code;
   const rows = (snapshot?.items || []).filter((i) => i.state === 'failed');
   const legacyGpu = (i) => codeOf(i) === 'frame-count-mismatch' && /_(nvenc|vaapi|qsv|amf)$/.test(i.encoder || '');
-  const temporary = (i) => codeOf(i) === 'gpu-memory-exhausted' && (i.failure?.retryable ?? i.retryable) === true;
+  const retryable = (i) => (i.failure?.retryable ?? i.retryable) === true;
   const groups = snapshot?.itemFailureCounts || rows.map((i) => ({...i, count:1}));
   const sum = (accept) => groups.filter(accept).reduce((n, g) => n + (Number(g.count) || 0), 0);
-  const gpu = sum(temporary), legacy = sum(legacyGpu);
+  const gpu = sum((i) => codeOf(i) === 'gpu-memory-exhausted' && retryable(i)), legacy = sum(legacyGpu);
+  const crashes = sum((i) => codeOf(i) === 'encoder-crashed' && retryable(i));
   const keptRows = (snapshot?.items || []).filter((i) => ['skipped','completed'].includes(i.state) && KEPT_REASONS[codeOf(i)]);
   const keptCounts = snapshot?.itemKeptCounts;
   const tooShort = keptCounts?.['too-short'] ?? snapshot?.itemTooShortCount ?? keptRows.filter((i) => codeOf(i) === 'too-short').length;
@@ -30,12 +31,13 @@ export function clipFailures(snapshot) {
   const retrying = snapshot?.itemGpuRetryCount ?? (snapshot?.items || []).filter((i) => ['queued','processing'].includes(i.state) && i.resultCode === 'gpu-memory-retry').length;
   const attention = snapshot?.itemStateCounts?.failed ?? snapshot?.itemCounts?.failed ?? rows.length;
   return {
-    damaged:kept - tooShort, tooShort, kept, attention, temporary:gpu, legacyGpu:legacy, retrying,
-    retryingText:`${retrying.toLocaleString()} ${statusNoun(retrying, 'clip')} will be retried (the GPU ran out of memory)${['paused','paused_network'].includes(snapshot?.state) ? ' when you resume shrinking' : ''}.`,
+    damaged:kept - tooShort, tooShort, kept, attention, temporary:gpu + crashes, legacyGpu:legacy, retrying,
+    retryingText:`${retrying.toLocaleString()} ${statusNoun(retrying, 'clip')} will be retried one at a time on the GPU${['paused','paused_network'].includes(snapshot?.state) ? ' when you resume shrinking' : ''}.`,
     keptText:`${kept.toLocaleString()} ${statusNoun(kept, 'clip')} kept as recorded`,
     explanation:'These originals are too short to shrink or have a proven recording defect. They stay as recorded; nothing to do.',
     attentionText:[gpu ? `${gpu.toLocaleString()} ${statusNoun(gpu, 'clip')} could not finish because the GPU ran out of memory. The originals were kept. Retry with less pressure on the GPU.` : '', legacy ? `${legacy.toLocaleString()} ${statusNoun(legacy, 'clip')} lost frames during GPU encoding. The originals were kept. Retry with less pressure to check.` : '',
-      attention > gpu + legacy ? `${(attention-gpu-legacy).toLocaleString()} ${statusNoun(attention-gpu-legacy, 'clip')} could not be shrunk. The originals were kept. Open Expert to review or retry them.` : ''].filter(Boolean).join(' '),
+      crashes ? `The GPU encoder crashed while shrinking ${crashes.toLocaleString()} ${statusNoun(crashes, 'clip')}. You can retry the originals.` : '',
+      attention > gpu + legacy + crashes ? `${(attention-gpu-legacy-crashes).toLocaleString()} ${statusNoun(attention-gpu-legacy-crashes, 'clip')} could not be shrunk. The originals were kept. Open Expert to review or retry them.` : ''].filter(Boolean).join(' '),
     items:keptRows.map((i) => ({relativePath:i.relativePath || 'Unknown clip', code:codeOf(i), reason:KEPT_REASONS[codeOf(i)]})),
   };
 }
