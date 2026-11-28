@@ -1075,9 +1075,8 @@ impl Service {
             return Ok(rt);
         }
         let m = self.0.o.store.load(id).map_err(Fail::from)?.ok_or_else(|| service_error("JOB_NOT_FOUND"))?;
-        let rt = Runtime::new(m);
-        self.0.jobs.lock().unwrap().insert(id.to_string(), rt.clone());
-        Ok(rt)
+        // A retry may have registered its runtime while this manifest was loading.
+        Ok(self.0.jobs.lock().unwrap().entry(id.to_string()).or_insert_with(|| Runtime::new(m)).clone())
     }
 
     /// liveRuntime(id): a spent runtime is replaced by a fresh one
@@ -1088,7 +1087,9 @@ impl Service {
             if s.running || self.0.shutting_down.load(Ordering::SeqCst) {
                 return Ok(rt.clone());
             }
-            rt.aborted() || s.recovery_required || s.cancel_requested || s.halted
+            // The terminal worker can still call forget_finished after waking idle
+            // waiters. Its pointer must identify only the run that just ended.
+            s.manifest.state().is_terminal() || rt.aborted() || s.recovery_required || s.cancel_requested || s.halted
         };
         if !spent {
             return Ok(rt);
@@ -1458,9 +1459,9 @@ impl Service {
                         || s.node_checks.values().any(|n|*n>0) {return Err(service_error("JOB_ACTIVE"));}
                 } else if s.running || !matches!(m.state(),JobState::Completed|JobState::Failed) {return Err(service_error("JOB_ACTIVE"));}
             }
-            let rt=self.live_runtime(id)?;
             let selected:Vec<String>=m.items.iter().filter(|i|temporary_retry(i.value())).map(|i|i.id().to_string()).collect();
             if selected.is_empty() {return Err(service_error("NO_FAILED_ITEMS"));}
+            let rt=self.live_runtime(id)?;
             let selected_ids:std::collections::HashSet<String>=selected.iter().cloned().collect();
             for id in &selected {
                 let item=m.item(id).unwrap();
@@ -1491,7 +1492,7 @@ impl Service {
         self.mutate(|| {
             if self.speed_test_active() { return Err(service_error("SPEED_TEST_RUNNING")); }
             if self.preview_active() { return Err(service_error("JOB_ACTIVE")); }
-            let rt = self.live_runtime(id)?;
+            let rt = self.ensure_runtime(id)?;
             let m = rt.manifest();
             if recorded_from(&m) == Some(JobState::Replacing) {
                 return Err(service_error("RECOVERY_REQUIRED"));
@@ -1505,6 +1506,7 @@ impl Service {
             if !m.items.iter().any(|i| i.state() == ItemState::Failed) {
                 return Err(service_error("NO_FAILED_ITEMS"));
             }
+            let rt = self.live_runtime(id)?;
             for item in m.items.iter().filter(|i| i.state() == ItemState::Failed) {
                 if !self.reconcile_item_ownership(&rt, item.id(), Some(ownership_of(item.value())), false)? {
                     log_line(format!("[CONVERTER] Retry failed refused: the files clip {:?} ({id} {}) kept from its failed run could not be cleaned up, so no clip ran again", item.str("relativePath").unwrap_or(""), item.id()));

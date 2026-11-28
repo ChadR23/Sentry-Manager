@@ -146,6 +146,65 @@ fn gpu_memory_retry_refuses_activity_in_a_persisted_pause() {
     }
 }
 
+// A job worker can be descheduled after it wakes idle waiters. Let its
+// cleanup run inside the retry's first write, before update installs the
+// waiting manifest in memory. This orders the handoff without a sleep.
+#[derive(Default)]
+struct LateWorkerCleanup(Mutex<Option<(Service, Arc<Runtime>)>>);
+
+impl crate::converter::jobstore::StoreHooks for LateWorkerCleanup {
+    fn after_write(&self, next: &Manifest, _: Option<&Manifest>) {
+        if next.state() == JobState::Waiting {
+            if let Some((service, previous)) = self.0.lock().unwrap().take() {
+                service.forget_finished(&previous);
+            }
+        }
+    }
+}
+
+fn check_terminal_retry(retry: fn(&Service, &str) -> SResult<Value>) {
+    let h = Harness::new(gpu_options(0));
+    let cleanup = Arc::new(LateWorkerCleanup::default());
+    let mut options = h.service().0.o.clone();
+    options.store = Arc::new(JobStore::new(h.conv.jobs_root()).unwrap().with_hooks(cleanup.clone()));
+    let service = Service::new(options);
+    let relative = "RecentClips/2020-01-01_00-00-00-back.mp4";
+    let source = h.dir.path().join("footage").join(relative);
+    fs::write(&source, [0; 4000]).unwrap();
+    let counters = contracts::create_empty_counters();
+    let job = service.store().create(json!({
+        "state":"completed", "config":gpu_config(&h, 1), "discoveryComplete":true,
+        "counters":counters, "summary":contracts::serialize_summary(&counters),
+        "items":[{"id":"item-000001","state":"failed","kind":"video","group":"RecentClips","relativePath":relative,
+            "sourcePath":source,"sourceBytes":4000,"mtimeMs":0,"eventId":null,"camera":"back","timestampKey":"2020-01-01_00-00-00",
+            "attempts":1,"resultCode":"frame-count-mismatch","failure":{"code":"frame-count-mismatch","retryable":false},"encoder":"hevc_nvenc"}]
+    }).as_object().unwrap()).unwrap();
+    let id = job.id();
+    let previous = service.ensure_runtime(id).unwrap();
+    *cleanup.0.lock().unwrap() = Some((service.clone(), previous.clone()));
+    fs::write(h.ctl.join("hold"), "").unwrap();
+    retry(&service, id).unwrap();
+    let visible = service.runtime_of(id).is_some_and(|rt| rt.lock().running);
+    fs::write(h.ctl.join("release-all"), "").unwrap();
+    let idle = service.when_idle(id).unwrap();
+    service.wait_idle(&previous); // Also drain the detached worker on regression.
+    assert!(cleanup.0.lock().unwrap().is_none());
+    assert!(visible, "the acknowledged retry must remain registered while its encoder is held");
+    assert_eq!(idle["state"], "completed", "{idle}");
+    assert_eq!(idle["items"][0]["state"], "completed", "{idle}");
+    assert_eq!(h.spawned().len(), 1);
+}
+
+#[test]
+fn temporary_retry_survives_previous_worker_cleanup() {
+    check_terminal_retry(Service::retry_temporary);
+}
+
+#[test]
+fn failed_retry_survives_previous_worker_cleanup() {
+    check_terminal_retry(Service::retry_failed);
+}
+
 #[test]
 fn gpu_memory_waiting_retry_prevents_new_normal_encodes_until_it_runs_alone() {
     let mut options = gpu_options(12); options.hold = true;

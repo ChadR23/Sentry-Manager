@@ -175,8 +175,9 @@ fn missing_reference_proof_precedes_gpu_retry_and_only_runs_for_a_short_output()
         if expected == "frame-count-mismatch" {
             assert_eq!(item["state"], "failed");
             assert!(service.service.retry_temporary(&id).is_ok(), "genuine GPU losses remain retryable");
-            service.service.when_idle(&id).unwrap();
-            assert_eq!(copies(base), 2);
+            let retried = service.service.when_idle(&id).unwrap();
+            assert_eq!(copies(base), 2, "{retried}");
+            assert_eq!(retried["items"][0]["resultCode"], "frame-count-mismatch");
             assert!(!base.join("out").join(REL).exists());
         } else {
             assert_eq!(item["state"], "completed");
@@ -184,7 +185,7 @@ fn missing_reference_proof_precedes_gpu_retry_and_only_runs_for_a_short_output()
             if expected == KEPT {
                 assert_eq!(fs::read(base.join("out").join(REL)).unwrap(), original);
                 assert_eq!(job["counters"]["savedBytes"], 0);
-                assert!(service.service.retry_temporary(&id).is_err());
+                assert_eq!(service.service.retry_temporary(&id).unwrap_err().code.as_deref(), Some("NO_FAILED_ITEMS"));
                 assert_eq!(copies(base), 1);
             }
         }
