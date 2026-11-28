@@ -290,7 +290,7 @@ impl Converter {
         std::thread::spawn(move || {
             for id in ids {
                 let _ = service.continue_recovery(&id);
-                let _ = service.when_idle(&id);
+                let _ = service.wait_for_recovery(&id);
             }
         });
         // automatic conversion's settings and index before any automatic job resumes discovering

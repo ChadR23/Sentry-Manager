@@ -833,7 +833,17 @@ impl Bridge {
             "checkFolders" => {
                 let Some(m)=p.and_then(Value::as_object).filter(|m|m.len()==1 && m.contains_key("config")) else {return fail("INVALID_REQUEST")};
                 let config=validate_start_config(m.get("config"), &replacement)?;
-                Ok(json!(super::folder_access::scan(&config)))
+                let report = super::folder_access::scan(&config);
+                let blocked = report.root_blocked || (report.has_warning() && match self.extras().auto {
+                    Some(auto) => auto.guided_folder_work(&config)?,
+                    None => {
+                        let now = super::jobstore::now_ms() as i64;
+                        super::folder_access::discovery_access(&config, |d| super::keep_recent::is_young(&config, &d.value, now))?
+                    }
+                } == Some(false));
+                let mut value = json!(report);
+                value["startBlocked"] = json!(blocked);
+                Ok(value)
             }
             "getCurrent" => {
                 no_payload(p)?;
@@ -1344,6 +1354,53 @@ mod tests {
 
     fn set_auto_payload(config: Value) -> Value {
         json!({ "enabled": true, "intervalMinutes": 60, "window": null, "holdManual": false, "keepRunning": false, "openAtLogin": false, "config": config })
+    }
+
+    #[test]
+    fn folder_scope_guided_check_uses_eligible_clips_and_keeps_the_newest_examples() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let (bridge, base, _) = keep_recent_bridge("folder-scope");
+        let config = keep_config(&base, "h265", Some(json!({"days":30, "zone":"UTC"})));
+        let root = base.join("allowed/src");
+        let group = root.join("RecentClips");
+        let locked: Vec<_> = (1..=7).map(|d| group.join(format!("2020-03-{d:02}"))).collect();
+        for path in &locked { fs::create_dir_all(path).unwrap(); }
+        let old = "2020-03-01_12-00-00-front.mp4";
+        fs::write(locked[0].join(old), b"fixture").unwrap();
+        for path in &locked { fs::set_permissions(path, fs::Permissions::from_mode(0o555)).unwrap(); }
+        // A writable folder containing only protected footage cannot admit the blocked older clip.
+        fs::write(group.join("2099-12-01_12-00-00-front.mp4"), b"fixture").unwrap();
+        let check = |selection: &Value| {
+            let result = bridge.invoke("checkFolders", Some(json!({"config":selection})), None);
+            assert_eq!(result["ok"], true, "{result}");
+            result["value"].clone()
+        };
+        let blocked = check(&config);
+        assert_eq!(blocked["readOnlyCount"], 7);
+        assert_eq!(blocked["startBlocked"], true, "{blocked}");
+        fs::write(group.join(old), b"fixture").unwrap();
+        let mixed = check(&config);
+        assert_eq!(mixed["startBlocked"], false, "{mixed}");
+        assert_eq!(mixed["readOnlyCount"], 7);
+        assert_eq!(mixed["newestFolder"], json!(locked.last().unwrap()));
+        assert_eq!(mixed["roots"][0]["examples"].as_array().unwrap().len(), 5);
+        let mut copy = config.clone();
+        let destination = base.join("allowed/copies");
+        copy["outputMode"] = json!("separate");
+        copy["destinationRoot"] = json!(destination);
+        copy["replacementConfirmed"] = json!(false);
+        fs::create_dir_all(destination.join("RecentClips")).unwrap();
+        fs::write(destination.join("RecentClips").join(old), b"already copied").unwrap();
+        assert_eq!(check(&copy)["startBlocked"], true, "a finished copy cannot admit another, blocked clip");
+
+        fs::remove_file(group.join(old)).unwrap();
+        fs::set_permissions(&locked[0], fs::Permissions::from_mode(0)).unwrap();
+        assert_eq!(check(&config)["startBlocked"], true, "an unreadable selected folder cannot establish an empty schedule");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555)).unwrap();
+        assert_eq!(check(&config)["startBlocked"], true, "an unusable root still refuses a start");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        for path in locked { fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap(); }
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

@@ -169,7 +169,7 @@ pub fn checks(ctx: &dyn OpsCtx, snapshots: Option<&Snapshots>) -> Vec<Value> {
     for (n,config) in ctx.converter_folders().iter().enumerate() {
         let report=crate::converter::folder_access::scan(config);
         let unreadable=report.roots.iter().any(|r|r.unreadable.count>0);
-        if !report.blocked() && !unreadable {continue;}
+        if !report.has_warning() && !unreadable {continue;}
         out.push(check(&format!("converter-folders-{n}"),"Video","Shrinking folder permissions",
             "warn",&report.detail(),&report.hint));
     }

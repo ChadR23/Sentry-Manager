@@ -900,6 +900,10 @@ impl Tx {
         self.take_held(&mut m, &keys).then(|| Held { tx: self, keys })
     }
 
+    pub(super) fn discard_unpublished(&self, artifact: &Artifact) {
+        super::snapshot::discard_artifact(&self.registry, artifact);
+    }
+
     /// the converter's private temp folder
     pub fn temp_root(&self) -> &Path {
         &self.temp_root
@@ -1275,6 +1279,16 @@ impl Tx {
         r.map_err(|e| if !e.tx && e.code == "EEXIST" { txe(a.collision) } else if e.tx { e } else { txe(a.failure) })
     }
 
+    fn publication_denial(target: &str, error: &io::Error) -> Option<TxError> {
+        let dir = Path::new(target).parent()?;
+        if !super::folder_access::denied(error) || !super::folder_access::writable(dir).is_err_and(|e| super::folder_access::denied(&e)) {
+            return None;
+        }
+        let mut failure = txe("FOLDER_NOT_WRITABLE");
+        failure.detail = Some(format!("{}: {error}", super::folder_access::folder_detail(dir)));
+        Some(failure)
+    }
+
     /// promoteNoReplace(from, to, collisionCode, { expectedSource, removeSource, identityOnly })
     fn promote_no_replace(&self, from: &str, to: &str, collision: &str, expected: Option<&Expected>, remove_source: bool, identity_only: bool) -> R<(bool, bool)> {
         let r = (|| -> R<(bool, bool)> {
@@ -1284,7 +1298,13 @@ impl Tx {
                     x.mtime_ns = None;
                 }
             }
-            let res = owned::promote(Path::new(from), Path::new(to), e.as_ref(), remove_source, identity_only)?;
+            let res = owned::promote(Path::new(from), Path::new(to), e.as_ref(), remove_source, identity_only)
+                .map_err(|error| {
+                    if collision != "ROLLBACK_FAILED" {
+                        if let Some(denied) = Self::publication_denial(to, &error) { return denied; }
+                    }
+                    TxError::from(error)
+                })?;
             if !res.atomic_no_replace {
                 return Err(txe("ATOMIC_PROMOTION_UNSUPPORTED"));
             }
@@ -1501,6 +1521,7 @@ impl Tx {
     /// linkBackupAside: the verified original's backup name as a second link (false: no hard links here).
     fn link_backup_aside(&self, source: &str, backup: &str, e: &SourceAuthority) -> R<bool> {
         let r = owned::link_backup(Path::new(source), Path::new(backup), &e.expected(), false).map_err(|err| {
+            if let Some(denied) = Self::publication_denial(backup, &err) { return denied; }
             let c = owned::code_of(&err);
             if c == "EEXIST" || c == "EACCES" {
                 txe("REPLACEMENT_COLLISION")
@@ -1523,7 +1544,8 @@ impl Tx {
     /// replaceOverOriginal: rename(2) the verified copy over the original's name.
     fn replace_over_original(&self, candidate: &str, source: &str, backup: &str, expected_candidate: &Expected, identity_only: bool, e: &SourceAuthority) -> R<()> {
         let ec = self.expected_at(candidate, expected_candidate, "PUBLICATION_ARTIFACT_CHANGED")?;
-        let r = owned::replace_over(Path::new(candidate), Path::new(source), Path::new(backup), &ec, &e.device, &e.inode, identity_only).map_err(|_| txe("REPLACEMENT_FAILED"))?;
+        let r = owned::replace_over(Path::new(candidate), Path::new(source), Path::new(backup), &ec, &e.device, &e.inode, identity_only)
+            .map_err(|err| Self::publication_denial(source, &err).unwrap_or_else(|| txe("REPLACEMENT_FAILED")))?;
         if !r.replaced {
             return Err(if r.ownership_mismatch { unsafe_path("replace-over-original", candidate, &r.reason) } else { txe("REPLACEMENT_FAILED") });
         }

@@ -53,10 +53,22 @@ export function discoveryIssueText(issues) {
   if (!issues?.count) return '';
   return `${issues.count.toLocaleString()} paths could not be read during discovery: ${(issues.examples || []).join('; ')}. The next run tries them again.`;
 }
-export function folderBlockText(report) {
-  if (!report?.readOnlyCount) return '';
-  const examples=(report.roots || []).flatMap((r) => (r.examples || []).map((e) => `${e.folder} (owner uid/gid ${e.ownerUid}/${e.ownerGid}, mode ${e.mode})`));
-  return `${report.readOnlyCount.toLocaleString()} folders are read-only \u2014 shrinking is blocked until this is fixed. ${examples.join('; ')}. ${report.hint || ''}`;
+export function folderAccessText(report, blocked) {
+  if (!report || (!blocked && !report.readOnlyCount)) return '';
+  const examples = (report.roots || []).flatMap((r) => (r.examples || []).map((e) =>
+    `${e.folder} (owner uid/gid ${e.ownerUid}/${e.ownerGid}, mode ${e.mode})`));
+  const count = report.readOnlyCount || 0;
+  const newest = report.newestFolder ? ` (newest: ${report.newestFolder})` : '';
+  const folders = count ? `${count.toLocaleString()} ${count === 1 ? 'folder is' : 'folders are'} read-only${newest}.` : '';
+  const action = blocked ? 'Shrinking is blocked. Fix folder access to continue.'
+    : 'Fix folder permissions. Shrinking will pause when only clips in read-only folders remain.';
+  return [folders, action, ...examples, report.hint].filter(Boolean).join(' ');
+}
+
+export function folderNotice(job, source) {
+  const blocked = job ? job.state === 'paused' && Boolean(job.permissionBlock) : source?.blocked === true;
+  const report = job ? job.folderWarning || job.permissionBlock : source?.folderAccess;
+  return { blocked, text: folderAccessText(report, blocked) };
 }
 
 export function currentFailureExplained(job, snapshot) {

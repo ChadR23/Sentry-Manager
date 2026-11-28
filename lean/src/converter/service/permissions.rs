@@ -1,64 +1,195 @@
-//! Permission admission and a persisted, draining pause. A repaired folder is
-//! rechecked before resuming; successful items are never re-queued.
+//! Folder inventory is advisory. Admission and retries use the folders of the
+//! actual clips, and a permission pause is persisted only after workers drain.
 use super::*;
-use std::os::unix::fs::MetadataExt;
-use super::super::folder_access;
-const FOLDER_RESCAN:std::time::Duration=std::time::Duration::from_secs(300);
+use super::super::{folder_access::{self, FolderChecks, Report}, jobstore::Item};
+use std::collections::HashSet;
+
+const FOLDER_RESCAN: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn folder_wait(item: &Item) -> bool {
+    item.state() == ItemState::Skipped && item.str("resultCode") == Some("folder-not-writable")
+}
+
+fn warning(report: &Report) -> Value {
+    if report.has_warning() { json!(report) } else { Value::Null }
+}
+
 impl Service {
-    pub(super) fn pause_for_folders(&self,rt:&Arc<Runtime>,report:&folder_access::Report)->SResult<()> {
-        if !report.blocked(){return Ok(());}
-        { let mut s=rt.lock(); s.pause_requested=true; }
-        self.update(rt,|_|Some(Patch::new().set("permissionBlock",json!(report))))?;
-        rt.cv.notify_all();
-        Ok(())
+    fn undiscovered_folder_work(&self, config: &Value, known: &HashSet<&str>) -> SResult<Option<bool>> {
+        folder_access::discovery_access(config, |clip| {
+            known.contains(clip.value["relativePath"].as_str().unwrap_or(""))
+                || self.0.o.skip_discovered.as_ref().is_some_and(|skip| skip(config, &clip.value))
+                || self.0.o.converted_index.as_ref().is_some_and(|index| {
+                    let mut item = clip.value.clone();
+                    item["ino"] = json!(clip.ino);
+                    index.has(&item).is_some()
+                })
+        })
     }
-    pub(super) fn clear_folder_block(&self,rt:&Arc<Runtime>)->SResult<()> {
-        rt.folder_checks.lock().unwrap().clear();
-        *rt.folder_scan_at.lock().unwrap()=std::time::Instant::now();
-        if rt.manifest().get("permissionBlock").is_none(){return Ok(());}
-        let mut retry=vec![];
-        self.update(rt,|s| {
-            let items=s.manifest.items.iter().map(|i|if i.state()==ItemState::Skipped && i.str("resultCode")==Some("folder-not-writable") {
-                retry.push(i.id().to_string());
-                ItemIn::Raw(merge(i.value(),&vec![("state",Some(ItemState::Queued.into())),("failure",None),("resultCode",None)]))
-            } else {ItemIn::Trusted(i.clone())}).collect();
-            Some(Patch::new().set("permissionBlock",Value::Null).items(items))
+
+    pub(super) fn start_folder_report(&self, config: &Value) -> SResult<Report> {
+        let report = folder_access::scan(config);
+        if report.root_blocked || (report.has_warning() && self.undiscovered_folder_work(config, &HashSet::new())? == Some(false)) {
+            return Err(report.refusal());
+        }
+        Ok(report)
+    }
+
+    fn record_folder_warning(&self, rt: &Arc<Runtime>, report: &Report) -> SResult<()> {
+        let value = warning(report);
+        self.update(rt, |s| {
+            (s.manifest.get("folderWarning").unwrap_or(&Value::Null) != &value)
+                .then(|| Patch::new().set("folderWarning", value))
         })?;
-        let mut s=rt.lock();
-        if s.running {for id in retry {if !s.queue.contains(&id){s.queue.push_back(id);}}}
         Ok(())
     }
-    pub(super) fn folder_preflight(&self,rt:&Arc<Runtime>,item:&Value)->SResult<()> {
-        let config=rt.lock().manifest.config().clone();
-        // Catch new uploads elsewhere too, at most once every 5 minutes per
-        // running job (a full walk lists every folder of the share). The
-        // discovery walk also checks newly visited folders. The stamp is taken
-        // before the walk so other workers never wait on it.
-        let due={
-            let mut last=rt.folder_scan_at.lock().unwrap();
-            let due=last.elapsed()>=FOLDER_RESCAN;
-            if due {*last=std::time::Instant::now();}
-            due
-        };
-        if due {
-            let report=folder_access::scan(&config);
-            self.pause_for_folders(rt,&report)?;
-        }
-        let mut targets=vec![item["sourcePath"].as_str().unwrap_or("").to_string()];
-        if config["outputMode"]!="replace" {targets.push(output_path(&config,item));}
-        for target in targets {
-        let folder=folder_access::existing_parent(Path::new(&target).parent().unwrap_or(Path::new(&target)));
-        let stat=std::fs::metadata(&folder).ok();
-        let stamp=stat.as_ref().map(|s|(s.ctime(),s.ctime_nsec())).unwrap_or((0,0));
-        let mut cache=rt.folder_checks.lock().unwrap();
-        let previous=cache.get(&folder).filter(|(sec,ns,_)|(*sec,*ns)==stamp);
-        let error=if let Some((_,_,e))=previous {e.clone()} else {
-            let e=folder_access::writable(&folder).err().filter(folder_access::denied).map(|e|format!("{}: {e}",folder_access::folder_detail(&folder)));
-            cache.insert(folder.clone(),(stamp.0,stamp.1,e.clone()));e
-        };
-        drop(cache);
-        if let Some(detail)=error {return Err(Fail{code:Some("FOLDER_NOT_WRITABLE".into()),retryable:true,detail:Some(detail),..Default::default()});}
+
+    pub(super) fn refresh_folder_warning(&self, rt: &Arc<Runtime>, denied: bool) -> SResult<()> {
+        let Ok(mut last) = rt.folder_scan_at.try_lock() else { return Ok(()) };
+        if last.elapsed() >= FOLDER_RESCAN || (denied && rt.lock().manifest.get("folderWarning").is_none()) {
+            let config = rt.lock().manifest.config().clone();
+            self.record_folder_warning(rt, &folder_access::scan(&config))?;
+            *last = std::time::Instant::now();
         }
         Ok(())
+    }
+
+    pub(super) fn folder_preflight(&self, rt: &Arc<Runtime>, item: &Value) -> SResult<()> {
+        self.refresh_folder_warning(rt, false)?;
+        let config = rt.lock().manifest.config().clone();
+        folder_access::check_item(&config, item)
+    }
+
+    /// Select only repaired skips, in manifest order. Completed and otherwise
+    /// skipped items keep their original records, counters and index entries.
+    fn ready_folder_items(&self, rt: &Arc<Runtime>, m: &Manifest, checks: &mut FolderChecks, tried: &HashSet<String>) -> SResult<HashSet<String>> {
+        let mut ready = HashSet::new();
+        for item in m.items.iter().filter(|i| folder_wait(i) && !tried.contains(i.id())) {
+            if self.can_release(m.config(), item.value(), checks) && self.clean_folder_wait(rt, item)? {
+                ready.insert(item.id().to_owned());
+            }
+        }
+        Ok(ready)
+    }
+
+    // Permission can be lost after a proved share copy was prepared. Its
+    // journal and snapshot remain authoritative until guarded cleanup succeeds.
+    fn clean_folder_wait(&self, rt: &Arc<Runtime>, item: &Item) -> SResult<bool> {
+        let before = ownership_of(item.value());
+        if before.paths.is_empty() { return Ok(true); }
+        let paths: Vec<_> = before.paths.values().filter_map(Value::as_str).collect();
+        let _held = self.0.o.staging.hold(&paths);
+        let cleanup = self.cleanup_ownership(rt, item.id(), Some(&before), None, true);
+        let after = cleanup.own;
+        self.update(rt, |s| {
+            let items = with_item(&s.manifest, item.id(), |v| merge(v, &vec![
+                ("ownedPaths", Some(Value::Object(after.paths.clone()))),
+                ("ownedArtifacts", Some(Value::Object(after.arts.clone()))),
+                ("publicationArtifact", after.publication.clone()),
+            ]));
+            Some(patch_terminal_ownership(Patch::new().items(items), &s.manifest, &before, &after))
+        })?;
+        Self::set_ownership(rt, item.id(), None);
+        Ok(cleanup.cleaned)
+    }
+
+    fn can_release(&self, config: &Value, item: &Value, checks: &mut FolderChecks) -> bool {
+        // The worker applies changed automatic keep rules before admission.
+        (config["autoConvert"] == true && self.0.o.skip_discovered.as_ref().is_some_and(|skip| skip(config, item)))
+            || checks.allows(config, item)
+    }
+
+    fn release_folder_items(&self, rt: &Arc<Runtime>, ready: &HashSet<String>, report: &Report) -> SResult<()> {
+        let value = warning(report);
+        let mut queued = vec![];
+        self.update(rt, |s| {
+            if ready.is_empty() && s.manifest.get("permissionBlock").is_none()
+                && s.manifest.get("folderWarning").unwrap_or(&Value::Null) == &value { return None; }
+            let mut patch = Patch::new().set("permissionBlock", Value::Null).set("folderWarning", value);
+            if !ready.is_empty() {
+                patch = patch.items(s.manifest.items.iter().map(|item| {
+                    if folder_wait(item) && ready.contains(item.id()) {
+                        queued.push(item.id().to_owned());
+                        ItemIn::Raw(merge(item.value(), &vec![("state", Some(ItemState::Queued.into())), ("failure", None), ("resultCode", None)]))
+                    } else { ItemIn::Trusted(item.clone()) }
+                }).collect());
+            }
+            Some(patch)
+        })?;
+        let mut s = rt.lock();
+        if s.running { s.queue.extend(queued); }
+        Ok(())
+    }
+
+    pub(super) fn prepare_folder_resume(&self, rt: &Arc<Runtime>) -> SResult<()> {
+        let m = rt.manifest();
+        let report = folder_access::scan(m.config());
+        let mut checks = FolderChecks::default();
+        let ready = self.ready_folder_items(rt, &m, &mut checks, &HashSet::new())?;
+        let mut blocked = report.root_blocked;
+        if !blocked && ready.is_empty() && (report.has_warning() || m.items.iter().any(|i| folder_wait(i))) {
+            let remaining = m.items.iter().filter(|i| i.state().is_in_flight());
+            let mut access = m.items.iter().any(|i| folder_wait(i)).then_some(false);
+            for item in remaining {
+                let allowed = self.can_release(m.config(), item.value(), &mut checks);
+                access = Some(allowed);
+                if allowed { break; }
+            }
+            if access != Some(true) && m.get("discoveryComplete") == Some(&Value::Bool(false)) {
+                let known = m.items.iter().filter_map(|i| i.str("relativePath")).collect();
+                access = self.undiscovered_folder_work(m.config(), &known)?.or(access);
+            }
+            blocked = access == Some(false);
+        }
+        if blocked {
+            let value = warning(&report);
+            self.update(rt, |s| {
+                let mut patch = Patch::new().set("folderWarning", value.clone());
+                if s.manifest.get("permissionBlock").is_some() {
+                    patch = patch.set("permissionBlock", json!(&report));
+                }
+                (s.manifest.get("folderWarning") != Some(&value) ||
+                    s.manifest.get("permissionBlock").is_some_and(|v| v != &json!(&report))).then_some(patch)
+            })?;
+            return Err(report.refusal());
+        }
+        *rt.folder_scan_at.lock().unwrap() = std::time::Instant::now();
+        self.release_folder_items(rt, &ready, &report)
+    }
+
+    /// Recheck waits at the drain boundary. A folder may already have been
+    /// repaired while workers were busy elsewhere.
+    pub(super) fn retry_repaired_at_drain(&self, rt: &Arc<Runtime>) -> SResult<()> {
+        // A filesystem can reject a write despite its access check. Retry each
+        // clip at most once per run, including repairs made during other retries.
+        let mut tried = HashSet::new();
+        loop {
+            let m = rt.manifest();
+            {
+                let s = rt.lock();
+                if s.stopped() || s.pause_requested || s.recovery_required || s.halted || m.state().is_terminal() { return Ok(()); }
+            }
+            let ready = self.ready_folder_items(rt, &m, &mut FolderChecks::default(), &tried)?;
+            if ready.is_empty() { return Ok(()); }
+            let report = folder_access::scan(m.config());
+            if report.root_blocked { return Ok(()); }
+            self.release_folder_items(rt, &ready, &report)?;
+            tried.extend(ready);
+            self.consume(rt)?;
+        }
+    }
+
+    pub(super) fn finish_folder_wait(&self, rt: &Arc<Runtime>, m: &Manifest) -> SResult<bool> {
+        if !m.items.iter().any(|i| folder_wait(i)) { return Ok(false); }
+        let report = folder_access::scan(m.config());
+        self.update(rt, |s| {
+            let mut patch = Patch::new().state(JobState::Paused).set("activeItemId", Value::Null)
+                .set("folderWarning", warning(&report));
+            // A pause already claimed by the user must wait for their Resume.
+            if !s.pause_requested { patch = patch.set("permissionBlock", json!(&report)); }
+            Some(patch)
+        })?;
+        self.emit(rt, "paused", vec![]);
+        Ok(true)
     }
 }

@@ -637,7 +637,6 @@ pub struct Runtime {
     pub cv: Condvar,
     pub persist: Mutex<()>,
     pub abort: Mutex<Arc<AtomicBool>>,
-    pub folder_checks: Mutex<HashMap<PathBuf,(i64,i64,Option<String>)>>,
     pub folder_scan_at: Mutex<std::time::Instant>,
 }
 
@@ -691,7 +690,6 @@ impl Runtime {
             cv: Condvar::new(),
             persist: Mutex::new(()),
             abort: Mutex::new(Arc::new(AtomicBool::new(false))),
-            folder_checks:Mutex::new(HashMap::new()),
             folder_scan_at:Mutex::new(std::time::Instant::now()),
         })
     }
@@ -1185,10 +1183,11 @@ impl Service {
             if !active.is_empty() && !Self::may_run_alongside(config, &active.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>()) {
                 return Err(service_error("JOB_ACTIVE"));
             }
-            super::folder_access::require(config)?;
+            let folders = self.start_folder_report(config)?;
             let now = (self.0.o.now)();
             let mut initial = Map::new();
             initial.insert("config".into(), config.clone());
+            if folders.has_warning() { initial.insert("folderWarning".into(), json!(folders)); }
             initial.insert("state".into(), JobState::Discovering.into());
             initial.insert("createdAt".into(), json!(now));
             initial.insert("updatedAt".into(), json!(now));
@@ -1253,8 +1252,11 @@ impl Service {
     /// liveJobs()
     pub fn live_jobs(&self) -> Vec<Value> {
         self.0.jobs.lock().unwrap().values().map(|rt| {
-            let m = rt.manifest();
-            json!({ "id": m.id(), "state": m.state(), "autoConvert": m.config().get("autoConvert") == Some(&Value::Bool(true)) })
+            let s = rt.lock();
+            let m = &s.manifest;
+            let mut job = json!({ "id": m.id(), "state": m.state(), "autoConvert": m.config().get("autoConvert") == Some(&Value::Bool(true)) });
+            if let Some(block) = m.get("permissionBlock") { job["permissionBlock"] = block.clone(); }
+            job
         }).collect()
     }
 
@@ -1297,6 +1299,11 @@ impl Service {
         {
             let mut s = rt.lock(); s.pause_requested = true; s.preview_pause = owner;
         }
+        // Taking over an existing permission wait revokes its automatic resume.
+        self.update(&rt, |s| s.manifest.get("permissionBlock").map(|block| {
+            let patch = Patch::new().set("permissionBlock", Value::Null);
+            if s.manifest.get("folderWarning").is_none() { patch.set("folderWarning", block.clone()) } else { patch }
+        }))?;
         self.emit(&rt, "pause_requested", vec![]);
         Ok(public_snapshot(&rt.manifest()))
     }
@@ -1313,10 +1320,34 @@ impl Service {
         self.mutate(|| self.resume_now(id))
     }
 
+    pub fn resume_folder_wait(&self, id: &str) -> SResult<Value> {
+        self.mutate(|| {
+            let rt = self.ensure_runtime(id)?;
+            let m = rt.manifest();
+            if m.state() != JobState::Paused || m.get("permissionBlock").is_none() {
+                return Err(service_error("JOB_NOT_PAUSED"));
+            }
+            self.resume_now(id)
+        })
+    }
+
     fn resume_now(&self, id: &str) -> SResult<Value> {
         if self.speed_test_active() { return Err(service_error("SPEED_TEST_RUNNING")); }
         if self.preview_active() { return Err(service_error("JOB_ACTIVE")); }
         let rt = self.live_runtime(id)?;
+        // A drained worker can have persisted Paused just before releasing
+        // its run. Startup can likewise be finishing an already paused job.
+        let finishing = {
+            let s = rt.lock();
+            if s.release_recovery == Some(false) && s.manifest.get("permissionBlock").is_some() {
+                // Another job may still own startup recovery. A later tick
+                // retries without holding the service command lock over it.
+                return Err(service_error("JOB_ACTIVE"));
+            }
+            s.running && !s.consuming && s.manifest.state() == JobState::Paused
+                && (s.producer_done || (s.run_kind == Some("recovery") && s.release_recovery != Some(false) && s.manifest.get("recovery").is_none()))
+        };
+        if finishing { self.wait_idle(&rt); }
         rt.lock().preview_pause = None;
         let (state, pause_requested, running, from) = {
             let s = rt.lock();
@@ -1325,8 +1356,7 @@ impl Service {
         if state != JobState::Paused && !pause_requested {
             return Err(service_error("JOB_NOT_PAUSED"));
         }
-        super::folder_access::require(rt.manifest().config())?;
-        self.clear_folder_block(&rt)?;
+        self.prepare_folder_resume(&rt)?;
         if from == Some(JobState::Replacing) && !running {
             self.resolve_replacement_before_cancel(&rt, id, true)?;
             self.emit(&rt, "resumed", vec![]);

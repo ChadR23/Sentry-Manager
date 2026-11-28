@@ -892,7 +892,7 @@ fn readonly_folder_skips_before_encode_and_retries_after_permissions_change() {
         let config = h.config(if replace {json!({"outputMode":"replace","destinationRoot":null,"replacementConfirmed":true})} else {json!({})});
         let result = h.service().start(&config);
         fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(result.is_err(), "one locked folder must block the whole start: {result:?}");
+        assert!(result.is_err(), "all work or the destination root is locked: {result:?}");
         let error=result.unwrap_err(); assert!(error.is("FOLDERS_NOT_WRITABLE"),"{error:?}");
         assert!(error.detail.as_deref().unwrap().contains("uid/gid"));
         assert_eq!(h.spawned().len(),0);
@@ -907,7 +907,7 @@ fn readonly_folder_skips_before_encode_and_retries_after_permissions_change() {
 }
 
 #[test]
-fn readonly_new_locked_folder_drains_inflight_and_pauses_then_resumes() {
+fn folder_scope_midrun_lock_finishes_other_queued_work_before_pausing() {
     midrun_folder_pause(true);
     midrun_folder_pause(false);
 }
@@ -926,9 +926,14 @@ fn midrun_folder_pause(replace:bool) {
     h.service().item_patch(&rt,second["id"].as_str().unwrap(),vec![("sourcePath",Some(json!(path))),("relativePath",Some(json!("SentryClips/new-upload/2026-10-20_07-10-01-front.mp4")))],vec![]).unwrap();
     fs::set_permissions(&locked,fs::Permissions::from_mode(0o555)).unwrap();
     h.finish(&h.held()[0]);
+    assert!(until(|| h.spawned().len() == 2 && h.held().len() == 1), "the third clip must start while the second is locked");
+    let converting = h.service().get(&id).unwrap();
+    assert!(converting["permissionBlock"].is_null(), "{converting}");
+    assert_eq!(converting["folderWarning"]["readOnlyCount"], 1);
+    h.finish_all();
     assert!(until(||h.service().get(&id).unwrap()["state"]=="paused"),"{:?}",h.service().get(&id));
     let job=h.service().get(&id).unwrap();
-    assert_eq!(h.spawned().len(),1,"only the already admitted encode finishes");
+    assert_eq!(h.spawned().len(),2,"both writable clips finish");
     assert_eq!(job["items"][0]["state"],"completed");
     assert!(job["items"].as_array().unwrap().iter().all(|i|i["state"]!="failed"));
     assert_eq!(job["permissionBlock"]["readOnlyCount"],1);
@@ -937,4 +942,98 @@ fn midrun_folder_pause(replace:bool) {
     h.service().resume(&id).unwrap();let done=h.finish_job(&id);
     assert!(done["items"].as_array().unwrap().iter().all(|i|i["state"]=="completed"),"{done}");
     assert_eq!(h.spawned().len(),3,"completed clip must not run twice");
+}
+
+#[test]
+fn folder_scope_lock_during_encode_protects_publication_and_resumes_expert_work() {
+    use std::os::unix::fs::PermissionsExt;
+    for lock_source in [true, false] {
+        let h = Harness::new(HarnessOptions { clips: 1, hold: true, verify_ok: true, ..Default::default() });
+        let config = h.config(json!({}));
+        let id = h.service().start(&config).unwrap();
+        assert!(until(|| h.held().len() == 1));
+        let root = h.dir.path().join("footage/RecentClips");
+        let source = fs::read_dir(&root).unwrap().next().unwrap().unwrap().path();
+        let original = fs::read(&source).unwrap();
+        // In copy mode both the source and the nearest existing destination parent matter.
+        let locked = if lock_source { root } else { h.dir.path().join("out") };
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+        h.finish_all();
+        assert!(until(|| h.service().get(&id).unwrap()["state"] == "paused"), "{:?}", h.service().get(&id));
+        let paused = h.service().get(&id).unwrap();
+        assert_eq!(paused["items"][0]["resultCode"], "folder-not-writable");
+        assert_eq!(fs::read(source).unwrap(), original);
+        assert_eq!(fs::read_dir(h.dir.path().join("out")).unwrap().count(), 0);
+        assert!(paused["items"][0]["ownedPaths"].as_object().is_none_or(|v| v.is_empty()));
+        fs::set_permissions(locked, fs::Permissions::from_mode(0o755)).unwrap();
+        h.conv.auto.tick();
+        assert!(until(|| h.spawned().len() == 2), "the folder repair must wake the Expert job");
+        assert_eq!(h.finish_job(&id)["items"][0]["resultCode"], "converted");
+    }
+}
+
+#[test]
+fn folder_scope_repair_cleans_prepared_share_file_before_retry() {
+    use std::os::unix::fs::PermissionsExt;
+    for replace in [false, true] {
+        let h = Harness::new(HarnessOptions { clips: 1, hold: true, verify_ok: true, ..Default::default() });
+        let config = h.config(if replace { json!({"outputMode":"replace","destinationRoot":null,"replacementConfirmed":true}) } else { json!({}) });
+        let id = h.service().start(&config).unwrap();
+        assert!(until(|| h.held().len() == 1));
+        let rt = h.service().ensure_runtime(&id).unwrap();
+        // Hold the real commit slot until prepare has durably recorded a proved copy.
+        rt.lock().commit_holder = Some("busy-slot".into());
+        h.finish_all();
+        let key = if replace { "replacementCandidate" } else { "destinationPartial" };
+        let prepared = until(|| rt.manifest().items[0].value()["ownedArtifacts"][key]["state"] == "owned");
+        let original = h.dir.path().join("footage/RecentClips").join(clip_name(0));
+        let output = if replace { original.clone() } else { h.dir.path().join("out/RecentClips").join(clip_name(0)) };
+        let folder = output.parent().unwrap();
+        if prepared { fs::set_permissions(folder, fs::Permissions::from_mode(0o555)).unwrap(); }
+        rt.lock().commit_holder = None;
+        rt.cv.notify_all();
+        assert!(prepared);
+        let job = h.service().when_idle(&id).unwrap();
+        fs::set_permissions(folder, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(job["state"], "paused", "{job}");
+        assert_eq!(job["items"][0]["resultCode"], "folder-not-writable");
+        assert_eq!(job["counters"]["files"], 0);
+        assert_eq!(fs::read(&original).unwrap(), vec![0; 4000]);
+        if !replace { assert!(!output.exists()); }
+        let held = rt.manifest().items[0].value()["ownedPaths"][key].as_str().unwrap().to_owned();
+        assert!(Path::new(&held).exists(), "the read-only folder still owns its unpublished copy");
+        h.conv.auto.tick();
+        let done = h.finish_job(&id);
+        assert_eq!(done["items"][0]["resultCode"], "converted", "{done}");
+        assert_eq!(done["counters"]["files"], 1);
+        assert!(!Path::new(&held).exists());
+        assert_eq!(fs::read_dir(folder).unwrap().count(), 1);
+        assert_eq!(fs::read(output).unwrap(), b"encoded");
+    }
+}
+
+#[test]
+fn folder_scope_repairs_during_successive_encodes_run_without_a_permission_pause() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = Harness::new(HarnessOptions { clips: 3, verify_ok: true, ..Default::default() });
+    let group = h.dir.path().join("footage/RecentClips");
+    let mut locked = vec![];
+    for i in 0..2 {
+        let folder = group.join(format!("locked-{i}"));
+        fs::create_dir(&folder).unwrap();
+        fs::rename(group.join(clip_name(i)), folder.join(clip_name(i))).unwrap();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+        locked.push(folder);
+    }
+    let id = h.service().start(&h.config(json!({}))).unwrap();
+    let rt = h.service().ensure_runtime(&id).unwrap();
+    assert!(until(|| h.held().len() == 1 && rt.manifest().items.iter().filter(|i| i.str("resultCode") == Some("folder-not-writable")).count() == 2));
+    for (i, folder) in locked.iter().enumerate() {
+        fs::set_permissions(folder, fs::Permissions::from_mode(0o755)).unwrap();
+        h.finish(&h.held()[0]);
+        assert!(until(|| h.spawned().len() == i + 2 && h.held().len() == 1), "repaired clip {} did not run", i + 1);
+    }
+    let job = h.finish_job(&id);
+    assert_eq!(job["state"], "completed");
+    assert_eq!(job["counters"]["files"], 3);
 }

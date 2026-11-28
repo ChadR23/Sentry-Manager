@@ -1704,7 +1704,7 @@ fn readonly_automatic_checks_retry_permissions_and_legacy_publication_failures()
 }
 
 #[test]
-fn readonly_auto_blocks_then_starts_after_folder_repair() {
+fn folder_scope_automatic_check_warns_for_unrelated_folder() {
     use std::os::unix::fs::PermissionsExt;
     let d=tempdir().unwrap(); let source=d.path().join("src"); let locked=source.join("SavedClips/locked");
     std::fs::create_dir_all(&locked).unwrap();std::fs::set_permissions(&locked,std::fs::Permissions::from_mode(0o555)).unwrap();
@@ -1713,9 +1713,11 @@ fn readonly_auto_blocks_then_starts_after_folder_repair() {
     let mut o=opts(service.clone(),scanner,d.path());o.folder_check=Some(Arc::new(super::super::folder_access::scan));
     let a=Auto::new(o);a.start();let c=give_up_config(d.path());
     a.configure(&json!({"enabled":true,"config":c,"catchUp":true})).unwrap();a.check_now();
-    assert!(service.started().is_empty());
-    assert_eq!(a.get_state()["status"]["sources"][source.to_str().unwrap()]["blocked"],true);
-    assert!(a.get_state()["status"]["error"].is_null());
+    assert_eq!(service.started().len(), 1, "writable work must start in this check");
+    let status = a.get_state()["status"]["sources"][source.to_str().unwrap()].clone();
+    assert_eq!(status["blocked"], false);
+    assert_eq!(status["folderAccess"]["readOnlyCount"], 1);
+    assert!(status["error"].is_null());
     std::fs::set_permissions(&locked,std::fs::Permissions::from_mode(0o755)).unwrap();
     a.check_now();assert_eq!(service.started().len(),1);a.stop();
 }

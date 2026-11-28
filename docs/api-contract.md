@@ -110,18 +110,34 @@ this command. Candidates must still pass the unchanged verification checks.
 
 `chooseFolder`, `start`, `getCurrent`, `pause`, `setConcurrency`, `resume`, `cancel`, `discard`, `retryFailed`, `dismissSummary`, `getCapabilities`, `subscribeProgress`, `unsubscribeProgress`, `runBenchmark`, `cancelBenchmark`, `getAuto`, `setAuto`, `checkAutoNow`, `saveVehicle`, `forgetVehicle`, `devices`, `setLanes`
 
-The server adds the read-only `checkFolders` invoke channel. Its payload is
-`{config: <start config>}` and uses the same source/destination path guards as
-`start`. Its value contains `readOnlyCount`, `processUid`, `processGid`, `hint`,
-and `roots`. Each root has `root`, `role`, `readOnlyCount`, up to five `examples`
-(`folder`, `ownerUid`, `ownerGid`, `mode`, process IDs), and `unreadable`
-(`count`, up to five example paths/errors). No permission probe writes files.
+The read-only `checkFolders` channel accepts `{config: <start config>}`
+through the same source and destination path guards as `start`. Its value
+includes the full inventory in `readOnlyCount`, `processUid`, `processGid`,
+`hint` and `roots`. Each root has `root`, `role`, `readOnlyCount`, up to five
+`examples` (`folder`, `ownerUid`, `ownerGid`, `mode`, process IDs) and
+`unreadable` (`count` and up to five path/error examples). Dated examples
+are ordered newest first. The optional `newestFolder` names the latest
+date-stamped read-only folder across both roots. The optional `rootBlocked`
+is true when a required root fails its permission check.
 
-A permission-blocked start/resume keeps the existing error envelope with code
-`FOLDERS_NOT_WRITABLE`, adding `blocked:true`, `retryable:true`, and a detailed
-`message`. Job snapshots may add `permissionBlock` (the folder report) and
-`discoveryIssues` (`count`, bounded `examples`). Automatic source status may add
-`blocked` and `folderAccess`; a permission wait does not set its error field.
+`checkFolders` also returns `startBlocked` (boolean). A positive
+`readOnlyCount` can accompany `startBlocked:false` while eligible folders
+are writable. A permission-denied root or exclusively permission-blocked
+eligible work sets `startBlocked:true`. Permission checks create no files.
+A permission-refused start or resume returns `FOLDERS_NOT_WRITABLE` with
+`blocked:true`, `retryable:true` and a detailed `message`.
+
+Job snapshots can carry `folderWarning` (the folder inventory) while work
+continues. `permissionBlock` retains its meaning as the inventory for a
+permission pause. Individual clips waiting for access use state `skipped`,
+result code `folder-not-writable` and a retryable reason. Resuming queues
+repaired clips and leaves other waits and completed results intact.
+`discoveryIssues` carries the count and bounded examples of unreadable paths.
+
+Automatic source status keeps the latest folder report in `folderAccess`.
+It sets `blocked:true` for an actual permission refusal or wait.
+A warning or permission wait leaves the source error field clear.
+Health keeps the `warn` check for folder findings independently of job state.
 Truncated snapshots may add `itemKeptCounts` keyed by the precise source-defect
 reason. Existing fields remain; `keptClips` also pages the new kept reasons.
 

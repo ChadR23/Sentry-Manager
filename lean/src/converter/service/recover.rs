@@ -80,6 +80,16 @@ impl Service {
             {
                 let mut s = rt.lock();
                 s.manifest = recovered.clone();
+                // A drained permission pause has no worker to recover. Register
+                // the manifest so the very first scheduled check can resume it.
+                let owns = |paths: Option<&Value>| paths.and_then(Value::as_object).is_some_and(|p| !p.is_empty());
+                if recovered.state() == JobState::Paused && recovered.get("permissionBlock").is_some()
+                    && recovered.get("recovery").is_none() && recovered.str("activeItemId").is_none()
+                    && recovered.replacement_phase().is_none() && recovered.get("publicationArtifact").is_none()
+                    && !owns(recovered.get("ownedPaths"))
+                    && recovered.items.iter().all(|i| i.state() != ItemState::Processing && !owns(i.get("ownedPaths")) && i.get("publicationArtifact").is_none()) {
+                    return Ok(public_snapshot(&recovered));
+                }
                 s.running = true;
                 s.run_kind = Some("recovery");
                 s.release_recovery = if defer { Some(false) } else { None };
@@ -130,6 +140,14 @@ impl Service {
             }
         }
         rt.cv.notify_all();
+        Ok(())
+    }
+
+    /// Startup serializes recovery workers. An ordinary job independently
+    /// resumed after recovery has released this runtime is outside that queue.
+    pub(crate) fn wait_for_recovery(&self, id: &str) -> SResult<()> {
+        let rt = self.ensure_runtime(id)?;
+        drop(rt.cv.wait_while(rt.lock(), |s| s.run_kind == Some("recovery")).unwrap_or_else(|p| p.into_inner()));
         Ok(())
     }
 

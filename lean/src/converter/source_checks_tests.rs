@@ -317,7 +317,15 @@ fn restart_folder_wait(paused:bool) {
     conv.start().unwrap();conv.auto.configure(&json!({"enabled":true,"config":c,"catchUp":true})).unwrap();conv.auto.check_now();
     assert_eq!(spawned.load(std::sync::atomic::Ordering::SeqCst),0);
     conv.shutdown();drop(conv);
-    let restarted=open();restarted.start().unwrap();
+    let restarted=open();
+    if paused {
+        // Make the startup ordering deterministic. This plain permission pause
+        // has no interrupted worker or owned files to hold behind the recovery gate.
+        restarted.service.recover(old.id(), true).unwrap();
+        let refusal = restarted.service.resume_folder_wait(old.id()).unwrap_err();
+        assert!(refusal.is("FOLDERS_NOT_WRITABLE"), "the first check must evaluate the actual clip: {refusal}");
+    }
+    restarted.start().unwrap();
     assert_eq!(restarted.service.get(old.id()).unwrap()["items"][0]["resultCode"],"folder-not-writable");
     fs::set_permissions(&folder,fs::Permissions::from_mode(0o755)).unwrap();
     restarted.auto.check_now();let state=restarted.auto.get_state();let id=state["status"]["active"][root.to_str().unwrap()]["jobId"].as_str().unwrap().to_string();
@@ -881,3 +889,6 @@ fn no_playable_stub_proof_does_not_accept_failed_or_limited_processes() {
     fs::write(&source, b"not a video").unwrap();
     assert!(!tools.source_has_no_playable_frames(source.to_str().unwrap(), &cancel).unwrap());
 }
+
+#[path = "folder_scope_tests.rs"]
+mod folder_scope_tests;

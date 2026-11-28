@@ -3678,7 +3678,8 @@
   "converterIpcChannels": [
     {
       "name": "checkFolders",
-      "call": "POST /api/converter/invoke/checkFolders"
+      "call": "POST /api/converter/invoke/checkFolders",
+      "note": "Returns the folder inventory plus startBlocked. newestFolder names the newest dated read-only example when present. rootBlocked is true for a permission-denied root."
     },
     {
       "name": "chooseFolder",
@@ -3690,7 +3691,8 @@
     },
     {
       "name": "getCurrent",
-      "call": "POST /api/converter/invoke/getCurrent"
+      "call": "POST /api/converter/invoke/getCurrent",
+      "note": "Job snapshots may include folderWarning while shrinking continues. permissionBlock identifies a permission pause."
     },
     {
       "name": "pause",
@@ -3742,7 +3744,8 @@
     },
     {
       "name": "getAuto",
-      "call": "POST /api/converter/invoke/getAuto"
+      "call": "POST /api/converter/invoke/getAuto",
+      "note": "Per-source folderAccess reports the scan. blocked is true for a permission-refused start or a permission pause."
     },
     {
       "name": "requestSpeedTest",

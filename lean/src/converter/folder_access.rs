@@ -1,5 +1,6 @@
 //! Non-mutating folder access checks, performed by the server's effective identity.
 //! Never infer access from mode bits: ACL masks and mounted filesystems decide it.
+use super::service::{Fail, SResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::{HashMap, HashSet}, ffi::CString, fs, os::unix::{ffi::OsStrExt, fs::MetadataExt}, path::{Path, PathBuf}, sync::{Mutex, OnceLock}};
@@ -19,14 +20,25 @@ impl Issues {
 pub struct RootReport { pub root: String, pub role: String, pub read_only_count: u64, pub examples: Vec<Value>, pub unreadable: Issues }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all="camelCase", deny_unknown_fields)]
-pub struct Report { pub roots: Vec<RootReport>, pub read_only_count: u64, pub process_uid: u32, pub process_gid: u32, pub hint: String }
+pub struct Report {
+    pub roots: Vec<RootReport>, pub read_only_count: u64, pub process_uid: u32, pub process_gid: u32, pub hint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest_folder: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub root_blocked: bool,
+}
 impl Report {
-    pub fn blocked(&self)->bool { self.read_only_count > 0 }
+    pub fn has_warning(&self) -> bool { self.read_only_count > 0 || self.root_blocked }
+
+    pub fn refusal(&self) -> Fail {
+        Fail { code: Some("FOLDERS_NOT_WRITABLE".into()), retryable: true, detail: Some(self.detail()), ..Default::default() }
+    }
     pub fn detail(&self)->String {
         let roots=self.roots.iter().map(|r|format!("{} {}: {} folders are read-only{}{}",r.role,r.root,r.read_only_count,
             if r.examples.is_empty(){String::new()}else{format!("; {}",r.examples.iter().map(|e|format!("{} (owner uid/gid {}/{}, mode {})",e["folder"].as_str().unwrap_or(""),e["ownerUid"],e["ownerGid"],e["mode"].as_str().unwrap_or("unknown"))).collect::<Vec<_>>().join("; "))},
             if r.unreadable.count==0 {String::new()}else{format!("; {} paths could not be read: {}",r.unreadable.count,r.unreadable.examples.join("; "))})).collect::<Vec<_>>().join(". ");
-        format!("{roots}. {}",self.hint)
+        let newest = self.newest_folder.as_ref().map(|p| format!(" Newest dated folder: {p}.")).unwrap_or_default();
+        format!("{roots}.{newest} {}", self.hint)
     }
 }
 pub fn hint()->String {format!("Give these folders to the user the app runs as (uid/gid {}/{}), with write and search permission, e.g. Unraid > Tools > Docker Safe New Perms, or chown/chmod; check ACL masks and read-only mounts too. Fix the uploader's permissions: new footage arriving this way will be flagged again.",unsafe{libc::geteuid()},unsafe{libc::getegid()})}
@@ -47,11 +59,31 @@ pub fn existing_parent(dir:&Path)->PathBuf {
     while fs::symlink_metadata(&p).is_err_and(|e|e.kind()==std::io::ErrorKind::NotFound) {if !p.pop(){break;}}
     p
 }
+/// Tesla dates sort chronologically across clip groups, including timestamped event folders.
+fn footage_date_name(path: &str) -> Option<&str> {
+    let name = Path::new(path).file_name()?.to_str()?;
+    chrono::NaiveDate::parse_from_str(name.get(..10)?, "%Y-%m-%d").ok()?;
+    Some(name)
+}
+
+impl RootReport {
+    fn note_read_only(&mut self, dir: &Path) {
+        self.read_only_count += 1;
+        let name = dir.to_str().and_then(footage_date_name);
+        let at = self.examples.iter().position(|e| name > e["folder"].as_str().and_then(footage_date_name))
+            .unwrap_or(self.examples.len());
+        if at < EXAMPLES {
+            self.examples.insert(at, folder_detail(dir));
+            self.examples.truncate(EXAMPLES);
+        }
+    }
+}
+
 fn walk(dir:&Path, out:&mut RootReport, seen:&mut HashSet<PathBuf>) {
     // Do not follow symlinked folders, just like converter discovery.
     if !seen.insert(dir.to_path_buf()){return;}
     if let Err(e)=writable(dir) {
-        if denied(&e) {out.read_only_count+=1; if out.examples.len()<EXAMPLES {out.examples.push(folder_detail(dir));}}
+        if denied(&e) { out.note_read_only(dir); }
         else {out.unreadable.note(dir,&e);}
     }
     let entries=match fs::read_dir(dir) {Ok(v)=>v,Err(e)=>{out.unreadable.note(dir,&e);return;}};
@@ -71,17 +103,90 @@ pub fn scan(config:&Value)->Report {
         if field=="destinationRoot" && config["outputMode"]=="replace" {continue;}
         let mut rr=RootReport{root:root.into(),role:role.into(),..Default::default()};
         let dir=if field=="destinationRoot"{existing_parent(Path::new(root))}else{PathBuf::from(root)};
+        // The root (or the parent where a future destination must be created)
+        // is an admission prerequisite, independent of the examples we retain.
+        r.root_blocked |= writable(&dir).is_err_and(|e| denied(&e))
+            || (field == "sourceRoot" && fs::read_dir(&dir).is_err_and(|e| denied(&e)));
         if field=="destinationRoot" && dir!=Path::new(root) {
-            if let Err(e)=writable(&dir) {if denied(&e){rr.read_only_count=1;rr.examples.push(folder_detail(&dir));}else{rr.unreadable.note(&dir,&e);}}
+            if let Err(e)=writable(&dir) {if denied(&e){rr.note_read_only(&dir);}else{rr.unreadable.note(&dir,&e);}}
         } else {walk(&dir,&mut rr,&mut HashSet::new());}
         r.read_only_count+=rr.read_only_count;r.roots.push(rr);
     }
+    r.newest_folder = r.roots.iter().flat_map(|root| &root.examples)
+        .filter_map(|e| e["folder"].as_str()).filter_map(|p| footage_date_name(p).map(|date| (date, p)))
+        .max().map(|(_, path)| path.to_owned());
     let mut cache=REPORTS.get_or_init(Default::default).lock().unwrap();
     if cache.len()>=128 && !cache.contains_key(&key(config)){cache.clear();}
     cache.insert(key(config),r.clone());r
 }
 pub fn cached(config:&Value)->Option<Report>{REPORTS.get_or_init(Default::default).lock().unwrap().get(&key(config)).cloned()}
-pub fn require(config:&Value)->Result<Report,super::service::Fail>{let r=scan(config);if r.blocked(){Err(super::service::Fail{code:Some("FOLDERS_NOT_WRITABLE".into()),retryable:true,detail:Some(r.detail()),..Default::default()})}else{Ok(r)}}
+/// Only permission errors become a folder wait. A vanished file or a network
+/// error still goes through the existing source and publication recovery paths.
+fn check_dir(dir: &Path) -> SResult<()> {
+    let parent = existing_parent(dir);
+    if let Err(error) = writable(&parent) {
+        if denied(&error) {
+            return Err(Fail { code: Some("FOLDER_NOT_WRITABLE".into()), retryable: true,
+                detail: Some(format!("{}: {error}", folder_detail(&parent))), ..Default::default() });
+        }
+    }
+    Ok(())
+}
+
+fn check_targets(config: &Value, item: &Value, mut check: impl FnMut(&Path) -> SResult<()>) -> SResult<()> {
+    if let Some(dir) = item["sourcePath"].as_str().and_then(|p| Path::new(p).parent()) {
+        check(dir)?;
+    }
+    if config["outputMode"] == "separate" {
+        let output = super::service::output_path(config, item);
+        if let Some(dir) = Path::new(&output).parent() { check(dir)?; }
+    }
+    Ok(())
+}
+
+pub fn check_item(config: &Value, item: &Value) -> SResult<()> {
+    check_targets(config, item, check_dir)
+}
+
+/// Cache only within one admission decision. The worker and the publisher
+/// check afresh, including permission changes on ancestors and remounted shares.
+#[derive(Default)]
+pub struct FolderChecks(HashMap<PathBuf, SResult<()>>);
+
+impl FolderChecks {
+    pub fn allows(&mut self, config: &Value, item: &Value) -> bool {
+        check_targets(config, item, |dir| {
+            if let Some(result) = self.0.get(dir) { return result.clone(); }
+            let result = check_dir(dir);
+            self.0.insert(dir.to_owned(), result.clone());
+            result
+        }).is_ok()
+    }
+}
+
+/// Only walk the eligible clips if the folder inventory found a problem.
+/// Stop at the first writable candidate. An empty future schedule is allowed.
+pub fn discovery_access(config: &Value, skip: impl Fn(&super::scanner::Discovered) -> bool) -> SResult<Option<bool>> {
+    let order = super::scanner::group_order(config.get("groupOrder")).map_err(Fail::from)?;
+    let after = config["resumeAfter"].as_str();
+    let mut checks = FolderChecks::default();
+    let mut writable_work = None;
+    let inaccessible = std::cell::Cell::new(false);
+    let issue = |path: &Path, error: &std::io::Error| {
+        if denied(error) { inaccessible.set(true); }
+        super::service::log_line(format!("[CONVERTER] Discovery skipped {}: {}: {error}", path.display(), super::owned::errno_code(error)));
+    };
+    super::scanner::scan_reporting(config, None, None, None, &issue, None, &mut |clip| {
+        if after.is_some_and(|p| super::scanner::compare_scan_paths(clip.value["relativePath"].as_str().unwrap_or(""), p, &order).is_le())
+            || skip(&clip) { return true; }
+        let writable = checks.allows(config, &clip.value);
+        writable_work = Some(writable);
+        !writable
+    }).map_err(Fail::from)?;
+    // A selected directory that discovery could not enter may hold work.
+    // Only a fully enumerated, empty selection can admit an idle schedule.
+    Ok(writable_work.or_else(|| inaccessible.get().then_some(false)))
+}
 
 #[cfg(test)]
 mod tests {

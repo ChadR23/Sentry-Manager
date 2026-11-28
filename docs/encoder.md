@@ -309,35 +309,40 @@ the three levels appear as **Customized in Expert** in guided setup.
 
 ## Footage folder permissions
 
-Shrinking is **blocked** if any folder under the source or copy destination
-cannot be written by the server process. This applies to Expert starts,
-guided setup and every automatic check. No job starts until all folders are
-writable. Step 4 **Start**, the Encoder status screen and **Health** show the
-count, example folders, owner uid/gid, mode, the app's uid/gid and a fix hint.
-A blocked folder is not a failed clip.
+A read-only folder affects the clips that need it. For example, if March
+footage is due for shrinking and today's upload folder is read-only, the
+March clips can still shrink. Step 4 of guided setup, Encoder status and
+Health show how many folders need attention, the newest dated example when
+available, folder owners and modes, and the app's uid/gid.
 
-Give the folders to the user the app runs as, with write and search permission.
-On Unraid, use **Tools > Docker Safe New Perms**, or correct ownership and
-permissions with `chown`/`chmod`. Check ACL masks and read-only mounts too: an
-ACL entry granting write can still be restricted by its mask. Correct the
-uploader as well; new folders uploaded with the wrong permissions will block
-shrinking again. The check uses the server's effective user and groups, honours
-filesystem access decisions, and creates no probe files or directory timestamp
-changes. It does not alter permissions for you.
+Expert starts, guided setup and automatic checks can proceed with writable
+work. A read-only root or a batch whose eligible clips all need read-only
+folders still blocks a start. A setup with no footage due yet can wait for its
+schedule. In separate-copy mode the source folder and the output folder both
+need write and search permission. For new output folders the server checks
+the nearest existing parent.
 
-If a locked folder appears during a run, admission stops when it is detected:
-discovery checks each folder it enters, and a running job rechecks all folders
-at most every five minutes.
-Encodes already in flight in writable folders finish, then the job pauses.
-A final per-folder check and publication error handling protect against a
-permission change between the scan and the write. Permission waits survive a
-restart; they do not count as failures or mark a clip converted.
+During a run the worker checks each clip's folders and periodically refreshes
+the whole-share warning. A clip that hits a permission denial waits as
+`skipped / folder-not-writable`. Its original stays in place. The job
+continues through the other clips and pauses for permissions when only
+blocked clips remain. Publication checks the folders again. If a permission
+change prevents removal of a prepared copy, the job retains its ownership
+record for cleanup after access returns.
 
-After fixing permissions, press **Encoder > Check again**. Automatic checks
-also recheck and resume a permission pause once the folders are writable,
-respecting electricity hours outside catch-up. In manual setup, **Check again**
-enables Start after a successful check; in Expert, try Start or Resume again.
-A normal pause you requested still waits for Resume.
+Give the affected folders to the user the app runs as, with write and search
+permission. On Unraid, use **Tools > Docker Safe New Perms**, or correct
+ownership and permissions with `chown`/`chmod`. Check ACL masks and read-only
+mounts too. Correct the uploader's permissions so tomorrow's folders arrive
+writable. The folder check uses the server's effective user and groups and
+creates no probe files.
+
+Repairing even one waiting clip's folders lets the job continue. Automatic
+checks revisit permission pauses, including those saved by older builds.
+**Encoder > Check again** requests a check now. Automatic resumes follow the
+electricity window, with the existing catch-up exception for automatic jobs.
+A pause you requested still waits for **Resume**. Completed clips keep their
+results when other clips retry.
 
 The next automatic check retries queued items from an interrupted run, clips
 waiting for folder permissions, and older `publication-artifact-changed`

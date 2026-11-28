@@ -586,13 +586,15 @@ impl Service {
             super::log_line(format!("[CONVERTER] Job {} discovery skipped {}: {}: {error}",m.id(),path.display(),super::super::owned::errno_code(error)));
             issues.lock().unwrap().note(path,error);
         };
-        let visit=|dir:&Path| {
-            if rt.lock().manifest.get("permissionBlock").is_some_and(|v|!v.is_null()) {return;}
-            if super::super::folder_access::writable(dir).is_err_and(|e|super::super::folder_access::denied(&e)) {
-                let report=super::super::folder_access::scan(&config);
-                if let Err(e)=self.pause_for_folders(rt,&report) {super::log_line(format!("[CONVERTER] Could not record folder pause: {e}"));}
+        let visit = |dir: &Path| {
+            if super::super::folder_access::writable(dir).is_err_and(|e| super::super::folder_access::denied(&e)) {
+                if let Err(error) = self.refresh_folder_warning(rt, true) {
+                    super::log_line(format!("[CONVERTER] Could not record folder warning: {error}"));
+                }
             }
         };
+        let check_discovered = m.get("folderWarning").is_some();
+        let mut folder_checks = super::super::folder_access::FolderChecks::default();
         let scan = super::super::scanner::scan_reporting(&config, Some(&signal), Some(&retry), tidy_ref, &on_issue, Some(&visit), &mut |d| {
             if stopped(rt) {
                 return false;
@@ -623,6 +625,13 @@ impl Service {
             };
             if converted.is_some() {
                 pending.push(Self::create_queue_item(rt, &d.value, vec![("state", ItemState::Skipped.into()), ("eligibleVideo", json!(false)), ("resultCode", json!("already-converted"))]));
+            } else if check_discovered && !folder_checks.allows(&config, &d.value) {
+                // Persist known waits with the discovery batch, rather than one
+                // manifest write per clip before the first writable folder.
+                pending.push(Self::create_queue_item(rt, &d.value, vec![
+                    ("state", ItemState::Skipped.into()), ("resultCode", json!("folder-not-writable")),
+                    ("failure", json!({"code":"folder-not-writable", "retryable":true})),
+                ]));
             } else {
                 pending.push(Self::create_queue_item(rt, &d.value, vec![]));
                 pending_work += 1;
@@ -963,8 +972,7 @@ impl Service {
                     self.fail_item(rt,&next,&e)?;
                     continue;
                 }
-                // A discovery/periodic check may have blocked admission while
-                // this worker checked its folder; park without consuming its item.
+                // A pause may have arrived while the worker was checking its folders.
                 if !Self::begin_item(rt, &item) {rt.lock().queue.push_front(next);continue;}
                 let outcome = if item["kind"] == "asset" {
                     self.process_asset(rt, &item, ("asset-retained", "copied"))
@@ -1006,7 +1014,7 @@ impl Service {
 
     /// consume(runtime): a job with lanes first finds its GPUs (again when
     /// the lanes changed meanwhile)
-    fn consume(&self, rt: &Arc<Runtime>) -> SResult<()> {
+    pub(super) fn consume(&self, rt: &Arc<Runtime>) -> SResult<()> {
         let mut plan = None;
         let mut current = lanes::lanes_of(&rt.manifest());
         while let Some(l) = current {
@@ -1085,7 +1093,10 @@ impl Service {
             };
             let consumed = me.consume(&rt2);
             let produced = producer.map(|h| h.join().unwrap_or_else(|_| Err(service_error("PRODUCER_PANICKED")))).unwrap_or(Ok(()));
-            let rejected = produced.err().or(consumed.err());
+            let mut rejected = produced.err().or(consumed.err());
+            if rejected.is_none() {
+                rejected = me.retry_repaired_at_drain(&rt2).err();
+            }
             let state_failed = rt2.manifest().state() == JobState::Failed;
             let controlled = {
                 let s = rt2.lock();
@@ -1185,6 +1196,7 @@ impl Service {
         self.item_patch(rt, &id, vec![("state", Some(ItemState::Processing.into())), ("eligibleVideo", Some(json!(false)))], vec![("state", JobState::Copying.into()), ("activeItemId", json!(id))])?;
         let config = m.config().clone();
         let result = self.retry_transaction(rt, &id, &destination, config["destinationRoot"].as_str().unwrap_or(""), || {
+            super::super::folder_access::check_item(&config, item_v)?;
             self.prepare_destination(&config, &destination)?;
             let signal = rt.signal();
             let persist = self.persistence(rt, &id, false);
@@ -1660,6 +1672,10 @@ impl Service {
         let config = rt.manifest().config().clone();
         let replace = config["outputMode"] == "replace";
         let signal = rt.signal();
+        if let Err(error) = super::super::folder_access::check_item(&config, &item.v) {
+            self.0.o.staging.discard_unpublished(artifact);
+            return Err(error);
+        }
         let outside = self.persistence(rt, &id, true);
         let common = self.persistence(rt, &id, false);
         let prepared = {
@@ -1683,6 +1699,7 @@ impl Service {
         timing.mark("saveWait");
         let slot_started = Instant::now();
         let saved = (|| -> SResult<staging::Saved> {
+            super::super::folder_access::check_item(&config, &item.v)?;
             let op = Op { prepared: Some(&prepared), persist: Some(&common), ..Default::default() };
             if replace {
                 self.0.o.staging.swap_replacement(&op).map_err(Fail::from)
@@ -1878,13 +1895,13 @@ impl Service {
         let stopped = (stop_requested || halted_by_recovery || withdrawn) && !cancel_requested;
         let terminally = cancel_requested;
         let own = cleanup.own.clone();
-        let folder_blocked=e.is("FOLDER_NOT_WRITABLE") && cleanup.cleaned && !stopped && !terminally;
-        if folder_blocked {let report=super::super::folder_access::scan(rt.manifest().config());self.pause_for_folders(rt,&report)?;}
+        let folder_blocked = e.is("FOLDER_NOT_WRITABLE") && !cleanup.recovery_required && !stopped && !terminally;
+        if folder_blocked { self.refresh_folder_warning(rt, true)?; }
         let next = if stopped { ItemState::Queued } else if terminally { ItemState::Cancelled } else if folder_blocked {ItemState::Skipped} else { ItemState::Failed };
         let changes: Changes = vec![
             ("state", Some(next.into())),
             ("failure", if stopped || terminally { None } else { Some(json!({ "code": code, "retryable": retryable })) }),
-            ("resultCode", if memory_paused {Some(json!("gpu-memory-retry"))} else if stopped && cleanup.cleaned { None } else { Some(json!(if !cleanup.cleaned { "cleanup-pending".to_string() } else { code.clone() })) }),
+            ("resultCode", if memory_paused {Some(json!("gpu-memory-retry"))} else if stopped && cleanup.cleaned { None } else { Some(json!(if !cleanup.cleaned && !folder_blocked { "cleanup-pending".to_string() } else { code.clone() })) }),
             ("ownedPaths", if !cleanup.cleaned { Some(Value::Object(own.paths.clone())) } else { None }),
             ("ownedArtifacts", if !cleanup.cleaned { Some(Value::Object(own.arts.clone())) } else { None }),
             ("publicationArtifact", if !cleanup.cleaned { own.publication.clone() } else { None }),
@@ -1994,10 +2011,7 @@ impl Service {
             return Ok(());
         }
         if m.state() == JobState::Failed {return Ok(());}
-        if m.get("permissionBlock").is_some_and(|v|!v.is_null()) {
-            self.update(rt,|_|Some(Patch::new().state(JobState::Paused).set("activeItemId",Value::Null)))?;
-            return Ok(());
-        }
+        if self.finish_folder_wait(rt, &m)? { return Ok(()); }
         if m.get("discoveryComplete") == Some(&json!(false)) {
             let from = if m.state() == JobState::Discovering { JobState::Discovering } else { JobState::Waiting };
             self.update(rt, |_| Some(Patch::new().state(JobState::Paused).set("activeItemId", Value::Null).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", Value::Null).set("recovery", json!({ "fromState": from, "action": "resume-discovery" }))))?;

@@ -785,3 +785,21 @@ fn readonly_publication_create_reports_permission_without_artifact_change() {
     assert!(!target.exists());
     assert_eq!(fs::read(&env.source).unwrap(),env.original);
 }
+
+#[test]
+fn folder_scope_publication_syscalls_report_a_denied_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = setup("promotion-denied");
+    let candidate = env.candidate();
+    fs::write(&candidate, &env.conversion).unwrap();
+    let expected = crate::converter::owned::identity(Path::new(&candidate)).unwrap();
+    let destination = s(&env.footage.join("published.mp4"));
+    let backup = s(&env.footage.join("backup.mp4"));
+    fs::set_permissions(&env.footage, fs::Permissions::from_mode(0o555)).unwrap();
+    let copy = env.tx.promote_no_replace(&candidate, &destination, "DESTINATION_COLLISION", Some(&expected), true, false).unwrap_err();
+    let replace = env.tx.link_backup_aside(&env.source, &backup, &env.expected).unwrap_err();
+    assert_eq!((copy.code.as_str(), replace.code.as_str()), ("FOLDER_NOT_WRITABLE", "FOLDER_NOT_WRITABLE"));
+    assert!(!Path::new(&destination).exists() && !Path::new(&backup).exists());
+    assert_eq!(fs::read(&env.source).unwrap(), env.original);
+    assert_eq!(fs::read(&candidate).unwrap(), env.conversion);
+}

@@ -1,7 +1,7 @@
 import { esc, invoke as previewInvoke, api as previewApi, clientId, scope } from '../core.js';
 import { icon } from '../icons.js';
 import { size } from '../format.js';
-import { KEEP_CHIPS, LEVELS, fromSaved, toVehicleConfig, toAutoSettings, planSentence, scheduleText, nextCheckLabel, expertSummary, dayStates, levelOf, levelDevice, previewPercent, previewMeasured, previewSource, previewMegabytes, previewProgress, previewFailure, dayHeat, footageEstimate, nextAgingDay, catchUpProgress, speedStatus, speedEstimate, statusNoun, clipFailures, currentFailureExplained, currentRunSummary, folderBlockText, discoveryIssueText } from '../encoderModel.js';
+import { KEEP_CHIPS, LEVELS, fromSaved, toVehicleConfig, toAutoSettings, planSentence, scheduleText, nextCheckLabel, expertSummary, dayStates, levelOf, levelDevice, previewPercent, previewMeasured, previewSource, previewMegabytes, previewProgress, previewFailure, dayHeat, footageEstimate, nextAgingDay, catchUpProgress, speedStatus, speedEstimate, statusNoun, clipFailures, currentFailureExplained, currentRunSummary, folderNotice, folderAccessText, discoveryIssueText } from '../encoderModel.js';
 import { onPreview, streamReady, follow, counts, ACTIVE, PAUSED, describe, applySnapshot, hardwareLabel } from '../convert.js';
 import { describeJob } from '../jobs.js';
 
@@ -62,7 +62,7 @@ async function renderStatus(mount, ctx, initial, show) {
       <details class="encoder-kept encoder-estimate-note" data-kept hidden><summary data-kept-summary></summary><p data-kept-explanation></p><ul data-kept-list></ul><p data-kept-note></p><button type="button" data-kept-more hidden>Show more clips</button></details>
       <p class="encoder-estimate-note" data-gpu-retrying hidden role="status"></p>
     </section>
-    <section class="card" data-folder-block hidden><h3>Shrinking is blocked</h3><p data-folder-reason></p><button type="button" data-folder-check>Check again</button></section>
+    <section class="card" data-folder-block hidden><h3 data-folder-heading></h3><p data-folder-reason></p><button type="button" data-folder-check>Check again</button></section>
     <section class="card encoder-catchup" data-catchup hidden aria-labelledby="encoder-catchup-heading"><div class="encoder-catchup-header"><h3 id="encoder-catchup-heading">Catching up on older footage</h3><button type="button" data-job-command hidden>Pause</button></div><div data-catchup-progress></div><small data-pause-hint>Pause holds until you press Resume.</small></section>
     <section class="card encoder-speed" aria-labelledby="encoder-speed-heading"><div class="encoder-catchup-header"><h3 id="encoder-speed-heading">Speed test</h3><button type="button" data-speed-test>Test again</button></div><p data-speed-summary role="status"></p><p data-speed-current hidden></p><button type="button" data-speed-apply hidden>Use these settings</button><small>Runs now if shrinking is paused, otherwise when the current shrinking run is paused or finished.</small></section>
     <section class="card"><h3>Coming up</h3><div class="encoder-review" data-coming-up></div><p class="encoder-estimate-note" data-next-work></p><small>Check times shown in ${esc(zone)}. Footage dates use ${esc(vehicle.timezone)}.</small></section>
@@ -128,22 +128,22 @@ async function renderStatus(mount, ctx, initial, show) {
       problems.push(`The footage share is offline or cannot be reached. ${share?.lastError || 'Check its connection; your originals stay where they are.'}`);
     if (sourceError && !['PATH_UNAVAILABLE', 'SOURCE_UNAVAILABLE', 'FOLDERS_NOT_WRITABLE'].includes(sourceError)) problems.push(describe({ code: sourceError }));
     const issues = clipFailures(current);
-    const folderReport = current?.permissionBlock || status.sources?.[root]?.folderAccess;
-    const blockedText = folderBlockText(folderReport);
+    const folders = folderNotice(current && ACTIVE.has(current.state) ? current : null, status.sources?.[root]);
     update('[data-current-run]', esc(currentRunSummary(current)));
     const discoveryText = discoveryIssueText(current?.discoveryIssues);
     mount.querySelector('[data-discovery-issues]').hidden = !discoveryText;
     update('[data-discovery-issues]', esc(discoveryText));
-    update('.encoder-on-pill', blockedText ? 'Automatic shrinking is blocked' : 'Automatic shrinking is on');
+    update('.encoder-on-pill', folders.blocked ? 'Automatic shrinking is blocked' : 'Automatic shrinking is on');
     const hero = mount.querySelector('.encoder-status');
-    if (hero.classList.contains('is-blocked') !== Boolean(blockedText)) {
-      hero.classList.toggle('is-blocked', Boolean(blockedText));
-      hero.querySelector('.encoder-status-icon').innerHTML = icon(blockedText ? 'warning' : 'check_circle');
+    if (hero.classList.contains('is-blocked') !== folders.blocked) {
+      hero.classList.toggle('is-blocked', folders.blocked);
+      hero.querySelector('.encoder-status-icon').innerHTML = icon(folders.blocked ? 'warning' : 'check_circle');
     }
-    update('.encoder-status-copy h2', esc(blockedText ? `${vehicle.name} is waiting for folder access.` : `${vehicle.name} is set. You can forget about it.`));
-    update('[data-pause-hint]', blockedText ? 'After fixing permissions, press Check again. Automatic checks also resume shrinking once all folders are writable.' : 'Pause holds until you press Resume.');
-    mount.querySelector('[data-folder-block]').hidden = !blockedText;
-    update('[data-folder-reason]', esc(blockedText));
+    update('.encoder-status-copy h2', esc(folders.blocked ? `${vehicle.name} is waiting for folder access.` : `${vehicle.name} is set. You can forget about it.`));
+    update('[data-pause-hint]', folders.blocked ? 'After fixing permissions, press Check again. Shrinking can resume as soon as a remaining clip has writable folders.' : 'Pause holds until you press Resume.');
+    mount.querySelector('[data-folder-block]').hidden = !folders.text;
+    update('[data-folder-heading]', folders.blocked ? 'Shrinking is blocked' : 'Some folders are read-only');
+    update('[data-folder-reason]', esc(folders.text));
     mount.querySelector('[data-folder-check]').disabled = busy;
     mount.querySelector('[data-gpu-retrying]').hidden = !issues.retrying;
     update('[data-gpu-retrying]', esc(issues.retryingText));
@@ -249,7 +249,7 @@ async function renderStatus(mount, ctx, initial, show) {
   async function checkAgain() {
     if (busy) return;
     busy = true; commandError = ''; draw();
-    try { auto = await invoke('checkAutoNow'); if (snapshot?.permissionBlock && !snapshot.config?.autoConvert) { snapshot = await invoke('resume', {jobId:snapshot.id}); applySnapshot(snapshot); } }
+    try { auto = await invoke('checkAutoNow'); }
     catch (error) { if (error?.code !== 'FOLDERS_NOT_WRITABLE') commandError = errorText(error); }
     finally { busy = false; await load(); }
   }
@@ -444,13 +444,19 @@ async function renderWizard(mount, ctx, auto, editing, show) {
     return choice.keep == null ? 'No footage is waiting to be shrunk yet.'
       : `Nothing older than the last ${choice.keep} ${choice.keep === 1 ? 'day' : 'days'} is waiting to be shrunk yet.`;
   }
-  let folderReport = null, checkingFolders = false, foldersChecked = false;
+  let folderReport = null, checkingFolders = false, foldersChecked = false, folderCheckId = 0;
   async function checkFolders() {
-    if (checkingFolders || !ctx.alive()) return;
-    checkingFolders = true; drawReview();
-    try { folderReport = await invoke('checkFolders', {config:toVehicleConfig(choice, vehicle, saved)}); foldersChecked = true; saveError = ''; }
-    catch (error) { foldersChecked = false; saveError = errorText(error); }
-    finally { checkingFolders = false; if (ctx.alive()) drawReview(); }
+    if (!ctx.alive()) return;
+    const id = ++folderCheckId;
+    checkingFolders = true; foldersChecked = false; drawReview();
+    try {
+      const report = await invoke('checkFolders', {config:toVehicleConfig(choice, vehicle, saved)});
+      if (id === folderCheckId) { folderReport = report; foldersChecked = true; saveError = ''; }
+    } catch (error) {
+      if (id === folderCheckId) { folderReport = null; saveError = errorText(error); }
+    } finally {
+      if (id === folderCheckId) { checkingFolders = false; if (ctx.alive()) drawReview(); }
+    }
   }
   mount.querySelector('[data-setup-folder-check]').onclick = checkFolders;
   function drawReview() {
@@ -489,10 +495,10 @@ async function renderWizard(mount, ctx, auto, editing, show) {
     ack.checked = acknowledged; ack.disabled = saving || replacementUnavailable || expertOnly;
     const button = mount.querySelector('[data-save]');
     button.hidden = step !== 4 || replacementUnavailable || expertOnly;
-    button.disabled = !acknowledged || !capabilitiesReady || saving || !foldersChecked || checkingFolders || !!folderReport?.readOnlyCount;
-    const blocked = folderBlockText(folderReport);
-    mount.querySelector('[data-setup-folders]').hidden = !blocked && foldersChecked;
-    mount.querySelector('[data-setup-folder-reason]').textContent = checkingFolders ? 'Checking folder permissions…' : blocked || 'Check folder permissions before starting.';
+    button.disabled = !acknowledged || !capabilitiesReady || saving || !foldersChecked || checkingFolders || !!folderReport?.startBlocked;
+    const folderText = folderAccessText(folderReport, folderReport?.startBlocked);
+    mount.querySelector('[data-setup-folders]').hidden = !folderText && foldersChecked;
+    mount.querySelector('[data-setup-folder-reason]').textContent = checkingFolders ? 'Checking folder permissions…' : folderText || 'Check folder permissions before starting.';
     mount.querySelector('[data-setup-folder-check]').disabled = checkingFolders;
     button.textContent = saving ? 'Saving…' : 'Turn on automatic shrinking';
     mount.querySelector('[data-review-expert]').hidden = step !== 4 || (!replacementUnavailable && !expertOnly);
@@ -813,7 +819,7 @@ async function renderWizard(mount, ctx, auto, editing, show) {
   mount.querySelector('[data-ack]').onchange = (event) => { acknowledged = event.target.checked; drawReview(); };
   mount.querySelector('[data-review-expert]').onclick = openExpert;
   mount.querySelector('[data-save]').onclick = async () => {
-    if (saving || !acknowledged || replacementUnavailable || !capabilitiesReady || !foldersChecked || folderReport?.readOnlyCount) return;
+    if (saving || !acknowledged || replacementUnavailable || !capabilitiesReady || !foldersChecked || checkingFolders || folderReport?.startBlocked) return;
     saving = true; saveError = ''; drawReview(); mount.querySelector('[data-back]').disabled = true;
     try {
       const current = await invoke('getAuto');

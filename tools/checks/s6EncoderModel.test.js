@@ -643,3 +643,25 @@ test('preview tool failures point to Health and retain their error code', () => 
     detail: 'PREVIEW_TOOLS_UNAVAILABLE',
   });
 });
+
+test('folder warnings keep shrinking active until a job or a source permission check actually blocks', () => {
+  const { folderNotice } = model;
+  const folder = 'RecentClips/2026-11-27';
+  const report = { readOnlyCount: 7, newestFolder: folder, processUid: 99, processGid: 100,
+    roots: [{ examples: [{ folder, ownerUid: 0, ownerGid: 0, mode: '0755' }] }],
+    hint: 'Give the app uid/gid 99/100 write and search permission.' };
+  const source = { blocked: true, folderAccess: report };
+  const warning = folderNotice({ state: 'encoding', folderWarning: report }, source);
+  assert.equal(warning.blocked, false, 'the live job supersedes a stale blocked start');
+  for (const text of [/newest.*2026-11-27/i, /7 folders/i, /0\/0/, /0755/, /99\/100/, /permissions/i]) {
+    assert.match(warning.text, text);
+  }
+  assert.doesNotMatch(warning.text, /shrinking is blocked|waiting for folder access/i);
+  assert.equal(folderNotice(null, { blocked: false, folderAccess: report }).blocked, false);
+  assert.match(folderNotice(null, { blocked: false, folderAccess: report }).text, /read-only/i);
+  for (const notice of [folderNotice({ state: 'paused', permissionBlock: report }, {}), folderNotice(null, source)]) {
+    assert.equal(notice.blocked, true);
+    assert.match(notice.text, /shrinking is blocked/i);
+  }
+  assert.equal(folderNotice({ state: 'encoding' }, source).text, '');
+});

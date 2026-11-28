@@ -308,6 +308,7 @@ pub trait AutoService: Send + Sync {
     }
     fn pause(&self, id: &str) -> SResult<Value>;
     fn resume(&self, id: &str) -> SResult<Value>;
+    fn resume_folder_wait(&self, id: &str) -> SResult<Value> { self.resume(id) }
     fn set_lanes(&self, id: &str, lanes: &Value) -> SResult<Value>;
 }
 
@@ -332,6 +333,9 @@ impl AutoService for super::service::Service {
     }
     fn resume(&self, id: &str) -> SResult<Value> {
         super::service::Service::resume(self, id)
+    }
+    fn resume_folder_wait(&self, id: &str) -> SResult<Value> {
+        super::service::Service::resume_folder_wait(self, id)
     }
     fn set_lanes(&self, id: &str, l: &Value) -> SResult<Value> {
         super::service::Service::set_lanes(self, id, l)
@@ -571,6 +575,20 @@ impl Auto {
         std::fs::metadata(super::owned::resolve(&p)).is_ok_and(|m| m.is_file() && m.len() > 0)
     }
 
+    fn skip_for_setup(&self, config: &Value, key: &str, clip: &Value) -> bool {
+        super::keep_recent::is_young(config, clip, (self.o.now)())
+            || self.lock().indexes.get(key).is_some_and(|ix| Self::known_in(ix, clip, Some(config)))
+            || self.o.hold_discovered.as_ref().is_some_and(|hold| hold(config, clip))
+    }
+
+    pub(super) fn guided_folder_work(&self, config: &Value) -> SResult<Option<bool>> {
+        self.load_index(config);
+        let key = setup_key(config);
+        super::folder_access::discovery_access(config, |d| {
+            self.skip_for_setup(config, &key, &d.value) || Self::destination_exists(config, &d.value)
+        })
+    }
+
     fn sweep(&self, config: &Value) -> Result<i64, String> {
         self.load_index(config);
         let key = setup_key(config);
@@ -578,14 +596,7 @@ impl Auto {
         *self.sweep_abort.lock().unwrap() = Some(abort.clone());
         let mut new_files = 0;
         let r = (self.o.scanner)(config, &abort, &mut |d: Value| {
-            if super::keep_recent::is_young(config, &d, (self.o.now)()) {
-                return true;
-            }
-            let known = self.lock().indexes.get(&key).is_some_and(|ix| Self::known_in(ix, &d, Some(config)));
-            if known {
-                return true;
-            }
-            if self.o.hold_discovered.as_ref().is_some_and(|h| h(config, &d)) {
+            if self.skip_for_setup(config, &key, &d) {
                 return true;
             }
             if Self::destination_exists(config, &d) {
@@ -759,6 +770,16 @@ impl Auto {
         for (root, entry) in entries {
             let id = entry["jobId"].as_str().unwrap_or("").to_string();
             let job = self.o.service.get(&id).ok().filter(|j| !j.is_null());
+            if let Some(job) = &job {
+                let block = job.get("permissionBlock").filter(|v| !v.is_null());
+                let report = job.get("folderWarning").or(block);
+                let mut s = self.lock();
+                let previous = &s.status["sources"][&root];
+                if report.is_some() || previous["blocked"] == true || previous["folderAccess"]["readOnlyCount"].as_u64().unwrap_or(0) > 0 {
+                    let inventory = report.cloned().or_else(|| super::folder_access::cached(&job["config"]).map(|r| json!(r)));
+                    Self::note_source(&mut s, &root, json!({"blocked":job["state"] == "paused" && block.is_some(), "folderAccess":inventory}));
+                }
+            }
             if job.as_ref().map_or(true, |j| terminal(&j["state"])) {
                 if let Some(j) = &job {
                     self.record_finished_job(j);
@@ -802,9 +823,15 @@ impl Auto {
             let inside = inside || catching.contains(&root);
             if job["state"]=="paused" && job.get("permissionBlock").is_some_and(|v|!v.is_null()) {
                 if !inside || entry["pausedForDevices"] == true {continue;}
-                match self.o.service.resume(&id) {
-                    Ok(_)=>Self::note_source(&mut self.lock(),&root,json!({"blocked":false,"folderAccess":null,"error":null})),
-                    Err(e) if e.is("FOLDERS_NOT_WRITABLE") || e.is("JOB_ACTIVE") || e.is("SPEED_TEST_RUNNING")=>{},
+                match self.o.service.resume_folder_wait(&id) {
+                    Ok(resumed) => Self::note_source(&mut self.lock(), &root, json!({
+                        "blocked":false, "folderAccess":resumed["folderWarning"], "error":null
+                    })),
+                    Err(e) if e.is("FOLDERS_NOT_WRITABLE") => {
+                        let report = super::folder_access::cached(&job["config"]);
+                        Self::note_source(&mut self.lock(), &root, json!({"blocked":true, "folderAccess":report, "error":null}));
+                    }
+                    Err(e) if e.is("JOB_NOT_PAUSED") || e.is("JOB_ACTIVE") || e.is("SPEED_TEST_RUNNING") => {},
                     Err(e)=>return Err(code_of(&e)),
                 }
                 continue;
@@ -856,6 +883,13 @@ impl Auto {
         let ids = |v: &Value| v.as_array().cloned().unwrap_or_default().into_iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>();
         let (held, handled) = (ids(&held), ids(&handled));
         if inside || !active {
+            if inside {
+                for job in self.o.service.live_jobs().unwrap_or_default() {
+                    if job["autoConvert"] != true && job["state"] == "paused" && !job["permissionBlock"].is_null() {
+                        if let Some(id) = job["id"].as_str() { let _ = self.o.service.resume_folder_wait(id); }
+                    }
+                }
+            }
             if held.is_empty() && handled.is_empty() {
                 return;
             }
@@ -999,8 +1033,8 @@ impl Auto {
             };
             if let Some(check)=&self.o.folder_check {
                 let report=check(&config);
-                Self::note_source(&mut self.lock(),&root,json!({"folderAccess":report,"blocked":report.blocked(),"error":null}));
-                if report.blocked() {
+                Self::note_source(&mut self.lock(), &root, json!({"folderAccess":report, "blocked":report.root_blocked, "error":null}));
+                if report.root_blocked {
                     let mut s=self.lock();s.status["pending"].as_object_mut().unwrap().shift_remove(&root);
                     self.defer_catch_up(&mut s,&root);continue;
                 }
