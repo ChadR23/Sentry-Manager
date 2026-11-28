@@ -369,6 +369,32 @@ pub fn ownership_of(v: &Value) -> Own {
     compose(&Own::default(), v, &[])
 }
 
+/// A terminal manifest can mirror its last item's files at job level.
+/// Keep both records in the same durable update, including partial cleanup.
+fn patch_terminal_ownership(mut patch: Patch, manifest: &Manifest, before: &Own, after: &Own) -> Patch {
+    let mut top = ownership_of(&Value::Object(manifest.top.clone()));
+    let mut changed = false;
+    for (key, path) in &before.paths {
+        if top.paths.get(key) != Some(path) || top.arts.get(key) != before.arts.get(key) { continue; }
+        if let (Some(p), Some(a)) = (after.paths.get(key), after.arts.get(key)) {
+            top.paths.insert(key.clone(), p.clone());
+            top.arts.insert(key.clone(), a.clone());
+        } else {
+            top.paths.shift_remove(key);
+            top.arts.shift_remove(key);
+        }
+        if key == "publicationSnapshot" && top.publication == before.publication {
+            top.publication = after.publication.clone();
+        }
+        changed = true;
+    }
+    if changed {
+        patch = patch.set("ownedPaths", Value::Object(top.paths)).set("ownedArtifacts", Value::Object(top.arts))
+            .set("publicationArtifact", top.publication.unwrap_or(Value::Null));
+    }
+    patch
+}
+
 /// A change of a clip's fields: Some sets, None removes (mergeItem).
 pub type Changes = Vec<(&'static str, Option<Value>)>;
 
@@ -1003,7 +1029,10 @@ impl Service {
                 };
                 *c2.lock().unwrap() = Some(comb.clone());
                 if phase.is_none() && (item_scope || !s.is_lead(&item_id)) {
-                    return Some(Patch::new().items(items));
+                    let patch = Patch::new().items(items);
+                    return Some(if item_scope && s.manifest.state().is_terminal() {
+                        patch_terminal_ownership(patch, &s.manifest, &base, &comb)
+                    } else { patch });
                 }
                 let mut p = Patch::new();
                 if let Some(ph) = &phase {

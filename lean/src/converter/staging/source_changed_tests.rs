@@ -50,13 +50,16 @@ fn a_replaced_resized_or_missing_original_says_which() {
     let env = setup("sc-replaced");
     let rec = env.recorder();
     let ino = env.expected.inode.clone();
-    // (the same bytes in another file renamed over it: it cannot reuse the inode)
-    let other = env.root.join("same-bytes.mp4");
-    fs::write(&other, &env.original).unwrap();
+    // Same size, new inode, different bytes: a full comparison must refuse it.
+    let other = env.root.join("other-bytes.mp4");
+    let mut changed = env.original.clone();
+    changed[11] ^= 1;
+    fs::write(&other, &changed).unwrap();
     fs::rename(&other, &env.source).unwrap();
-    let now = fs::symlink_metadata(&env.source).unwrap().ino();
+    assert_ne!(fs::symlink_metadata(&env.source).unwrap().ino().to_string(), ino);
     let e = env.tx.prepare_replacement(&env.op(&rec)).unwrap_err();
-    assert_eq!(detail(&e), format!("source-identity: ino {now} != {ino}"));
+    assert_eq!(detail(&e), "read-exact: sha256 differs from record");
+    assert_eq!(fs::read(&env.source).unwrap(), changed);
 
     let env = setup("sc-resized");
     let rec = env.recorder();

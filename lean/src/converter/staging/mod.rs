@@ -653,7 +653,7 @@ fn matches_identity(m: Option<&Meta>, st: &fs::Metadata) -> bool {
 /// quickExpected: identity and time only, while the proven time is unchanged.
 fn quick_expected(m: &Meta, mtime: Option<&str>, st: Option<&fs::Metadata>) -> Option<Expected> {
     let t = mtime?;
-    if mtime_stamp(st).as_deref() != Some(t) {
+    if !st.is_some_and(|st| matches_stat(Some(m), st)) || mtime_stamp(st).as_deref() != Some(t) {
         return None;
     }
     let mut e = m.expected();
@@ -829,6 +829,7 @@ pub struct Copied {
 }
 
 pub struct CopyArgs<'a> {
+    pub permissions: Option<fs::Permissions>,
     pub expected: Option<(u64, String, Option<(String, String)>)>,
     pub cancel: Option<&'a AtomicBool>,
     pub collision: &'a str,
@@ -992,7 +993,7 @@ impl Tx {
             if !same_path(&canonical_existing(target)?, target) {
                 return Err(refuse(code, CHECK, target, "realpath differs from path (linked folder)"));
             }
-            let mut f = File::open(target)?;
+            let mut f = File::options().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(target)?;
             super::fs_hook::event("read-open", Path::new(target));
             let before = f.metadata()?;
             if !before.is_file() {
@@ -1000,6 +1001,12 @@ impl Tx {
             }
             let (n, sha) = self.hash_open(&mut f, cancel)?;
             let after = f.metadata()?;
+            let named = exact_lstat(target)?;
+            if !same_identity(&link, &before) || !same_identity(&after, &named)
+                || ctime_ns(&before) != ctime_ns(&named) || mtime_ns(&before) != mtime_ns(&named)
+                || !same_path(&canonical_existing(target)?, target) {
+                return Err(refuse(code, CHECK, target, "file or path changed while read"));
+            }
             if !same_identity(&before, &after) || Some(n) != size || Some(before.size()) != size || Some(after.size()) != size || Some(sha.as_str()) != sha256 {
                 let want = size.map(|s| s.to_string()).unwrap_or_else(|| "none".into());
                 let mut d = Vec::new();
@@ -1029,13 +1036,27 @@ impl Tx {
         self.read_exact_file(target, Some(a.size), Some(&a.sha256), code, cancel)
     }
 
-    /// proveCopy: read back in full as the same file it was written as; its proven time.
-    fn prove_copy(&self, target: &str, a: &Artifact, written: &fs::Metadata, code: &str) -> R<Option<String>> {
-        let p = self.read_exact_artifact(target, a, code, None)?;
-        if !same_identity(written, &p.stat) {
-            return Err(txe(code));
+    /// A share can move a file to another disk between journal steps. Only
+    /// its exact, singly linked name and a stable full read of the intended
+    /// bytes authorize using the new identity. Never carry an old time proof.
+    fn prove_single_copy(&self, target: &str, size: u64, sha: &str, code: &str, cancel: Option<&AtomicBool>) -> R<Observed> {
+        let p = self.read_exact_file(target, Some(size), Some(sha), code, cancel)?;
+        if !single_link(&p.stat) {
+            return Err(refuse(code, "read-exact", target, format!("nlink {} != 1", p.stat.nlink())));
         }
-        Ok(proven_mtime(&p))
+        Ok(p)
+    }
+
+    fn expected_at(&self, target: &str, expected: &Expected, code: &str) -> R<Expected> {
+        let Some(st) = lstat_or_none(target)? else { return Ok(expected.clone()) };
+        if st.dev().to_string() == expected.device && st.ino().to_string() == expected.inode {
+            return Ok(expected.clone());
+        }
+        if !owned::valid_expected(expected) {
+            return Err(refuse(code, "read-exact", target, "invalid ownership record"));
+        }
+        let p = self.prove_single_copy(target, expected.size, &expected.sha256, code, None)?;
+        Ok(Expected { device: p.stat.dev().to_string(), inode: p.stat.ino().to_string(), mtime_ns: None, ..expected.clone() })
     }
 
     /// inspectExactFile: hash a plain file at its real path, unchanged while read.
@@ -1209,14 +1230,18 @@ impl Tx {
                     cb(Event::ChunkCommitted, size, &next_sha, &progress)?;
                 }
             }
+            if let Some(permissions) = a.permissions {
+                let _ = tf.set_permissions(permissions);
+            }
             tf.sync_all()?;
             let source_after = sf.metadata()?;
             let source_path_after = exact_lstat(source)?;
-            let target_after = tf.metadata()?;
+            let mut target_after = tf.metadata()?;
             let target_path = exact_lstat(target)?;
             let observed = hex(&h.finalize());
             let bad_expected = match &a.expected {
-                Some((esize, esha, id)) => *esize != size || *esha != observed || id.as_ref().is_some_and(|(d, i)| *d != source_after.dev().to_string() || *i != source_after.ino().to_string()),
+                Some((esize, esha, id)) => *esize != size || *esha != observed || id.as_ref().is_some_and(|(d, i)|
+                    (*d != source_after.dev().to_string() || *i != source_after.ino().to_string()) && !single_link(&source_after)),
                 None => false,
             };
             if !same_identity(&source_link, &source_before)
@@ -1228,10 +1253,13 @@ impl Tx {
                 || source_after.size() != size
                 || target_after.size() != size
                 || !same_identity(&target_before, &target_after)
-                || !same_identity(&target_after, &target_path)
                 || bad_expected
             {
                 return Err(txe(a.failure));
+            }
+            if !same_identity(&target_after, &target_path) {
+                if contained(&self.temp_root, Path::new(target)) { return Err(txe(a.failure)); }
+                target_after = self.prove_single_copy(target, size, &observed, a.failure, a.cancel)?.stat;
             }
             drop(tf);
             drop(sf);
@@ -1250,7 +1278,7 @@ impl Tx {
     /// promoteNoReplace(from, to, collisionCode, { expectedSource, removeSource, identityOnly })
     fn promote_no_replace(&self, from: &str, to: &str, collision: &str, expected: Option<&Expected>, remove_source: bool, identity_only: bool) -> R<(bool, bool)> {
         let r = (|| -> R<(bool, bool)> {
-            let mut e = expected.cloned();
+            let mut e = expected.map(|e| self.expected_at(from, e, "UNSAFE_OWNED_PATH")).transpose()?;
             if let Some(x) = e.as_mut() {
                 if !identity_only {
                     x.mtime_ns = None;
@@ -1376,6 +1404,9 @@ impl Tx {
         if !single_link(&st) {
             d.push(format!("nlink {} != 1{}", st.nlink(), other_names(source, &st)));
         }
+        if d.is_empty() && st.size() == e.size && (st.dev().to_string() != e.device || st.ino().to_string() != e.inode) {
+            return Ok(self.prove_single_copy(source, e.size, &e.sha256, "SOURCE_CHANGED", None)?.stat);
+        }
         if st.dev().to_string() != e.device {
             d.push(format!("dev {} != {}", st.dev(), e.device));
         }
@@ -1394,7 +1425,7 @@ impl Tx {
     fn assert_source_authority(&self, source: &str, e: &SourceAuthority, cancel: Option<&AtomicBool>) -> R<SourceAuthority> {
         validate_source_authority(Some(e))?;
         let o = self.capture_source(source, cancel)?;
-        if o != *e {
+        if o.size != e.size || o.sha256 != e.sha256 {
             let mut d = Vec::new();
             if o.device != e.device {
                 d.push(format!("dev {} != {}", o.device, e.device));
@@ -1410,7 +1441,8 @@ impl Tx {
             }
             return Err(source_changed("source-authority", d.join("; ")));
         }
-        Ok(o)
+        let st = self.assert_source_identity(source, &o)?;
+        Ok(SourceAuthority { device: st.dev().to_string(), inode: st.ino().to_string(), ..o })
     }
 
     /// removeExactOwned(target, metadata, { allowMissing, allowIdentityAlias, guard, mtimeNs })
@@ -1423,7 +1455,9 @@ impl Tx {
             return Err(unsafe_path("remove-exact-owned", target, "lstat ENOENT (missing)"));
         };
         let Some(m) = m else { return Err(unsafe_path("remove-exact-owned", target, "no record")) };
-        if (!allow_identity_alias && m.path != target) || m.nonce.is_empty() || m.state == ArtifactState::Intent || !matches_stat(Some(m), &st) || (!single_link(&st) && m.state != ArtifactState::CleanupPending) {
+        let relocated = m.path == target && m.state != ArtifactState::Intent && !matches_identity(Some(m), &st)
+            && m.size == Some(st.size()) && is_regular(&st) && single_link(&st) && owned::valid_expected(&m.expected());
+        if (!allow_identity_alias && m.path != target) || m.nonce.is_empty() || m.state == ArtifactState::Intent || (!matches_stat(Some(m), &st) && !relocated) || (!single_link(&st) && m.state != ArtifactState::CleanupPending) {
             let mut d = Vec::new();
             if !allow_identity_alias && m.path != target {
                 d.push("record path differs from target".to_string());
@@ -1446,8 +1480,11 @@ impl Tx {
             Ok(_) => return Err(unsafe_path("remove-exact-owned", target, "realpath differs from path (linked folder)")),
             Err(e) => return Err(unsafe_path("remove-exact-owned", target, format!("realpath {}", e.code))),
         }
-        let quick = quick_expected(m, mtime, Some(&st));
-        let expected = quick.clone().unwrap_or_else(|| m.expected());
+        let quick = quick_expected(m, mtime, Some(&st)).filter(|_| !relocated);
+        // The adapter hashes the held inode before its guarded quarantine/unlink.
+        let expected = if relocated {
+            Expected { device: st.dev().to_string(), inode: st.ino().to_string(), ..m.expected() }
+        } else { quick.clone().unwrap_or_else(|| m.expected()) };
         let g = guard.map(|(t, e, io)| owned::Guard { target: Path::new(t), expected: e, identity_only: io });
         let r = owned::remove(Path::new(target), &expected, g, quick.is_some()).map_err(|_| txe("OWNED_CLEANUP_FAILED"))?;
         if r.ownership_mismatch {
@@ -1485,7 +1522,8 @@ impl Tx {
 
     /// replaceOverOriginal: rename(2) the verified copy over the original's name.
     fn replace_over_original(&self, candidate: &str, source: &str, backup: &str, expected_candidate: &Expected, identity_only: bool, e: &SourceAuthority) -> R<()> {
-        let r = owned::replace_over(Path::new(candidate), Path::new(source), Path::new(backup), expected_candidate, &e.device, &e.inode, identity_only).map_err(|_| txe("REPLACEMENT_FAILED"))?;
+        let ec = self.expected_at(candidate, expected_candidate, "PUBLICATION_ARTIFACT_CHANGED")?;
+        let r = owned::replace_over(Path::new(candidate), Path::new(source), Path::new(backup), &ec, &e.device, &e.inode, identity_only).map_err(|_| txe("REPLACEMENT_FAILED"))?;
         if !r.replaced {
             return Err(if r.ownership_mismatch { unsafe_path("replace-over-original", candidate, &r.reason) } else { txe("REPLACEMENT_FAILED") });
         }
@@ -1513,6 +1551,24 @@ impl Tx {
         Ok(true)
     }
 
+    /// The mover can split an already journaled backup hard link before
+    /// the candidate is renamed. Both names must still hold the original.
+    fn drop_split_backup(&self, source: &str, backup: &str, bm: &Meta, e: &SourceAuthority) -> R<bool> {
+        if bm.path != backup || bm.state == ArtifactState::Intent || bm.size != Some(e.size) || bm.sha256.as_ref() != Some(&e.sha256) {
+            return Ok(false);
+        }
+        let (Some(src), Some(bak)) = (lstat_or_none(source)?, lstat_or_none(backup)?) else { return Ok(false) };
+        if !is_regular(&src) || !single_link(&src) || !is_regular(&bak) || !single_link(&bak) || src.size() != e.size
+            || same_identity(&src, &bak) || !same_path(&canonical_existing(source)?, source) {
+            return Ok(false);
+        }
+        // A final encode can have the same size too. Only a proven original
+        // takes this branch, and it is held and verified again at removal.
+        let Ok(p) = self.prove_single_copy(source, e.size, &e.sha256, "ROLLBACK_FAILED", None) else { return Ok(false) };
+        let guard = Expected { device: p.stat.dev().to_string(), inode: p.stat.ino().to_string(), ..e.expected() };
+        self.remove_exact_owned(backup, Some(bm), false, false, Some((source, &guard, false)), None)
+    }
+
     fn before_replace(&self, source: &str, root: &str, e: &SourceAuthority, job: &str, item: &str) -> R<()> {
         if let Some(f) = &self.before_replace_original {
             f(&BeforeReplace { source, source_root: root, sha256: &e.sha256, size: e.size, job_id: job, item_id: item }).map_err(|_| txe("CHECKSUM_RECORD_FAILED"))?;
@@ -1523,10 +1579,13 @@ impl Tx {
     /// backupRecord: the inode now at the backup name is the verified original (no read).
     fn backup_record(&self, backup: &str, nonce: &str, source_removed: bool, e: &SourceAuthority, proven_mtime: Option<&str>) -> R<(Meta, Option<String>)> {
         let state = if source_removed { ArtifactState::Owned } else { ArtifactState::CleanupPending };
-        let st = exact_lstat(backup).ok();
-        let Some(st) = st.filter(|st| is_regular(st) && st.dev().to_string() == e.device && st.ino().to_string() == e.inode && st.size() == e.size) else {
+        let mut st = exact_lstat(backup)?;
+        if !is_regular(&st) || st.size() != e.size {
             return Err(txe("REPLACEMENT_FAILED"));
-        };
+        }
+        if st.dev().to_string() != e.device || st.ino().to_string() != e.inode {
+            st = self.prove_single_copy(backup, e.size, &e.sha256, "REPLACEMENT_FAILED", None)?.stat;
+        }
         let m = mtime_stamp(Some(&st));
         let mt = if m.is_some() && m.as_deref() == proven_mtime { m } else { None };
         Ok((artifact_metadata(backup, nonce, state, Some(&st), Some(&e.sha256), e.size, None), mt))
@@ -1538,14 +1597,13 @@ impl Tx {
         if !is_regular(&st) {
             return Err(txe("FINAL_VALIDATION_FAILED"));
         }
-        if let Some(ef) = expected_final {
-            if !matches_identity(Some(ef), &st) {
-                return Err(txe("FINAL_VALIDATION_FAILED"));
-            }
+        let relocated = expected_final.is_some_and(|ef| !matches_identity(Some(ef), &st));
+        if relocated && (!single_link(&st) || !same_path(&canonical_existing(final_path)?, final_path)) {
+            return Err(txe("FINAL_VALIDATION_FAILED"));
         }
         let fe = Expected { device: st.dev().to_string(), inode: st.ino().to_string(), size: a.size, sha256: a.sha256.clone(), mtime_ns: None };
         let fm = Meta { path: final_path.into(), nonce: String::new(), state: ArtifactState::Owned, size: Some(a.size), sha256: Some(a.sha256.clone()), device: Some(fe.device.clone()), inode: Some(fe.inode.clone()), journal: None };
-        let quick = if expected_final.is_some() { quick_expected(&fm, final_mtime, Some(&st)) } else { None };
+        let quick = if expected_final.is_some() && !relocated { quick_expected(&fm, final_mtime, Some(&st)) } else { None };
         match &quick {
             Some(q) => self.remove_exact_owned(backup, m, false, false, Some((final_path, q, true)), backup_mtime),
             None => self.remove_exact_owned(backup, m, false, false, Some((final_path, &fe, false)), backup_mtime),
@@ -1668,8 +1726,39 @@ impl Tx {
         false
     }
 
+    /// Rebind the journal before resuming a share copy or moving it into
+    /// unlink quarantine. A restart can then identify the quarantined inode.
+    fn bind_relocated_copy(&self, op: &Op, target: &str, field: &str, paths: &Paths, arts: &mut Artifacts, a: Option<&Artifact>, code: &str) -> R<()> {
+        let m = arts.get(field).ok_or_else(|| unsafe_path("rebind-copy", target, "missing ownership record"))?;
+        let Some(st) = lstat_or_none(target)? else { return Ok(()) };
+        if m.state == ArtifactState::Intent || matches_identity(Some(m), &st) { return Ok(()); }
+        if m.path != target || m.nonce.is_empty() || !owned::valid_expected(&m.expected()) {
+            return Err(refuse(code, "rebind-copy", target, "invalid ownership record"));
+        }
+        let size = st.size();
+        let digest = if m.state == ArtifactState::Writing {
+            a.filter(|a| a.size == size).map(|a| a.sha256.as_str()).or_else(||
+                m.journal.as_ref()?.committed.as_ref().filter(|c| c.size == size).map(|c| c.sha256.as_str()))
+        } else {
+            m.sha256.as_deref().filter(|_| m.size == Some(size))
+        }.ok_or_else(|| refuse(code, "rebind-copy", target, "size has no complete artifact or committed digest"))?;
+        let proof = self.prove_single_copy(target, size, digest, code, op.cancel)?;
+        let complete = a.is_some_and(|a| a.size == size && a.sha256 == digest);
+        let state = if complete && m.state == ArtifactState::Writing { ArtifactState::Owned } else { m.state.clone() };
+        let journal = (state == ArtifactState::Writing).then(|| Journal { committed: Some(Mark { size, sha256: digest.into() }), pending: None });
+        let bound = artifact_metadata(target, &m.nonce, state, Some(&proof.stat), Some(digest), size, journal);
+        let mut updated = arts.clone();
+        updated.insert(field.into(), bound);
+        persist(op, Snap::new(paths, &updated).step("share-copy-relocated").artifact(a))?;
+        *arts = updated;
+        Ok(())
+    }
+
     /// removeShareCopy: an interrupted copy of the verified snapshot on the share.
     fn remove_share_copy(&self, target: &str, m: &Meta, a: Option<&Artifact>) -> R<bool> {
+        if m.path != target || m.nonce.is_empty() {
+            return Err(unsafe_path("remove-share-copy", target, "record path differs or nonce is empty"));
+        }
         let Some(st) = lstat_or_none(target)? else {
             if m.state != ArtifactState::Intent {
                 self.remove_quarantined(target, Some(m), None);
@@ -1695,6 +1784,8 @@ impl Tx {
                     return Err(unsafe_path("remove-share-copy", target, format!("size {size} != 0 (state intent)")));
                 }
                 empty_sha()
+            } else if let Some(mark) = m.journal.as_ref().and_then(|j| j.committed.as_ref()).filter(|c| c.size == size && matches_identity(Some(m), &st)) {
+                mark.sha256.clone()
             } else {
                 let Some(a) = a.filter(|a| matches_identity(Some(m), &st) && size <= a.size) else {
                     let d = match a {

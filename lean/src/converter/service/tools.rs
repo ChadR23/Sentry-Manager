@@ -188,6 +188,16 @@ pub fn inspect_recovery(m: &Manifest, cancel: &AtomicBool) -> CResult<Facts> {
         artifact: artifact.as_ref(),
     };
     let mut facts = recovery::inspect(&s, Some(cancel)).map_err(CError::from)?;
+    if copying && facts.partial_exists && facts.final_valid && !facts.partial_final_proven {
+        if let (Some(partial), Some(dest), Some(a), Some(meta)) = (dp.as_deref(), separate_final.as_deref(), artifact.as_ref(),
+            item.and_then(|i| i.get("ownedArtifacts")).and_then(|v| v.get("destinationPartial")).and_then(|v| serde_json::from_value(v.clone()).ok())) {
+            use std::os::unix::fs::MetadataExt;
+            let st = std::fs::symlink_metadata(partial)?;
+            facts.partial_final_proven = st.is_file() && st.nlink() == 1
+                && recovery::recorded_copy_pair(partial, &meta, &std::fs::symlink_metadata(dest)?, a)
+                && recovery::matches_digest(partial, a, Some(cancel))?;
+        }
+    }
     if replacing && source.is_none() {
         // exists(replacing ? owned.replacementCandidate : ...) with no final to check
         facts.candidate_exists = rc.as_deref().is_some_and(|p| std::fs::symlink_metadata(p).is_ok());

@@ -11,6 +11,32 @@ use super::super::recovery::{self, Facts};
 use super::super::staging::Op;
 
 impl Service {
+    /// Run before interrupted workers and automatic discovery start. Summaries
+    /// carry all owned paths, so jobs without leftovers need no manifest load.
+    pub(crate) fn sweep_terminal_leftovers(&self, summaries: &[Arc<Value>]) -> SResult<()> {
+        use std::collections::{HashMap, HashSet};
+        let mut owners = HashMap::new();
+        let mut shared = HashSet::new();
+        for job in summaries {
+            let id = job["id"].as_str().unwrap_or("");
+            let names: Vec<_> = job["ownedPaths"].as_object().into_iter().flat_map(|p| p.values()).filter_map(Value::as_str).collect();
+            for key in staging::hold_keys(&names) {
+                if owners.insert(key.clone(), id).is_some_and(|other| other != id) { shared.insert(key); }
+            }
+        }
+        self.mutate(|| {
+            for job in summaries {
+                if !matches!(job["state"].as_str(), Some("completed" | "failed")) || obj(job.get("ownedPaths")).is_empty() { continue; }
+                let rt = self.ensure_runtime(job["id"].as_str().unwrap())?;
+                if !rt.lock().running && rt.manifest().state().is_terminal() {
+                    self.sweep_finished_leftovers(&rt, Some(&shared))?;
+                }
+                self.forget_finished(&rt);
+            }
+            Ok(())
+        })
+    }
+
     fn inspect_with_signal(&self, rt: &Runtime) -> impl FnMut(&Manifest) -> Result<Facts, CError> + '_ {
         let signal = rt.signal();
         let tools = self.0.o.tools.clone();
@@ -192,22 +218,41 @@ impl Service {
     }
 
     /// sweepFinishedLeftovers
-    fn sweep_finished_leftovers(&self, rt: &Arc<Runtime>) -> SResult<()> {
+    fn sweep_finished_leftovers(&self, rt: &Arc<Runtime>, terminal: Option<&std::collections::HashSet<PathBuf>>) -> SResult<()> {
         let private = ["stagedSource", "encodedCandidate", "publicationSnapshot"];
         let finished: Vec<Value> = rt.manifest().items.iter().filter(|e| {
             let p = obj(e.get("ownedPaths"));
-            e.state().is_terminal() && !p.is_empty() && p.keys().all(|k| private.contains(&k.as_str()))
+            e.state().is_terminal() && !p.is_empty() && if terminal.is_some() {
+                matches!(e.str("resultCode"), Some("cleanup-pending" | "completed-cleanup-pending"))
+            } else { p.keys().all(|k| private.contains(&k.as_str())) }
         }).map(|e| e.value().clone()).collect();
         for item in finished {
             let id = item["id"].as_str().unwrap();
             let own = ownership_of(&item);
+            let names: Vec<_> = own.paths.values().filter_map(Value::as_str).collect();
+            let _held = self.0.o.staging.hold(&names);
+            if let Some(shared) = terminal {
+                if staging::hold_keys(&names).iter().any(|p| shared.contains(p)) || own.arts.values().any(|m|
+                    m["state"] == "intent" && !m["path"].as_str().is_some_and(|p| std::fs::symlink_metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound))) {
+                    continue;
+                }
+            }
             let cleanup = self.cleanup_ownership(rt, id, Some(&own), None, true);
             if cleanup.cleaned {
                 let mut changes: Changes = vec![("ownedPaths", Some(json!({}))), ("ownedArtifacts", Some(json!({}))), ("publicationArtifact", None)];
                 if item["resultCode"] == "completed-cleanup-pending" {
                     changes.push(("resultCode", Some(json!(if item["eligibleVideo"] == json!(false) { "copied" } else { "converted" }))));
+                } else if item["resultCode"] == "cleanup-pending" {
+                    changes.push(("resultCode", item["failure"].get("code").cloned()));
                 }
-                self.item_patch(rt, id, changes, vec![])?;
+                changes.push(("replacementPhase", None));
+                self.update(rt, |s| {
+                    let patch = Patch::new().items(with_item(&s.manifest, id, |i| merge(i, &changes)));
+                    Some(if terminal.is_some() {
+                        let before = s.manifest.item(id).map(|i| ownership_of(i.value())).unwrap_or_default();
+                        patch_terminal_ownership(patch, &s.manifest, &before, &Own::default())
+                    } else { patch })
+                })?;
             }
             Self::set_ownership(rt, id, None);
         }
@@ -295,7 +340,7 @@ impl Service {
         if action_of(&rec).as_deref() != Some("manual-intervention") && !self.release_interrupted_items(rt, recovered.str("activeItemId"))? {
             return Ok(());
         }
-        self.sweep_finished_leftovers(rt)?;
+        self.sweep_finished_leftovers(rt, None)?;
         if action_of(&rec).as_deref() == Some("resume-network") {
             let interrupted = recovered.active_item().map(|i| i.value().clone());
             let role = rec.get("pathRole").and_then(Value::as_str).unwrap_or("discovery").to_string();

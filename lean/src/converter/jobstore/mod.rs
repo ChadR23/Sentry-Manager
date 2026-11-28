@@ -1274,7 +1274,7 @@ impl JobStore {
                 if facts.candidate_exists || facts.source_exists || facts.backup_exists {
                     return "manual-intervention";
                 }
-                if facts.partial_exists && facts.final_exists && facts.final_valid && facts.partial_final_same_identity {
+                if facts.partial_exists && facts.final_exists && facts.final_valid && facts.partial_final_proven {
                     return "finalize-copy";
                 }
                 match (facts.partial_exists, facts.final_exists, facts.final_valid) {

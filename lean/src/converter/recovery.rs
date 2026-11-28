@@ -19,7 +19,7 @@ pub struct Facts {
     pub source_exists: bool,
     pub backup_exists: bool,
     pub final_valid: bool,
-    pub partial_final_same_identity: bool,
+    pub partial_final_proven: bool,
 }
 
 fn table(phase: &ReplacementPhase) -> Option<&'static [(&'static str, &'static str)]> {
@@ -69,6 +69,17 @@ fn exists(p: Option<&str>) -> std::io::Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
+}
+
+/// A separate destination was published if it still names the recorded
+/// partial inode, or the record says promotion already happened. Identical
+/// bytes at a pre-existing destination alone do not establish that history.
+pub fn recorded_copy_pair(partial: &str, m: &super::staging::Meta, dest: &std::fs::Metadata, a: &Artifact) -> bool {
+    use super::jobstore::states::ArtifactState;
+    use std::os::unix::fs::MetadataExt;
+    m.path == partial && !m.nonce.is_empty() && m.size == Some(a.size) && m.sha256.as_deref() == Some(&a.sha256)
+        && matches!(m.state, ArtifactState::Owned | ArtifactState::CleanupPending) && dest.is_file() && dest.nlink() == 1
+        && (m.state == ArtifactState::CleanupPending || (m.device == Some(dest.dev().to_string()) && m.inode == Some(dest.ino().to_string())))
 }
 
 /// matchesDigest: the file holds exactly the artifact's bytes.
@@ -138,7 +149,7 @@ pub fn inspect(s: &ReplaceState, cancel: Option<&AtomicBool>) -> std::io::Result
         same = a.is_file() && b.is_file() && a.dev() == b.dev() && a.ino() == b.ino();
     }
     let _ = Path::new(s.source);
-    Ok(Facts { candidate_exists, partial_exists, final_exists, source_exists, backup_exists, final_valid, partial_final_same_identity: same })
+    Ok(Facts { candidate_exists, partial_exists, final_exists, source_exists, backup_exists, final_valid, partial_final_proven: same })
 }
 
 #[cfg(test)]

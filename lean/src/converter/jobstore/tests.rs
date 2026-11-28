@@ -484,7 +484,7 @@ fn parity_with_node_store() {
         let theirs = node(&["recover", a.to_str().unwrap(), facts_file.to_str().unwrap()]);
         let store = quiet(&b);
         let g = |k: &str| f.get(k) == Some(&json!(true));
-        let typed = Facts { candidate_exists: g("candidateExists"), partial_exists: g("partialExists"), final_exists: g("finalExists"), source_exists: g("sourceExists"), backup_exists: g("backupExists"), final_valid: g("finalValid"), partial_final_same_identity: g("partialFinalSameIdentity") };
+        let typed = Facts { candidate_exists: g("candidateExists"), partial_exists: g("partialExists"), final_exists: g("finalExists"), source_exists: g("sourceExists"), backup_exists: g("backupExists"), final_valid: g("finalValid"), partial_final_proven: g("partialFinalSameIdentity") };
         for id in ids {
             let mine = match store.recover(id, &mut |_| Ok(typed), false) {
                 Ok(m) => m.to_json(),

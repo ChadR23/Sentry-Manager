@@ -48,7 +48,8 @@ fn snapshot_cleanup(tx: &Tx, a: Option<&Artifact>, paths: &mut Paths, arts: &mut
 impl Tx {
     /// completeRecoveredCopy: an interrupted copy of the snapshot finished from its journal, then proven.
     fn complete_recovered_copy(&self, op: &Op, artifact: &Artifact, target: &str, field: &str, prefix: &str, paths: &Paths, arts: &mut Artifacts, failure: &str) -> R<Meta> {
-        let mut m = arts.get(field).cloned().ok_or_else(|| unsafe_path("complete-recovered-copy", target, format!("no {field} record")))?;
+        self.bind_relocated_copy(op, target, field, paths, arts, Some(artifact), failure)?;
+        let mut m = arts[field].clone();
         if let Some(journal) = m.journal.clone() {
             let s_reconciled = format!("{prefix}-resume-reconciled");
             let s_pending = format!("{prefix}-chunk-pending");
@@ -59,7 +60,7 @@ impl Tx {
                 self.copy_exclusive(
                     &artifact.path,
                     target,
-                    CopyArgs { expected: Some((artifact.size, artifact.sha256.clone(), None)), cancel: op.cancel, collision: "PARTIAL_COLLISION", failure, resume: Some((&mc, &journal)), hooks: Hooks { created: false, pending: true, committed: true, reconciled: true } },
+                    CopyArgs { permissions: None, expected: Some((artifact.size, artifact.sha256.clone(), None)), cancel: op.cancel, collision: "PARTIAL_COLLISION", failure, resume: Some((&mc, &journal)), hooks: Hooks { created: false, pending: true, committed: true, reconciled: true } },
                     &mut |ev, size, sha, _| {
                         if ev == Event::ChunkPending {
                             let f = ar.get_mut(field).unwrap();
@@ -124,7 +125,8 @@ impl Tx {
         let pa = persisted.as_ref();
 
         // A stop between linking the backup name and renaming the copy over the original.
-        if self.drop_backup_alias(&source, &backup)? {
+        if self.drop_backup_alias(&source, &backup)? || (action == "backup-original" && arts.get("replacementBackup")
+            .map(|bm| self.drop_split_backup(&source, &backup, bm, &expected)).transpose()?.unwrap_or(false)) {
             if let Some(b) = arts.get("replacementBackup").cloned() {
                 arts.insert("replacementBackup".into(), artifact_metadata(&backup, &b.nonce, ArtifactState::Intent, None, None, 0, None));
                 persist(op, Snap::new(&paths, &arts).step("recovery-backup-alias-dropped").artifact(pa))?;
@@ -133,11 +135,12 @@ impl Tx {
         // A stop between moving the original to its backup name and recording it.
         if action != "backup-original" && arts.get("replacementBackup").is_some_and(|m| m.state == ArtifactState::Intent) {
             if let Some(bst) = lstat_or_none(&backup)? {
-                if !is_regular(&bst) || !single_link(&bst) || bst.dev().to_string() != expected.device || bst.ino().to_string() != expected.inode || bst.size() != expected.size {
+                if !is_regular(&bst) || !single_link(&bst) || bst.size() != expected.size {
                     return Err(txe("MANUAL_INTERVENTION"));
                 }
                 let n = arts["replacementBackup"].nonce.clone();
-                arts.insert("replacementBackup".into(), artifact_metadata(&backup, &n, ArtifactState::Owned, Some(&bst), Some(&expected.sha256), expected.size, None));
+                let (bm, _) = self.backup_record(&backup, &n, true, &expected, None)?;
+                arts.insert("replacementBackup".into(), bm);
                 persist(op, Snap::new(&paths, &arts).step("recovery-backup-adopted").artifact(pa))?;
             }
         }
@@ -147,7 +150,7 @@ impl Tx {
                 if lstat_or_none(&backup)?.is_some() {
                     return Err(txe("MANUAL_INTERVENTION"));
                 }
-                self.assert_source_authority(&source, &expected, op.cancel)?;
+                let expected = self.assert_source_authority(&source, &expected, op.cancel)?;
                 if lstat_or_none(&source)?.is_none() || lstat_or_none(&backup)?.is_some() {
                     return Err(txe("MANUAL_INTERVENTION"));
                 }
@@ -182,6 +185,7 @@ impl Tx {
                 }
                 let (_, removed) = self.promote_no_replace(&source, &backup, "REPLACEMENT_COLLISION", Some(&expected.expected()), true, false)?;
                 let o = self.inspect_exact_file(&backup, op.cancel, "REPLACEMENT_FAILED")?;
+                if o.size != expected.size || o.sha256 != expected.sha256 { return Err(txe("REPLACEMENT_FAILED")); }
                 let n = arts["replacementBackup"].nonce.clone();
                 arts.insert("replacementBackup".into(), artifact_metadata(&backup, &n, if removed { ArtifactState::Owned } else { ArtifactState::CleanupPending }, Some(&o.stat), Some(&o.sha256), o.size, None));
                 persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::OriginalBackedUp).artifact(pa))?;
@@ -325,10 +329,10 @@ impl Tx {
                 if lstat_or_none(&candidate)?.is_some() {
                     let fst = exact_lstat(&source)?;
                     let cst = exact_lstat(&candidate)?;
-                    if !same_identity(&fst, &cst) {
-                        return Err(txe("MANUAL_INTERVENTION"));
-                    }
                     let cm = arts.get("replacementCandidate").cloned().ok_or_else(|| unsafe_path("recover-finish-replacement", &candidate, "no replacementCandidate record"))?;
+                    if !same_identity(&fst, &cst) {
+                        self.prove_single_copy(&candidate, artifact.size, &artifact.sha256, "MANUAL_INTERVENTION", op.cancel)?;
+                    }
                     self.read_exact_meta(&candidate, &cm, "UNSAFE_OWNED_PATH")?;
                     match self.remove_exact_owned(&candidate, Some(&cm), false, false, None, None) {
                         Ok(_) => {
@@ -360,6 +364,7 @@ impl Tx {
             codec: op.codec.clone(),
             source: Some(source.into()),
             source_root: Some(root.into()),
+            expected_source: op.expected_source.clone(),
             owned_paths: paths.clone(),
             owned_artifacts: arts.clone(),
             publication_artifact: Some(artifact.clone()),
@@ -429,7 +434,11 @@ impl Tx {
             if let Ok(pst) = exact_lstat(&expected_partial) {
                 let fst = exact_lstat(&dest)?;
                 if !same_identity(&pst, &fst) {
-                    return Err(txe("MANUAL_INTERVENTION"));
+                    if !super::super::recovery::recorded_copy_pair(&expected_partial, &arts["destinationPartial"], &fst, &artifact) {
+                        return Err(txe("MANUAL_INTERVENTION"));
+                    }
+                    self.prove_single_copy(&dest, artifact.size, &artifact.sha256, "MANUAL_INTERVENTION", op.cancel)?;
+                    self.prove_single_copy(&expected_partial, artifact.size, &artifact.sha256, "MANUAL_INTERVENTION", op.cancel)?;
                 }
                 // the partial name is a second link of the verified destination
                 arts.get_mut("destinationPartial").unwrap().state = ArtifactState::CleanupPending;
@@ -555,6 +564,10 @@ impl Tx {
                 continue;
             }
             if field == "publicationSnapshot" {
+                if pending.iter().any(|k| k == "destinationPartial" || k == "replacementCandidate") {
+                    pending.push(field.into());
+                    continue;
+                }
                 let Some(a) = artifact.as_ref().filter(|a| same_path(&target, &a.path)) else {
                     return Err(unsafe_path("cleanup-owned", &target, if artifact.is_none() { "publicationSnapshot: no publication artifact" } else { "publicationSnapshot path differs from the artifact" }));
                 };
@@ -601,11 +614,15 @@ impl Tx {
                     return Err(unsafe_path("cleanup-owned", &target, format!("{field}: name differs from the recorded replacement name")));
                 }
             }
-            let res = if field == "destinationPartial" || field == "replacementCandidate" { self.remove_share_copy(&target, &m, artifact.as_ref()) } else { self.remove_exact_owned(&target, Some(&m), true, false, None, None) };
+            let res = if field == "destinationPartial" || field == "replacementCandidate" {
+                self.bind_relocated_copy(op, &target, field, &paths, &mut arts, artifact.as_ref(), "UNSAFE_OWNED_PATH")?;
+                self.remove_share_copy(&target, &arts[field], artifact.as_ref())
+            } else { self.remove_exact_owned(&target, Some(&m), true, false, None, None) };
             match res {
                 Ok(_) => {}
                 Err(e) if e.tx && e.code == "OWNED_CLEANUP_FAILED" => {
-                    arts.get_mut(field).unwrap().state = ArtifactState::CleanupPending;
+                    let retained = arts.get_mut(field).unwrap();
+                    if retained.state == ArtifactState::Owned { retained.state = ArtifactState::CleanupPending; }
                     pending.push(field.into());
                 }
                 Err(e) => return Err(e),

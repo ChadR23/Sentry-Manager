@@ -14,6 +14,9 @@ pub(super) static OWNED_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(
 const JOB: &str = "job-1";
 const ITEM: &str = "item-000001";
 
+#[path = "mover_tests.rs"]
+mod mover_tests;
+
 #[test]
 fn memory_bound_cleaned_publication_releases_its_capability() {
     let e = setup("cleaned-capability");
@@ -777,7 +780,7 @@ fn readonly_publication_create_reports_permission_without_artifact_change() {
     let env = setup("readonly");
     fs::set_permissions(&env.footage,fs::Permissions::from_mode(0o555)).unwrap();
     let target=env.footage.join("candidate");
-    let error=env.tx.copy_exclusive(&env.artifact.path,&s(&target),CopyArgs {expected:Some((env.artifact.size,env.artifact.sha256.clone(),None)),cancel:None,collision:"REPLACEMENT_COLLISION",failure:"PUBLICATION_ARTIFACT_CHANGED",resume:None,hooks:Hooks::default()},&mut |_,_,_,_|Ok(())).err().unwrap();
+    let error=env.tx.copy_exclusive(&env.artifact.path,&s(&target),CopyArgs {permissions:None,expected:Some((env.artifact.size,env.artifact.sha256.clone(),None)),cancel:None,collision:"REPLACEMENT_COLLISION",failure:"PUBLICATION_ARTIFACT_CHANGED",resume:None,hooks:Hooks::default()},&mut |_,_,_,_|Ok(())).err().unwrap();
     assert_eq!(error.code,"FOLDER_NOT_WRITABLE","{error:?}");
     assert!(!target.exists());
     assert_eq!(fs::read(&env.source).unwrap(),env.original);

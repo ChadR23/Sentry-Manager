@@ -273,6 +273,7 @@ impl Converter {
         }
         let summaries = self.store.summaries()?;
         self.sweep_unreferenced_snapshot_folders(&summaries);
+        self.service.sweep_terminal_leftovers(&summaries).map_err(|e| CError::new("RECOVERY_FAILED", e.to_string()))?;
         let mut recovered = Vec::new();
         for m in summaries.iter() {
             if !ACTIVE_RECOVERY_STATES.contains(&m["state"].as_str().unwrap_or("")) {

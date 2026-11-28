@@ -103,6 +103,7 @@ impl Tx {
             let rc = resume_copy.clone();
             let rj = rc.as_ref().and_then(|m| m.journal.clone());
             let args = CopyArgs {
+                permissions: None,
                 expected: expected_t,
                 cancel: op.cancel,
                 collision: "PARTIAL_COLLISION",
@@ -271,7 +272,7 @@ impl Tx {
                 self.copy_exclusive(
                     &source,
                     &partial,
-                    CopyArgs { expected: None, cancel: op.cancel, collision: "PARTIAL_COLLISION", failure: "DESTINATION_WRITE_FAILED", resume: None, hooks: Hooks { created: true, pending: true, committed: true, reconciled: false } },
+                    CopyArgs { permissions: None, expected: None, cancel: op.cancel, collision: "PARTIAL_COLLISION", failure: "DESTINATION_WRITE_FAILED", resume: None, hooks: Hooks { created: true, pending: true, committed: true, reconciled: false } },
                     &mut |ev, size, sha, st| {
                         match ev {
                             Event::Created => {
@@ -388,7 +389,7 @@ impl Tx {
                 self.copy_exclusive(
                     &artifact.path,
                     &partial,
-                    CopyArgs { expected: Some((artifact.size, artifact.sha256.clone(), None)), cancel: op.cancel, collision: "PARTIAL_COLLISION", failure: "PUBLICATION_ARTIFACT_CHANGED", resume: None, hooks: Hooks { created: true, pending: true, committed: true, reconciled: false } },
+                    CopyArgs { permissions: None, expected: Some((artifact.size, artifact.sha256.clone(), None)), cancel: op.cancel, collision: "PARTIAL_COLLISION", failure: "PUBLICATION_ARTIFACT_CHANGED", resume: None, hooks: Hooks { created: true, pending: true, committed: true, reconciled: false } },
                     &mut |ev, size, sha, st| match ev {
                         Event::Created => {
                             let n = ar["destinationPartial"].nonce.clone();
@@ -518,19 +519,25 @@ impl Tx {
             persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::RollbackStarted).artifact(persisted.as_ref()))?;
             // stopped between linking the backup and the rename over the original
             self.drop_backup_alias(&source, &backup)?;
+            if let (Some(bm), Some(e)) = (arts.get("replacementBackup"), op.expected_source.as_ref()) {
+                self.drop_split_backup(&source, &backup, bm, e)?;
+            }
             let ss = lstat_or_none(&source)?;
             let bs = lstat_or_none(&backup)?;
             if let (Some(ss), Some(_)) = (&ss, &bs) {
-                let cm = arts.get("replacementCandidate").cloned();
-                if cm.is_none() || !matches_stat(cm.as_ref(), ss) {
-                    return Err(txe("ROLLBACK_FAILED"));
-                }
-                if let Err(e) = self.remove_exact_owned(&source, cm.as_ref(), false, true, None, None) {
-                    if e.tx && e.code == "OWNED_CLEANUP_FAILED" {
-                        arts.get_mut("replacementCandidate").unwrap().state = ArtifactState::CleanupPending;
+                let bm = arts.get("replacementBackup").filter(|m| m.path == backup && m.state != ArtifactState::Intent)
+                    .ok_or_else(|| txe("ROLLBACK_FAILED"))?;
+                let be = self.expected_at(&backup, &bm.expected(), "ROLLBACK_FAILED")?;
+                let mut cm = arts.get("replacementCandidate").cloned().ok_or_else(|| txe("ROLLBACK_FAILED"))?;
+                if !matches_stat(Some(&cm), ss) {
+                    if cm.path != candidate || cm.size != Some(artifact.size) || cm.sha256.as_ref() != Some(&artifact.sha256) {
+                        return Err(txe("ROLLBACK_FAILED"));
                     }
-                    return Err(e);
+                    let proof = self.prove_single_copy(&source, artifact.size, &artifact.sha256, "ROLLBACK_FAILED", None)?;
+                    cm.device = Some(proof.stat.dev().to_string());
+                    cm.inode = Some(proof.stat.ino().to_string());
                 }
+                self.remove_exact_owned(&source, Some(&cm), false, true, Some((&backup, &be, false)), None)?;
             }
             if lstat_or_none(&backup)?.is_some() {
                 if lstat_or_none(&source)?.is_some() {
@@ -603,9 +610,10 @@ impl Tx {
             paths.shift_remove(field);
             arts.shift_remove(field);
         } else {
-            let m = arts.get(field).cloned();
-            match m.as_ref().map(|m| self.remove_share_copy(target, m, Some(artifact))) {
-                Some(Ok(_)) => {
+            let removed = self.bind_relocated_copy(op, target, field, paths, arts, Some(artifact), "UNSAFE_OWNED_PATH")
+                .and_then(|_| self.remove_share_copy(target, &arts[field], Some(artifact)));
+            match removed {
+                Ok(_) => {
                     paths.shift_remove(field);
                     arts.shift_remove(field);
                 }
@@ -629,6 +637,7 @@ impl Tx {
 
     /// prepareReplacement: outside the save slot, the snapshot copied beside the original as TEMP-<codec>-<name>.
     pub fn prepare_replacement(&self, op: &Op) -> R<Prepared> {
+        use std::os::unix::fs::PermissionsExt;
         let job = validate_id(&op.job_id)?;
         let item = validate_id(&op.item_id)?;
         let artifact = norm_artifact(op.publication_artifact.as_ref())?;
@@ -654,23 +663,21 @@ impl Tx {
         arts.insert("replacementCandidate".into(), artifact_metadata(&candidate, &cn, ArtifactState::Intent, None, None, 0, None));
         persist(op, Snap::new(&paths, &arts).step("replacement-prepare").artifact(Some(&artifact)))?;
         let r = (|| -> R<Option<String>> {
-            let copied = {
+            {
                 let (pr, ar, cand, art) = (&paths, &mut arts, &candidate, &artifact);
                 self.copy_exclusive(
                     &artifact.path,
                     &candidate,
-                    CopyArgs { expected: Some((artifact.size, artifact.sha256.clone(), None)), cancel: op.cancel, collision: "REPLACEMENT_COLLISION", failure: "PUBLICATION_ARTIFACT_CHANGED", resume: None, hooks: Hooks { created: true, ..Default::default() } },
+                    CopyArgs { permissions: Some(fs::Permissions::from_mode(original.mode() & 0o777)), expected: Some((artifact.size, artifact.sha256.clone(), None)), cancel: op.cancel, collision: "REPLACEMENT_COLLISION", failure: "PUBLICATION_ARTIFACT_CHANGED", resume: None, hooks: Hooks { created: true, ..Default::default() } },
                     &mut |_, _, sha, st| {
                         ar.insert("replacementCandidate".into(), artifact_metadata(cand, &cn, ArtifactState::Writing, Some(st), Some(sha), 0, Some(journal_mark(0, sha))));
                         persist(op, Snap::new(pr, ar).step("replacement-candidate-writing").artifact(Some(art)))
                     },
                 )?
             };
-            // the replacement keeps the original's permissions (the candidate was created 0600)
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&candidate, fs::Permissions::from_mode(original.mode() & 0o777));
-            let mt = self.prove_copy(&candidate, &artifact, &copied.stat, "PUBLICATION_ARTIFACT_CHANGED")?;
-            arts.insert("replacementCandidate".into(), artifact_metadata(&candidate, &cn, ArtifactState::Owned, Some(&copied.stat), Some(&artifact.sha256), artifact.size, None));
+            let proof = self.prove_single_copy(&candidate, artifact.size, &artifact.sha256, "PUBLICATION_ARTIFACT_CHANGED", op.cancel)?;
+            let mt = proven_mtime(&proof);
+            arts.insert("replacementCandidate".into(), artifact_metadata(&candidate, &cn, ArtifactState::Owned, Some(&proof.stat), Some(&artifact.sha256), artifact.size, None));
             persist(op, Snap::new(&paths, &arts).step("replacement-candidate-owned").artifact(Some(&artifact)))?;
             Ok(mt)
         })();
@@ -720,19 +727,19 @@ impl Tx {
         let r = (|| -> R<Saved> {
             // still the same original, and the same complete copy beside it
             self.assert_source_contained(Some(source), Some(source_root))?;
-            self.assert_source_identity(source, &expected)?;
-            let cst = lstat_or_none(&candidate)?;
-            let Some(cst) = cst.filter(|c| is_regular(c) && matches_stat(arts.get("replacementCandidate"), c)) else {
+            let src = self.assert_source_identity(source, &expected)?;
+            let expected = SourceAuthority { device: src.dev().to_string(), inode: src.ino().to_string(), ..expected.clone() };
+            let Some(cst) = lstat_or_none(&candidate)?.filter(|c| is_regular(c) && single_link(c) && c.size() == artifact.size) else {
                 return Err(txe("PUBLICATION_ARTIFACT_CHANGED"));
             };
             let mut quick = quick_expected(&arts["replacementCandidate"], p.candidate_mtime_ns.as_deref(), Some(&cst));
-            if quick.is_none() && p.candidate_mtime_ns.is_some() {
+            if quick.is_none() && (p.candidate_mtime_ns.is_some() || !matches_identity(arts.get("replacementCandidate"), &cst)) {
                 // changed since prepare read it back: read in full again before the original is touched
-                let proof = self.read_exact_artifact(&candidate, artifact, "PUBLICATION_ARTIFACT_CHANGED", None)?;
-                if !same_identity(&cst, &proof.stat) {
-                    return Err(txe("PUBLICATION_ARTIFACT_CHANGED"));
-                }
-                quick = quick_expected(&arts["replacementCandidate"], proven_mtime(&proof).as_deref(), Some(&proof.stat));
+                let proof = self.prove_single_copy(&candidate, artifact.size, &artifact.sha256, "PUBLICATION_ARTIFACT_CHANGED", op.cancel)?;
+                let cm = arts.get_mut("replacementCandidate").unwrap();
+                cm.device = Some(proof.stat.dev().to_string());
+                cm.inode = Some(proof.stat.ino().to_string());
+                quick = quick_expected(cm, proven_mtime(&proof).as_deref(), Some(&proof.stat));
             }
             let proven_backup = mtime_stamp(lstat_or_none(source)?.as_ref());
             self.before_replace(source, source_root, &expected, &p.job_id, &p.item_id)?;
@@ -798,6 +805,7 @@ impl Tx {
                 codec: p.codec.clone(),
                 source: Some(source.clone()),
                 source_root: Some(source_root.clone()),
+                expected_source: Some(expected.clone()),
                 owned_paths: paths.clone(),
                 owned_artifacts: arts.clone(),
                 publication_artifact: Some(artifact.clone()),
@@ -874,20 +882,21 @@ impl Tx {
         arts.insert("destinationPartial".into(), artifact_metadata(&partial, &pn, ArtifactState::Intent, None, None, 0, None));
         persist(op, Snap::new(&paths, &arts).step("separate-prepare").artifact(Some(&artifact)))?;
         let r = (|| -> R<Option<String>> {
-            let copied = {
+            {
                 let (pr, ar, part, art) = (&paths, &mut arts, &partial, &artifact);
                 self.copy_exclusive(
                     &artifact.path,
                     &partial,
-                    CopyArgs { expected: Some((artifact.size, artifact.sha256.clone(), None)), cancel: op.cancel, collision: "PARTIAL_COLLISION", failure: "PUBLICATION_ARTIFACT_CHANGED", resume: None, hooks: Hooks { created: true, ..Default::default() } },
+                    CopyArgs { permissions: None, expected: Some((artifact.size, artifact.sha256.clone(), None)), cancel: op.cancel, collision: "PARTIAL_COLLISION", failure: "PUBLICATION_ARTIFACT_CHANGED", resume: None, hooks: Hooks { created: true, ..Default::default() } },
                     &mut |_, _, sha, st| {
                         ar.insert("destinationPartial".into(), artifact_metadata(part, &pn, ArtifactState::Writing, Some(st), Some(sha), 0, Some(journal_mark(0, sha))));
                         persist(op, Snap::new(pr, ar).step("separate-partial-writing").artifact(Some(art)))
                     },
                 )?
             };
-            let mt = self.prove_copy(&partial, &artifact, &copied.stat, "PUBLICATION_ARTIFACT_CHANGED")?;
-            arts.insert("destinationPartial".into(), artifact_metadata(&partial, &pn, ArtifactState::Owned, Some(&copied.stat), Some(&artifact.sha256), artifact.size, None));
+            let proof = self.prove_single_copy(&partial, artifact.size, &artifact.sha256, "PUBLICATION_ARTIFACT_CHANGED", op.cancel)?;
+            let mt = proven_mtime(&proof);
+            arts.insert("destinationPartial".into(), artifact_metadata(&partial, &pn, ArtifactState::Owned, Some(&proof.stat), Some(&artifact.sha256), artifact.size, None));
             persist(op, Snap::new(&paths, &arts).step("separate-partial-owned").artifact(Some(&artifact)))?;
             Ok(mt)
         })();
