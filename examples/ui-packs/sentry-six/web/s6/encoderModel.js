@@ -12,6 +12,7 @@ export const KEPT_REASONS = {
   'no-savings': 'Shrinking did not save space. Kept as recorded.',
   'too-short': 'Kept as recorded (too short to shrink).',
   'source-no-playable-frames': 'The recording has no complete frame to play. Kept as recorded.',
+  'source-missing-reference-frames': "Some frames in the recording point to a picture that is missing, so they can't be played. Kept as recorded.",
   'source-duplicate-timestamp': 'Two recorded frames share one timestamp. Kept as recorded.',
   'source-nal-boundary': 'Recorded video data extends beyond its frame boundary. Kept as recorded.',
   'source-unfinished-sample-table': 'The recorded sample table is missing bytes. Kept as recorded.',

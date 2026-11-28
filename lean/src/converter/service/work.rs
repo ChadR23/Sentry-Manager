@@ -1309,7 +1309,7 @@ impl Service {
         let r = self.convert(rt, &item, &source, staged_own.as_ref(), expected.as_ref(), &inspected, &mut timing, lane);
         if let Err(e) = r {
             let check_original = e.is("ENCODER_CRASHED") || e.is("ENCODED_NO_VIDEO_SAMPLES");
-            if check_original || e.is("SOURCE_NO_PLAYABLE_FRAMES") || e.is("KEEP_ORIGINAL") {
+            if check_original || e.is("SOURCE_NO_PLAYABLE_FRAMES") || e.is("SOURCE_MISSING_REFERENCE_FRAMES") || e.is("KEEP_ORIGINAL") {
                 // The child or verifier may already have released the candidate.
                 // Reconcile its recorded reservation and staged input before keeping the original.
                 let recorded = rt.lock().item(&id).map(|i| ownership_of(&i));
@@ -1329,6 +1329,24 @@ impl Service {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// Only a short source/output comparison can be explained by unplayable
+    /// source samples. Probe/container and decode/container mismatches still
+    /// describe the candidate. Always decode the recording, including when
+    /// the encoder worked from a private staged copy.
+    fn missing_reference_frames(&self, original: &str, details: &Value, packets: usize, expected: Option<&SourceAuthority>, signal: &Arc<AtomicBool>) -> SResult<bool> {
+        let (Some(src), Some(out)) = (details["sourceFrames"].as_u64(), details["outputFrames"].as_u64()) else { return Ok(false) };
+        if details["kind"] != "source-output" || out == 0 || out >= src { return Ok(false); }
+        let decoded = self.0.o.tools.decode_source_frames(original, Some(packets as u64), signal).map_err(Fail::from)?;
+        if decoded != Some(out) { return Ok(false); }
+        // Bind the proof to the version that was encoded when we captured it.
+        if let Some(e) = expected {
+            let captured = self.0.o.staging.capture_source(original, Some(signal));
+            if signal.load(Ordering::SeqCst) { return Err(service_error("CANCELLED")); }
+            if !captured.is_ok_and(|o| o.size == e.size && o.sha256 == e.sha256) { return Ok(false); }
+        }
+        Ok(true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1571,6 +1589,11 @@ impl Service {
                     Self::compose_into(rt, &id, &adopted_own);
                     let detail = (verdict.reason == Some(super::super::verifier::reasons::SOURCE_CHANGED)).then(|| verify_source_detail(&details));
                     return Err(Fail { code: Some(verdict.reason.unwrap_or("VERIFICATION_FAILED").into()), retryable: verdict.retryable, detail, ..Default::default() });
+                }
+                if verdict.reason == Some(super::super::verifier::reasons::FRAME_COUNT_MISMATCH)
+                    && self.missing_reference_frames(&item.s("sourcePath"), &details, timeline.samples.len(), expected, &signal)? {
+                    return Err(Fail { detail: Some(format!("The original decoded {} frames from {} samples, matching the output.", details["outputFrames"], timeline.samples.len())),
+                        ..service_error("SOURCE_MISSING_REFERENCE_FRAMES") });
                 }
                 if retry.0 {
                     size_retry += 1;

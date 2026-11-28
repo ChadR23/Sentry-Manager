@@ -56,4 +56,6 @@ mod parity_tests;
 #[cfg(test)]
 mod size_target_tests;
 #[cfg(test)]
+mod missing_reference_tests;
+#[cfg(test)]
 pub mod testutil;

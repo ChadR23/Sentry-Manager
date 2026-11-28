@@ -150,6 +150,18 @@ test('no playable frames are kept with a precise reason; empty encoder output st
   assert.equal(trimmed.kept,25); assert.equal(trimmed.attention,1);
 });
 
+test('missing reference frames have a kept reason and genuine GPU frame loss stays actionable', () => {
+  const code = 'source-missing-reference-frames';
+  const failed = {state:'failed',resultCode:'frame-count-mismatch',encoder:'hevc_nvenc'};
+  const result = model.clipFailures({items:[{state:'skipped',resultCode:code,relativePath:'RecentClips/generated.mp4'},failed]});
+  assert.equal(result.kept, 1);
+  assert.equal(result.attention, 1);
+  assert.equal(result.items[0].reason, "Some frames in the recording point to a picture that is missing, so they can't be played. Kept as recorded.");
+  const trimmed = model.clipFailures({itemKeptCounts:{[code]:25},itemStateCounts:{failed:1}});
+  assert.equal(trimmed.kept, 25);
+  assert.equal(trimmed.attention, 1);
+});
+
 test('server-tested local lanes retain the guided level, manual and node lanes stay custom', () => {
   const c = {...simple, deviceSettingsSource:'test', lanes:[{device:'gpu-a',concurrency:4},{device:'gpu-b',concurrency:2}]};
   assert.equal(model.levelOf(c), 'med');

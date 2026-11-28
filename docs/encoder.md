@@ -217,6 +217,17 @@ list of frames qualifies as `source-no-playable-frames`. **The recording has no
 complete frame to play. Kept as recorded.** Genuine short clips with multiple
 playable frames continue through normal shrinking and verification.
 
+If a recording loses a keyframe, later frames can refer to a picture the
+decoder never received. When verification finds fewer output frames than
+source samples, the converter decodes the original before retrying an encoder.
+If the decoder reads every video packet without errors and produces exactly
+the output frame count, the clip appears under **kept as recorded** with
+the reason `source-missing-reference-frames`. Replace mode keeps the original
+in place. Separate-folder mode copies its original bytes. If the original
+decodes more frames, or the proof is incomplete, the clip remains a
+frame-count mismatch with its usual retry options. The next eligible automatic
+run rechecks previous failures and remembers a proven kept clip.
+
 If the encoder crashes, fails without writing output, or produces an MP4 with
 no video samples, the converter also checks the original. It removes the
 partial candidate and uses the same proof before it can keep the recording.
